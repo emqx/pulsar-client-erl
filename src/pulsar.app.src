@@ -1,0 +1,7 @@
+{application,pulsar,
+             [{description,"A Erlang client library for Apache Pulsar"},
+              {vsn,"git"},
+              {modules,[]},
+              {registered,[pulsar_sup]},
+              {applications,[kernel,stdlib,crc32cer]},
+              {mod,{pulsar_app,[]}}]}.

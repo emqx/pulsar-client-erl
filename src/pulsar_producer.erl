@@ -39,6 +39,9 @@ callback_mode() -> [state_functions].
 
 -define(TIMEOUT, 60000).
 
+-define(MAX_QUE_ID, 4294836225).
+-define(MAX_SEQ_ID, 18445618199572250625).
+
 -define(TCPOPTIONS, [
     binary,
     {packet,    raw},
@@ -186,20 +189,23 @@ send_batch_payload(Messages, #state{sequence_id = SequenceId,
                                     producer_id = ProducerId,
                                     producer_name = ProducerName,
                                     sock = Sock}) ->
+    Len = length(Messages),
     Send = #commandsend{
         producer_id = ProducerId,
         sequence_id = SequenceId,
-        num_messages = length(Messages)
+        num_messages = Len
     },
-    
-    BatchMessage = batch_message(Messages),
     Metadata = #messagemetadata{
         producer_name = ProducerName,
         sequence_id = SequenceId,
         publish_time = erlang:system_time(millisecond),
-        num_messages_in_batch = length(Messages)
+        num_messages_in_batch = Len
     },
-    gen_tcp:send(Sock, ?FRAME:send(Send, Metadata, BatchMessage)).
+    {Metadata1, BatchMessage} = case batch_message(Messages) of
+        {Key, Val} -> {Metadata#messagemetadata{partition_key = Key}, Val};
+        Val -> Val
+    end,
+    gen_tcp:send(Sock, ?FRAME:send(Send, Metadata1, BatchMessage)).
 
 start_keepalive() ->
     erlang:send_after(30*1000, self(), ping).
@@ -219,11 +225,11 @@ create_producer(Sock, Topic, RequestId, ProducerId) ->
     gen_tcp:send(Sock, ?FRAME:create_producer(Producer)).
 
 batch_message(Messages) when length(Messages) =:= 1 ->
-    [Message] = Messages,
-    Message;
+    [#{key := Key, value := Val}] = Messages,
+    {Key, Val};
 batch_message(Messages) ->
-    lists:foldl(fun(Message, Acc) ->
-        Metadata = #singlemessagemetadata{payload_size = size(Message)},
+    lists:foldl(fun(#{key := Key, value := Message}, Acc) ->
+        Metadata = #singlemessagemetadata{payload_size = size(Message), partition_key = Key},
         MetadataBin = iolist_to_binary('PulsarApi_pb':encode_singlemessagemetadata(Metadata)),
         MetadataBinSize = size(MetadataBin),
         <<Acc/binary, MetadataBinSize:32, MetadataBin/binary, Message/binary>>
@@ -271,12 +277,12 @@ format_url("pulsar://" ++ Url) ->
 format_url(_) ->
     {"127.0.0.1", 6650}.
 
-next_request_id(State = #state{request_id = 65535}) ->
+next_request_id(State = #state{request_id = ?MAX_QUE_ID}) ->
     State#state{request_id = 1};
 next_request_id(State = #state{request_id = RequestId}) ->
     State#state{request_id = RequestId+1}.
 
-next_sequence_id(State = #state{sequence_id = 4294836225}) ->
+next_sequence_id(State = #state{sequence_id = ?MAX_SEQ_ID}) ->
     State#state{sequence_id = 1};
 next_sequence_id(State = #state{sequence_id = SequenceId}) ->
     State#state{sequence_id = SequenceId+1}.

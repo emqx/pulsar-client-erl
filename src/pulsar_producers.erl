@@ -87,24 +87,24 @@ pick_next_alive(Workers, Partition, Partitions, Tried) ->
 is_alive(Pid) -> is_pid(Pid) andalso is_process_alive(Pid).
 
 lookup_producer(#{workers := Workers}, Partition) ->
-  lookup_producer(Workers, Partition);
+    lookup_producer(Workers, Partition);
 lookup_producer(Workers, Partition) when is_map(Workers) ->
-  maps:get(Partition, Workers);
+    maps:get(Partition, Workers);
 lookup_producer(Workers, Partition) ->
-  [{Partition, Pid}] = ets:lookup(Workers, Partition),
-  Pid.
+    [{Partition, Pid}] = ets:lookup(Workers, Partition),
+    Pid.
 
-pick_partition(0, _, _) ->
-  0;
 pick_partition(Partitions, random, _) ->
-  rand:uniform(Partitions) - 1;
+    rand:uniform(Partitions) - 1;
 pick_partition(Partitions, roundrobin, _) ->
-  Partition = case get(pulsar_roundrobin) of
-                undefined -> 0;
-                Number    -> Number
-              end,
-  _ = put(pulsar_roundrobin, (Partition + 1) rem Partitions),
-  Partition.
+    Partition = case get(pulsar_roundrobin) of
+        undefined -> 0;
+        Number    -> Number
+    end,
+    _ = put(pulsar_roundrobin, (Partition + 1) rem Partitions),
+    Partition;
+pick_partition(Partitions, first_key_dispatch, [#{key := Key} | _]) ->
+  erlang_murmurhash:murmurhash3_32(Key) rem Partitions.
 
 init([ClientId, Topic, ProducerOpts]) ->
     erlang:process_flag(trap_exit, true),
@@ -134,7 +134,7 @@ handle_info(timeout, State = #state{client_id = ClientId,
             NewProducers = lists:foldl(fun({PartitionTopic, Partition}, Acc) ->
                 start_producer(Pid, Partition, PartitionTopic, ProducerOpts, Workers, Acc)
             end, Producers, PartitionTopics),
-            {noreply, State#state{partitions = Partitions, producers = NewProducers}};
+            {noreply, State#state{partitions = length(PartitionTopics), producers = NewProducers}};
         {error, Reason} ->
             {stop, Reason, State}
     end;

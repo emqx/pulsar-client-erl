@@ -8,7 +8,7 @@ A Erlang client library for Apache Pulsar
 ```
 {ok, Pid} = pulsar:ensure_supervised_client('client1', [{"127.0.0.1", 6650}], #{}),
 {ok, Producers} = pulsar:ensure_supervised_producers('client1', "persistent://public/default/turtle", #{}),
-ok = pulsar:send(Producers, [<<"hello">>]),
+ok = pulsar:send(Producers, [#{key => "key", value => <<"hello">>}]),
 ok = pulsar:stop_and_delete_supervised_producers(Producers),
 ok = pulsar:stop_and_delete_supervised_client('client1').
 ```
@@ -17,7 +17,7 @@ ok = pulsar:stop_and_delete_supervised_client('client1').
 ```
 {ok, Pid} = pulsar:ensure_supervised_client('client1', [{"127.0.0.1", 6650}], #{}),
 {ok, Producers} = pulsar:ensure_supervised_producers('client1', "persistent://public/default/test", #{}),
-ok = pulsar:send_sync(Producers, [<<"hello">>], 5000),
+ok = pulsar:send_sync(Producers, [#{key => "key", value => <<"hello">>}], 5000),
 ok = pulsar:stop_and_delete_supervised_producers(Producers),
 ok = pulsar:stop_and_delete_supervised_client('client1').
 ```

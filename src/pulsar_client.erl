@@ -61,7 +61,7 @@ lookup_topic(Pid, PartitionTopic) ->
 %%--------------------------------------------------------------------
 init([Servers, Opts]) ->
     State = #state{servers = Servers, opts = Opts},
-    case try_connect(Servers) of
+    case get_sock(Servers, undefined) of
         error ->
             {error, fail_to_connect_pulser_server};
         Sock ->
@@ -71,16 +71,32 @@ init([Servers, Opts]) ->
 handle_call({get_topic_metadata, Topic, Call}, From, State = #state{sock = Sock,
                                                                     request_id = RequestId,
                                                                     requests = Reqs,
-                                                                    producers = Producers}) ->
-    Metadata = topic_metadata(Sock, Topic, RequestId),
-    {noreply, State#state{requests = maps:put(RequestId, {From, Metadata}, Reqs),
-                          producers = maps:put(Topic, Call, Producers)}};
+                                                                    producers = Producers,
+                                                                    servers = Servers}) ->
+    case get_sock(Servers, Sock) of
+        error ->
+            log_error("Servers: ~p down", [Servers]),
+            {noreply, State};
+        Sock1 ->
+            Metadata = topic_metadata(Sock1, Topic, RequestId),
+            {noreply, State#state{requests = maps:put(RequestId, {From, Metadata}, Reqs),
+                                  producers = maps:put(Topic, Call, Producers),
+                                  sock = Sock1}}
+    end;
 
 handle_call({lookup_topic, PartitionTopic}, From, State = #state{sock = Sock,
                                                                  request_id = RequestId,
-                                                                 requests = Reqs}) ->
-    LookupTopic = lookup_topic(Sock, PartitionTopic, RequestId),
-    {noreply, State#state{requests = maps:put(RequestId, {From, LookupTopic}, Reqs)}};
+                                                                 requests = Reqs,
+                                                                 servers = Servers}) ->
+    case get_sock(Servers, Sock) of
+        error ->
+            log_error("Servers: ~p down", [Servers]),
+            {noreply, State};
+        Sock1 ->
+            LookupTopic = lookup_topic(Sock1, PartitionTopic, RequestId),
+            {noreply, State#state{requests = maps:put(RequestId, {From, LookupTopic}, Reqs), sock = Sock1}}
+    end;
+
 
 handle_call(_Req, _From, State) ->
     {reply, ok, State, hibernate}.
@@ -91,12 +107,11 @@ handle_cast(_Req, State) ->
 handle_info({tcp, _, Bin}, State) ->
     handle_response(pulsar_protocol_frame:parse(Bin), State);
 
-handle_info(ping, State = #state{sock = Sock}) ->
-    ping(Sock),
-    {noreply, State, hibernate};
+handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
+    {noreply, State#state{sock = undefined}, hibernate};
 
 handle_info(_Info, State) ->
-    log_error("Receive unknown message:~p~n", [_Info]),
+    log_error("Pulsar_client Receive unknown message:~p~n", [_Info]),
     {noreply, State, hibernate}.
 
 terminate(_Reason, #state{}) ->
@@ -106,7 +121,6 @@ code_change(_, State, _) ->
     {ok, State}.
 
 handle_response(#commandconnected{}, State) ->
-    start_keepalive(),
     {noreply, next_request_id(State), hibernate};
 
 handle_response(#commandpartitionedtopicmetadataresponse{partitions = Partitions,
@@ -131,12 +145,7 @@ handle_response(#commandlookuptopicresponse{brokerserviceurl = BrokerServiceUrl,
             {noreply, State, hibernate}
     end;
 
-handle_response(#commandping{}, State = #state{sock = Sock}) ->
-    pong(Sock),
-    {noreply, State, hibernate};
-
-handle_response(#commandpong{}, State) ->
-    start_keepalive(),
+handle_response(#commandping{}, State) ->
     {noreply, State, hibernate};
 
 handle_response(_Info, State) ->
@@ -147,6 +156,12 @@ tune_buffer(Sock) ->
     {ok, [{recbuf, RecBuf}, {sndbuf, SndBuf}]}
         = inet:getopts(Sock, [recbuf, sndbuf]),
     inet:setopts(Sock, [{buffer, max(RecBuf, SndBuf)}]).
+
+
+get_sock(Servers, undefined) ->
+    try_connect(Servers);
+get_sock(_Servers, Sock) ->
+    Sock.
 
 try_connect([]) ->
     error;
@@ -182,16 +197,9 @@ lookup_topic(Sock, Topic, RequestId) ->
     gen_tcp:send(Sock, pulsar_protocol_frame:lookup_topic(LookupTopic)),
     LookupTopic.
 
-start_keepalive() ->
-    erlang:send_after(30*1000, self(), ping).
-
-ping(Sock) ->
-    gen_tcp:send(Sock, pulsar_protocol_frame:ping()).
-
-pong(Sock) ->
-    gen_tcp:send(Sock, pulsar_protocol_frame:pong()).
-
 next_request_id(State = #state{request_id = 65535}) ->
     State#state{request_id = 1};
 next_request_id(State = #state{request_id = RequestId}) ->
     State#state{request_id = RequestId+1}.
+
+log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).

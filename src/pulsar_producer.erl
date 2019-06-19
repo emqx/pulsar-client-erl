@@ -193,7 +193,6 @@ send_batch_payload(Messages, #state{sequence_id = SequenceId,
     },
     
     BatchMessage = batch_message(Messages),
-
     Metadata = #messagemetadata{
         producer_name = ProducerName,
         sequence_id = SequenceId,

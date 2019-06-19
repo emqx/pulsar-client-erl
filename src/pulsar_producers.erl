@@ -132,24 +132,34 @@ handle_info(timeout, State = #state{client_id = ClientId,
             {_, Partitions} = pulsar_client:get_topic_metadata(Pid, Topic),
             PartitionTopics = create_partition_topic(Topic, Partitions),
             NewProducers = lists:foldl(fun({PartitionTopic, Partition}, Acc) ->
-                BrokerServiceUrl = pulsar_client:lookup_topic(Pid, PartitionTopic),
-                {ok, Producer} = pulsar_producer:start_link(PartitionTopic, BrokerServiceUrl, ProducerOpts),
-                ets:insert(Workers, {Partition, Producer}),
-                maps:put(Producer, {Partition, PartitionTopics}, Acc)
+                start_producer(Pid, Partition, PartitionTopic, ProducerOpts, Workers, Acc)
             end, Producers, PartitionTopics),
             {noreply, State#state{partitions = Partitions, producers = NewProducers}};
         {error, Reason} ->
             {stop, Reason, State}
     end;
 
-handle_info({'EXIT', Pid, closed_producer}, State = #state{workers = Workers, producers = Producers}) ->
+handle_info({'EXIT', Pid, _Error}, State = #state{workers = Workers, producers = Producers}) ->
     case maps:get(Pid, Producers, undefined) of
         undefined ->
             log_error("Not find Pid:~p producer", [Pid]),
             {noreply, State};
-        {Partition, _PartitionTopics} ->
+        {Partition, PartitionTopic} ->
             ets:delete(Workers, Partition),
+            self() ! {lookup_topic, Partition, PartitionTopic},
             {noreply, State#state{producers = maps:remove(Pid, Producers)}}
+    end;
+
+handle_info({lookup_topic, Partition, PartitionTopic}, State = #state{client_id = ClientId,
+                                                                       producers = Producers,
+                                                                       workers = Workers,
+                                                                       producer_opts = ProducerOpts}) ->
+    case pulsar_client_sup:find_client(ClientId) of
+        {ok, Pid} ->
+            NewProducers = start_producer(Pid, Partition, PartitionTopic, ProducerOpts, Workers, Producers),
+            {noreply, State#state{producers = NewProducers}};
+        {error, Reason} ->
+            {stop, Reason, State}
     end;
 
 handle_info(_Info, State) ->
@@ -172,3 +182,9 @@ get_name(Topic) ->
     list_to_atom(lists:concat(["pulsar_producers_", Topic])).
 
 log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).
+
+start_producer(Pid, Partition, PartitionTopic, ProducerOpts, Workers, Producers) ->
+    BrokerServiceUrl = pulsar_client:lookup_topic(Pid, PartitionTopic),
+    {ok, Producer} = pulsar_producer:start_link(PartitionTopic, BrokerServiceUrl, ProducerOpts),
+    ets:insert(Workers, {Partition, Producer}),
+    maps:put(Producer, {Partition, PartitionTopic}, Producers).

@@ -12,17 +12,19 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 
--module(pulsar_client_sup).
+-module(pulsar_producers_sup).
 
 -behaviour(supervisor).
 
 -export([start_link/0, init/1]).
 
--export([ensure_present/3, ensure_absence/1, find_client/1]).
+-export([ensure_present/3, ensure_absence/2]).
 
 -define(SUPERVISOR, ?MODULE).
+-define(WORKER_ID(ClientId, Topic), {ClientId, Topic}).
 
-start_link() -> supervisor:start_link({local, ?SUPERVISOR}, ?MODULE, []).
+start_link() ->
+  supervisor:start_link({local, ?SUPERVISOR}, ?MODULE, []).
 
 init([]) ->
   SupFlags = #{strategy => one_for_one,
@@ -33,37 +35,26 @@ init([]) ->
   {ok, {SupFlags, Children}}.
 
 %% ensure a client started under supervisor
-ensure_present(ClientId, Hosts, Opts) ->
-  ChildSpec = child_spec(ClientId, Hosts, Opts),
+ensure_present(ClientId, Topic, ProducerOpts) ->
+  ChildSpec = child_spec(ClientId, Topic, ProducerOpts),
   case supervisor:start_child(?SUPERVISOR, ChildSpec) of
     {ok, Pid} -> {ok, Pid};
     {error, {already_started, Pid}} -> {ok, Pid};
-    {error, already_present} -> {error, client_not_running}
+    {error, already_present} -> {error, not_running}
   end.
 
 %% ensure client stopped and deleted under supervisor
-ensure_absence(ClientId) ->
-  case supervisor:terminate_child(?SUPERVISOR, ClientId) of
-    ok -> ok = supervisor:delete_child(?SUPERVISOR, ClientId);
+ensure_absence(ClientId, Topic) ->
+  Id = ?WORKER_ID(ClientId, Topic),
+  case supervisor:terminate_child(?SUPERVISOR, Id) of
+    ok -> ok = supervisor:delete_child(?SUPERVISOR, Id);
     {error, not_found} -> ok
   end.
 
-%% find client pid from client id
-find_client(ClientId) ->
-  Children = supervisor:which_children(?SUPERVISOR),
-  case lists:keyfind(ClientId, 1, Children) of
-    {ClientId, Client, _, _} when is_pid(Client) ->
-      {ok, Client};
-    {ClientId, Restarting, _, _} ->
-      {error, Restarting};
-    false ->
-      erlang:error({no_such_client, ClientId})
-  end.
-
-child_spec(ClientId, Hosts, Opts) ->
-  #{id => ClientId,
-    start => {pulsar_client, start_link, [ClientId, Hosts, Opts]},
+child_spec(ClientId, Topic, ProducerOpts) ->
+  #{id => ?WORKER_ID(ClientId, Topic),
+    start => {pulsar_producers, start_link, [ClientId, Topic, ProducerOpts]},
     restart => transient,
     type => worker,
-    modules => [pulsar_client]
+    modules => [pulsar_producer]
    }.

@@ -13,3 +13,12 @@
 %% limitations under the License.
 
 -module(pulsar_app).
+
+-behaviour(application).
+
+-export([start/2, stop/1]).
+
+start(_, _) ->
+  pulsar_sup:start_link().
+
+stop(_) -> ok.

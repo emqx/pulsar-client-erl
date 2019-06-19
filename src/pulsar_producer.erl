@@ -20,6 +20,7 @@
 
 -export([ send/2
         , send_sync/2
+        , send_sync/3
         ]).
 
 -export([ start_link/3

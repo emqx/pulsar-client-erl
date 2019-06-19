@@ -3,5 +3,5 @@
               {vsn,"git"},
               {modules,[]},
               {registered,[pulsar_sup]},
-              {applications,[kernel,stdlib,crc32cer]},
+              {applications,[kernel,stdlib,crc32cer,protobuffs]},
               {mod,{pulsar_app,[]}}]}.

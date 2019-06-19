@@ -94,6 +94,8 @@ lookup_producer(Workers, Partition) ->
   [{Partition, Pid}] = ets:lookup(Workers, Partition),
   Pid.
 
+pick_partition(0, _, _) ->
+  0;
 pick_partition(Partitions, random, _) ->
   rand:uniform(Partitions) - 1;
 pick_partition(Partitions, roundrobin, _) ->
@@ -160,7 +162,7 @@ code_change(_OldVsn, State, _Extra) ->
 terminate(_, _St) -> ok.
 
 create_partition_topic(Topic, 0) ->
-    [Topic];
+    [{Topic, 0}];
 create_partition_topic(Topic, Partitions) ->
     lists:map(fun(Partition) ->
         {lists:concat([Topic, "-partition-", Partition]), Partition}

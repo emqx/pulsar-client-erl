@@ -96,7 +96,7 @@ handle_info(ping, State = #state{sock = Sock}) ->
     {noreply, State, hibernate};
 
 handle_info(_Info, State) ->
-    io:format("---~p~n", [_Info]),
+    log_error("Receive unknown message:~p~n", [_Info]),
     {noreply, State, hibernate}.
 
 terminate(_Reason, #state{}) ->
@@ -139,8 +139,8 @@ handle_response(#commandpong{}, State) ->
     start_keepalive(),
     {noreply, State, hibernate};
 
-handle_response(A, State) ->
-    io:format("client: handle_response:~p~n", [A]),
+handle_response(_Info, State) ->
+    log_error("handle_response unknown message:~p~n", [_Info]),
     {noreply, State, hibernate}.
 
 tune_buffer(Sock) ->

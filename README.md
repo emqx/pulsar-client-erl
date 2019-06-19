@@ -15,7 +15,7 @@ ok = pulsar:stop_and_delete_supervised_client('client1').
 ### Sync Produce
 
 ```
-{ok, Pid} = pulsar:ensure_supervised_client('client1', [{"127.0.0.1", 6650}], []),
+{ok, Pid} = pulsar:ensure_supervised_client('client1', [{"127.0.0.1", 6650}], #{}),
 {ok, Producers} = pulsar:ensure_supervised_producers('client1', "persistent://public/default/test", #{}),
 ok = pulsar:send_sync(Producers, [<<"hello">>], 5000),
 ok = pulsar:stop_and_delete_supervised_producers(Producers),

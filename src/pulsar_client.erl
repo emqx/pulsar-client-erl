@@ -29,13 +29,11 @@
         , code_change/3
         ]).
 
--export([ get_topic_metadata/2
+-export ([ get_topic_metadata/2
          , lookup_topic/2
-        ]).
+         ]).
 
--export([get_status/1]).
-
--record(state, {sock, servers, opts, producers = #{}, request_id = 0, requests = #{}, from}).
+-record(state, {sock, servers, opts, producers = #{}, request_id = 0, requests = #{}}).
 
 -define(TIMEOUT, 60000).
 
@@ -58,8 +56,6 @@ get_topic_metadata(Pid, Topic) ->
 lookup_topic(Pid, PartitionTopic) ->
     gen_server:call(Pid, {lookup_topic, PartitionTopic}).
 
-get_status(Pid) ->
-    gen_server:call(Pid, get_status, 5000).
 %%--------------------------------------------------------------------
 %% gen_server callback
 %%--------------------------------------------------------------------
@@ -101,14 +97,6 @@ handle_call({lookup_topic, PartitionTopic}, From, State = #state{sock = Sock,
             {noreply, State#state{requests = maps:put(RequestId, {From, LookupTopic}, Reqs), sock = Sock1}}
     end;
 
-handle_call(get_status, From, State = #state{sock = Sock, servers = Servers}) ->
-    case get_sock(Servers, Sock) of
-        error ->
-            {reply, false, State};
-        Sock1 ->
-            {noreply, State#state{from = From, sock = Sock1}}
-    end;
-
 
 handle_call(_Req, _From, State) ->
     {reply, ok, State, hibernate}.
@@ -132,13 +120,8 @@ terminate(_Reason, #state{}) ->
 code_change(_, State, _) ->
     {ok, State}.
 
-handle_response(#commandconnected{}, State = #state{from = undefined}) ->
+handle_response(#commandconnected{}, State) ->
     {noreply, next_request_id(State), hibernate};
-
-handle_response(#commandconnected{}, State = #state{from = From, sock = Sock}) ->
-    gen_server:reply(From, true),
-    gen_tcp:close(Sock),
-    {noreply, next_request_id(State#state{from = undefined, sock = undefined}), hibernate};
 
 handle_response(#commandpartitionedtopicmetadataresponse{partitions = Partitions,
                                                          request_id = RequestId},
@@ -146,9 +129,9 @@ handle_response(#commandpartitionedtopicmetadataresponse{partitions = Partitions
     case maps:get(RequestId, Reqs, undefined) of
         {From, #commandpartitionedtopicmetadata{topic = Topic}} ->
             gen_server:reply(From, {Topic, Partitions}),
-            {noreply, next_request_id(State#state{requests = maps:remove(RequestId, Reqs)}), hibernate};
+            {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
         undefined ->
-            {noreply, next_request_id(State), hibernate}
+            {noreply, State, hibernate}
     end;
 
 handle_response(#commandlookuptopicresponse{brokerserviceurl = BrokerServiceUrl,
@@ -157,9 +140,9 @@ handle_response(#commandlookuptopicresponse{brokerserviceurl = BrokerServiceUrl,
     case maps:get(RequestId, Reqs, undefined) of
         {From, #commandlookuptopic{}} ->
             gen_server:reply(From, BrokerServiceUrl),
-            {noreply, next_request_id(State#state{requests = maps:remove(RequestId, Reqs)}), hibernate};
+            {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
         undefined ->
-            {noreply, next_request_id(State), hibernate}
+            {noreply, State, hibernate}
     end;
 
 handle_response(#commandping{}, State) ->

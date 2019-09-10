@@ -49,7 +49,7 @@ start_supervised(ClientId, Topic, ProducerOpts) ->
 stop_supervised(#{client := ClientId, topic := Topic}) ->
   pulsar_producers_sup:ensure_absence(ClientId, Topic).
 
-%% @doc start wolff_producdrs gen_server
+%% @doc start pulsar_producdrs gen_server
 start_link(ClientId, Topic, ProducerOpts) ->
     gen_server:start_link({local, get_name(Topic)}, ?MODULE, [ClientId, Topic, ProducerOpts], []).
 
@@ -66,7 +66,7 @@ do_pick_producer(Strategy, Partition, Partitions, Workers) ->
             pick_next_alive(Workers, Partition, Partitions);
         false when Strategy =:= roundrobin ->
             R = {Partition, Pid} = pick_next_alive(Workers, Partition, Partitions),
-            _ = put(wolff_roundrobin, (Partition + 1) rem Partitions),
+            _ = put(pulsar_roundrobin, (Partition + 1) rem Partitions),
             R;
         false ->
             erlang:error({producer_down, Pid})

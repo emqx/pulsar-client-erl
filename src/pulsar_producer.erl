@@ -203,7 +203,7 @@ send_batch_payload(Messages, #state{sequence_id = SequenceId,
     },
     {Metadata1, BatchMessage} = case batch_message(Messages) of
         {Key, Val} -> {Metadata#messagemetadata{partition_key = Key}, Val};
-        Val -> Val
+        Val -> {Metadata, Val}
     end,
     gen_tcp:send(Sock, ?FRAME:send(Send, Metadata1, BatchMessage)).
 

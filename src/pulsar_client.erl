@@ -56,7 +56,7 @@ get_topic_metadata(Pid, Topic) ->
     gen_server:call(Pid, {get_topic_metadata, Topic, Call}).
 
 lookup_topic(Pid, PartitionTopic) ->
-    gen_server:call(Pid, {lookup_topic, PartitionTopic}).
+    gen_server:call(Pid, {lookup_topic, PartitionTopic}, 30000).
 
 get_status(Pid) ->
     gen_server:call(Pid, get_status, 5000).

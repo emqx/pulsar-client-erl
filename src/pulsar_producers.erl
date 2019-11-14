@@ -91,8 +91,10 @@ lookup_producer(#{workers := Workers}, Partition) ->
 lookup_producer(Workers, Partition) when is_map(Workers) ->
     maps:get(Partition, Workers);
 lookup_producer(Workers, Partition) ->
-    [{Partition, Pid}] = ets:lookup(Workers, Partition),
-    Pid.
+    case ets:lookup(Workers, Partition) of
+        [{Partition, Pid}] -> Pid;
+        _ -> undefined
+    end.
 
 pick_partition(Partitions, random, _) ->
     rand:uniform(Partitions) - 1;
@@ -184,7 +186,14 @@ get_name(Topic) ->
 log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).
 
 start_producer(Pid, Partition, PartitionTopic, ProducerOpts, Workers, Producers) ->
-    BrokerServiceUrl = pulsar_client:lookup_topic(Pid, PartitionTopic),
-    {ok, Producer} = pulsar_producer:start_link(PartitionTopic, BrokerServiceUrl, ProducerOpts),
-    ets:insert(Workers, {Partition, Producer}),
-    maps:put(Producer, {Partition, PartitionTopic}, Producers).
+    try
+        BrokerServiceUrl = pulsar_client:lookup_topic(Pid, PartitionTopic),
+        {ok, Producer} = pulsar_producer:start_link(PartitionTopic, BrokerServiceUrl, ProducerOpts),
+        ets:insert(Workers, {Partition, Producer}),
+        maps:put(Producer, {Partition, PartitionTopic}, Producers)
+    catch
+        Error : Reason ->
+            log_error("Start producer: ~p, ~p", [Error, {Reason, erlang:get_stacktrace()}]),
+            self() ! {lookup_topic, Partition, PartitionTopic},
+            Producers
+    end.

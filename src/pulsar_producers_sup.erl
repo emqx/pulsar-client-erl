@@ -40,6 +40,7 @@ ensure_present(ClientId, Topic, ProducerOpts) ->
   case supervisor:start_child(?SUPERVISOR, ChildSpec) of
     {ok, Pid} -> {ok, Pid};
     {error, {already_started, Pid}} -> {ok, Pid};
+    {error, {{already_started, Pid}, _}} -> {ok, Pid};
     {error, already_present} -> {error, not_running}
   end.
 

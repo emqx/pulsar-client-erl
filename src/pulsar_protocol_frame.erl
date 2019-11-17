@@ -87,9 +87,10 @@ pong() ->
         pong = #commandpong{}
     }).
 
-parse(Bin) ->
+parse(<<TotalSize:32, CmdBin:TotalSize/binary, LastBin/binary>>) ->
+    Bin = <<TotalSize:32, CmdBin/binary>>,
     BaseCommand = 'PulsarApi_pb':decode_basecommand(Bin),
-    case BaseCommand#basecommand.type of
+    Resp = case BaseCommand#basecommand.type of
         ?CONNECTED -> BaseCommand#basecommand.connected;
         ?PARTITIONED_METADATA_RESPONSE -> BaseCommand#basecommand.partitionmetadataresponse;
         ?LOOKUP_RESPONSE -> BaseCommand#basecommand.lookuptopicresponse;
@@ -98,8 +99,11 @@ parse(Bin) ->
         ?PING -> #commandping{};
         ?PONG -> #commandpong{};
         ?CLOSE_PRODUCER -> BaseCommand#basecommand.close_producer;
-        _Info -> _Info
-    end.
+        _ -> unknown
+    end,
+    {Resp, LastBin};
+parse(Bin) ->
+    {undefined, Bin}.
 
 serialized_simple_command(BaseCommand) ->
     BaseCommandBin = i2b('PulsarApi_pb':encode_basecommand(BaseCommand)),

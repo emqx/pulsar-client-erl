@@ -61,7 +61,8 @@ callback_mode() -> [state_functions].
                 opts = [],
                 callback,
                 batch_size = 0,
-                requests = #{}}).
+                requests = #{},
+                last_bin = <<>>}).
 
 -define (FRAME, pulsar_protocol_frame).
 
@@ -104,15 +105,16 @@ idle(_, connecting, State = #state{opts = Opts, broker_service_url = BrokerServi
     end.
 
 connecting(_EventType, {tcp, _, Bin}, State) ->
-    handle_response(?FRAME:parse(Bin), State).
+    {Cmd, _} = ?FRAME:parse(Bin),
+    handle_response(Cmd, State).
 
 connected(_EventType, {tcp_closed, Sock}, State = #state{sock = Sock, producer_id = ProducerId}) ->
     log_error("TcpClosed producer: ~p~n", [ProducerId]),
     erlang:send_after(5000, self(), connecting),
     {next_state, idle, State#state{sock = undefined}};
 
-connected(_EventType, {tcp, _, Bin}, State) ->
-    handle_response(?FRAME:parse(Bin), State);
+connected(_EventType, {tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
+    parse(?FRAME:parse(<<LastBin/binary, Bin/binary>>), State);
 
 connected(_EventType, ping, State = #state{sock = Sock}) ->
     ping(Sock),
@@ -136,6 +138,17 @@ code_change(_Vsn, State, Data, _Extra) ->
 terminate(_Reason, _StateName, _State) ->
     ok.
 
+parse({undefined, Bin}, State) ->
+    {keep_state, State#state{last_bin = Bin}};
+parse({Cmd, <<>>}, State) ->
+    handle_response(Cmd, State#state{last_bin = <<>>});
+parse({Cmd, LastBin}, State) ->
+    State2 = case handle_response(Cmd, State) of
+        {_, State1} -> State1;
+        {_, _, State1} -> State1
+    end,
+    parse(?FRAME:parse(LastBin), State2).
+
 handle_response(#commandconnected{}, State = #state{sock = Sock,
                                                     request_id = RequestId,
                                                     producer_id = ProId,
@@ -145,7 +158,7 @@ handle_response(#commandconnected{}, State = #state{sock = Sock,
     {next_state, connected, next_request_id(State)};
 
 handle_response(#commandproducersuccess{producer_name = ProName}, State) ->
-    {next_state, connected, State#state{producer_name = ProName}};
+    {keep_state, State#state{producer_name = ProName}};
 
 handle_response(#commandpong{}, State) ->
     start_keepalive(),

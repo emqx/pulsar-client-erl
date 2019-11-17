@@ -35,7 +35,7 @@
 
 -export([get_status/1]).
 
--record(state, {sock, servers, opts, producers = #{}, request_id = 0, requests = #{}, from}).
+-record(state, {sock, servers, opts, producers = #{}, request_id = 0, requests = #{}, from, last_bin = <<>>}).
 
 -define(TIMEOUT, 60000).
 
@@ -115,8 +115,8 @@ handle_call(_Req, _From, State) ->
 handle_cast(_Req, State) ->
     {noreply, State, hibernate}.
 
-handle_info({tcp, _, Bin}, State) ->
-    handle_response(pulsar_protocol_frame:parse(Bin), State);
+handle_info({tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
+    parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
 
 handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
     {noreply, State#state{sock = undefined}, hibernate};
@@ -130,6 +130,17 @@ terminate(_Reason, #state{}) ->
 
 code_change(_, State, _) ->
     {ok, State}.
+
+parse({undefined, Bin}, State) ->
+    {noreply, State#state{last_bin = Bin}};
+parse({Cmd, <<>>}, State) ->
+    handle_response(Cmd, State#state{last_bin = <<>>});
+parse({Cmd, LastBin}, State) ->
+    State2 = case handle_response(Cmd, State) of
+        {_, State1} -> State1;
+        {_, _, State1} -> State1
+    end,
+    parse(pulsar_protocol_frame:parse(LastBin), State2).
 
 handle_response(#commandconnected{}, State = #state{from = undefined}) ->
     {noreply, next_request_id(State), hibernate};
@@ -164,7 +175,7 @@ handle_response(#commandping{}, State) ->
     {noreply, State, hibernate};
 
 handle_response(_Info, State) ->
-    log_error("handle_response unknown message:~p~n", [_Info]),
+    log_error("producer handle_response unknown message:~p~n", [_Info]),
     {noreply, State, hibernate}.
 
 tune_buffer(Sock) ->

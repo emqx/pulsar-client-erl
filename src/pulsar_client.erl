@@ -84,8 +84,8 @@ handle_call({get_topic_metadata, Topic, Call}, From, State = #state{sock = Sock,
         Sock1 ->
             Metadata = topic_metadata(Sock1, Topic, RequestId),
             {noreply, next_request_id(State#state{requests = maps:put(RequestId, {From, Metadata}, Reqs),
-                                                   producers = maps:put(Topic, Call, Producers),
-                                                   sock = Sock1})}
+                                                  producers = maps:put(Topic, Call, Producers),
+                                                  sock = Sock1})}
     end;
 
 handle_call({lookup_topic, PartitionTopic}, From, State = #state{sock = Sock,

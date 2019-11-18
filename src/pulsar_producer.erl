@@ -108,8 +108,8 @@ connecting(_EventType, {tcp, _, Bin}, State) ->
     {Cmd, _} = ?FRAME:parse(Bin),
     handle_response(Cmd, State).
 
-connected(_EventType, {tcp_closed, Sock}, State = #state{sock = Sock, producer_id = ProducerId}) ->
-    log_error("TcpClosed producer: ~p~n", [ProducerId]),
+connected(_EventType, {tcp_closed, Sock}, State = #state{sock = Sock, partitiontopic = Topic}) ->
+    log_error("TcpClosed producer: ~p~n", [Topic]),
     erlang:send_after(5000, self(), connecting),
     {next_state, idle, State#state{sock = undefined}};
 
@@ -166,8 +166,8 @@ handle_response(#commandpong{}, State) ->
 handle_response(#commandping{}, State = #state{sock = Sock}) ->
     pong(Sock),
     {keep_state, State};
-handle_response(#commandcloseproducer{producer_id = ProducerId}, State) ->
-    log_error("Close producer: ~p~n", [ProducerId]),
+handle_response(#commandcloseproducer{}, State = #state{partitiontopic = Topic}) ->
+    log_error("Close producer: ~p~n", [Topic]),
     {stop, closed_producer, State};
 handle_response(Resp = #commandsendreceipt{sequence_id = SequenceId},
                 State = #state{callback = undefined, requests = Reqs}) ->
@@ -188,7 +188,7 @@ handle_response(Resp = #commandsendreceipt{sequence_id = SequenceId},
             gen_statem:reply(From, Resp),
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}}
     end;
-    
+
 handle_response(Msg, State) ->
     log_error("Receive unknown message:~p~n", [Msg]),
     {keep_state, State}.

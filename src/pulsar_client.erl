@@ -83,9 +83,9 @@ handle_call({get_topic_metadata, Topic, Call}, From, State = #state{sock = Sock,
             {noreply, State};
         Sock1 ->
             Metadata = topic_metadata(Sock1, Topic, RequestId),
-            {noreply, State#state{requests = maps:put(RequestId, {From, Metadata}, Reqs),
-                                  producers = maps:put(Topic, Call, Producers),
-                                  sock = Sock1}}
+            {noreply, next_request_id(State#state{requests = maps:put(RequestId, {From, Metadata}, Reqs),
+                                                  producers = maps:put(Topic, Call, Producers),
+                                                  sock = Sock1})}
     end;
 
 handle_call({lookup_topic, PartitionTopic}, From, State = #state{sock = Sock,
@@ -98,7 +98,7 @@ handle_call({lookup_topic, PartitionTopic}, From, State = #state{sock = Sock,
             {noreply, State};
         Sock1 ->
             LookupTopic = lookup_topic(Sock1, PartitionTopic, RequestId),
-            {noreply, State#state{requests = maps:put(RequestId, {From, LookupTopic}, Reqs), sock = Sock1}}
+            {noreply, next_request_id(State#state{requests = maps:put(RequestId, {From, LookupTopic}, Reqs), sock = Sock1})}
     end;
 
 handle_call(get_status, From, State = #state{sock = undefined, servers = Servers}) ->
@@ -143,11 +143,11 @@ parse({Cmd, LastBin}, State) ->
     parse(pulsar_protocol_frame:parse(LastBin), State2).
 
 handle_response(#commandconnected{}, State = #state{from = undefined}) ->
-    {noreply, next_request_id(State), hibernate};
+    {noreply, State, hibernate};
 
 handle_response(#commandconnected{}, State = #state{from = From}) ->
     gen_server:reply(From, true),
-    {noreply, next_request_id(State#state{from = undefined}), hibernate};
+    {noreply, State#state{from = undefined}, hibernate};
 
 handle_response(#commandpartitionedtopicmetadataresponse{partitions = Partitions,
                                                          request_id = RequestId},
@@ -155,9 +155,9 @@ handle_response(#commandpartitionedtopicmetadataresponse{partitions = Partitions
     case maps:get(RequestId, Reqs, undefined) of
         {From, #commandpartitionedtopicmetadata{topic = Topic}} ->
             gen_server:reply(From, {Topic, Partitions}),
-            {noreply, next_request_id(State#state{requests = maps:remove(RequestId, Reqs)}), hibernate};
+            {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
         undefined ->
-            {noreply, next_request_id(State), hibernate}
+            {noreply, State, hibernate}
     end;
 
 handle_response(#commandlookuptopicresponse{brokerserviceurl = BrokerServiceUrl,
@@ -166,16 +166,16 @@ handle_response(#commandlookuptopicresponse{brokerserviceurl = BrokerServiceUrl,
     case maps:get(RequestId, Reqs, undefined) of
         {From, #commandlookuptopic{}} ->
             gen_server:reply(From, BrokerServiceUrl),
-            {noreply, next_request_id(State#state{requests = maps:remove(RequestId, Reqs)}), hibernate};
+            {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
         undefined ->
-            {noreply, next_request_id(State), hibernate}
+            {noreply, State, hibernate}
     end;
 
 handle_response(#commandping{}, State) ->
     {noreply, State, hibernate};
 
 handle_response(_Info, State) ->
-    log_error("producer handle_response unknown message:~p~n", [_Info]),
+    log_error("Client handle_response unknown message:~p~n", [_Info]),
     {noreply, State, hibernate}.
 
 tune_buffer(Sock) ->

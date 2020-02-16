@@ -16,8 +16,6 @@
 
 -behaviour(gen_server).
 
--include ("PulsarApi_pb.hrl").
-
 -export([start_link/3]).
 
 %% gen_server Callbacks
@@ -142,36 +140,36 @@ parse({Cmd, LastBin}, State) ->
     end,
     parse(pulsar_protocol_frame:parse(LastBin), State2).
 
-handle_response(#commandconnected{}, State = #state{from = undefined}) ->
+handle_response({connected, _ConnectedData}, State = #state{from = undefined}) ->
     {noreply, State, hibernate};
 
-handle_response(#commandconnected{}, State = #state{from = From}) ->
+handle_response({connected, _ConnectedData}, State = #state{from = From}) ->
     gen_server:reply(From, true),
     {noreply, State#state{from = undefined}, hibernate};
 
-handle_response(#commandpartitionedtopicmetadataresponse{partitions = Partitions,
-                                                         request_id = RequestId},
+handle_response({partitionmetadataresponse, #{partitions := Partitions,
+                                              request_id := RequestId}},
                 State = #state{requests   = Reqs}) ->
     case maps:get(RequestId, Reqs, undefined) of
-        {From, #commandpartitionedtopicmetadata{topic = Topic}} ->
+        {From, #{topic := Topic}} ->
             gen_server:reply(From, {Topic, Partitions}),
             {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
         undefined ->
             {noreply, State, hibernate}
     end;
 
-handle_response(#commandlookuptopicresponse{brokerserviceurl = BrokerServiceUrl,
-                                            request_id = RequestId},
+handle_response({lookuptopicresponse, #{brokerserviceurl := BrokerServiceUrl,
+                                        request_id := RequestId}},
                 State = #state{requests = Reqs}) ->
     case maps:get(RequestId, Reqs, undefined) of
-        {From, #commandlookuptopic{}} ->
+        {From, #{}} ->
             gen_server:reply(From, BrokerServiceUrl),
             {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
         undefined ->
             {noreply, State, hibernate}
     end;
 
-handle_response(#commandping{}, State) ->
+handle_response({ping, #{}}, State) ->
     {noreply, State, hibernate};
 
 handle_response(_Info, State) ->
@@ -203,22 +201,22 @@ try_connect([{Host, Port} | Servers]) ->
     end.
 
 connect(Sock) ->
-    Conn = #commandconnect{client_version = "Pulsar-Client-Erlang-v0.0.1",
-                           protocol_version = 6},
+    Conn = #{client_version => "Pulsar-Client-Erlang-v0.0.1",
+             protocol_version => 6},
     gen_tcp:send(Sock, pulsar_protocol_frame:connect(Conn)).
 
 topic_metadata(Sock, Topic, RequestId) ->
-    Metadata = #commandpartitionedtopicmetadata{
-        topic = Topic,
-        request_id = RequestId
+    Metadata = #{
+        topic => Topic,
+        request_id => RequestId
     },
     gen_tcp:send(Sock, pulsar_protocol_frame:topic_metadata(Metadata)),
     Metadata.
 
 lookup_topic(Sock, Topic, RequestId) ->
-    LookupTopic = #commandlookuptopic{
-        topic = Topic,
-        request_id = RequestId
+    LookupTopic = #{
+        topic => Topic,
+        request_id => RequestId
     },
     gen_tcp:send(Sock, pulsar_protocol_frame:lookup_topic(LookupTopic)),
     LookupTopic.

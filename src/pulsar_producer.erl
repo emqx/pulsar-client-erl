@@ -16,8 +16,6 @@
 
 -behaviour(gen_statem).
 
--include("PulsarApi_pb.hrl").
-
 -export([ send/2
         , send_sync/2
         , send_sync/3
@@ -149,27 +147,27 @@ parse({Cmd, LastBin}, State) ->
     end,
     parse(?FRAME:parse(LastBin), State2).
 
-handle_response(#commandconnected{}, State = #state{sock = Sock,
-                                                    request_id = RequestId,
-                                                    producer_id = ProId,
-                                                    partitiontopic = Topic}) ->
+handle_response({connected, _ConnectedData}, State = #state{sock = Sock,
+                                                            request_id = RequestId,
+                                                            producer_id = ProId,
+                                                            partitiontopic = Topic}) ->
     ping(Sock),
     create_producer(Sock, Topic, RequestId, ProId),
     {next_state, connected, next_request_id(State)};
 
-handle_response(#commandproducersuccess{producer_name = ProName}, State) ->
+handle_response({producer_success, #{producer_name := ProName}}, State) ->
     {keep_state, State#state{producer_name = ProName}};
 
-handle_response(#commandpong{}, State) ->
+handle_response({pong, #{}}, State) ->
     start_keepalive(),
     {keep_state, State};
-handle_response(#commandping{}, State = #state{sock = Sock}) ->
+handle_response({ping, #{}}, State = #state{sock = Sock}) ->
     pong(Sock),
     {keep_state, State};
-handle_response(#commandcloseproducer{}, State = #state{partitiontopic = Topic}) ->
+handle_response({close_producer, #{}}, State = #state{partitiontopic = Topic}) ->
     log_error("Close producer: ~p~n", [Topic]),
     {stop, closed_producer, State};
-handle_response(Resp = #commandsendreceipt{sequence_id = SequenceId},
+handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                 State = #state{callback = undefined, requests = Reqs}) ->
     case maps:get(SequenceId, Reqs, undefined) of
         undefined ->
@@ -178,7 +176,7 @@ handle_response(Resp = #commandsendreceipt{sequence_id = SequenceId},
             gen_statem:reply(From, Resp),
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}}
     end;
-handle_response(Resp = #commandsendreceipt{sequence_id = SequenceId},
+handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                 State = #state{callback = Callback, requests = Reqs}) ->
     case maps:get(SequenceId, Reqs, undefined) of
         undefined ->
@@ -194,8 +192,8 @@ handle_response(Msg, State) ->
     {keep_state, State}.
 
 connect(Sock) ->
-    Conn = #commandconnect{client_version = "Pulsar-Client-Erlang-v0.0.1",
-                           protocol_version = 6},
+    Conn = #{client_version => "Pulsar-Client-Erlang-v0.0.1",
+             protocol_version => 6},
     gen_tcp:send(Sock, ?FRAME:connect(Conn)).
 
 send_batch_payload(Messages, #state{sequence_id = SequenceId,
@@ -203,19 +201,19 @@ send_batch_payload(Messages, #state{sequence_id = SequenceId,
                                     producer_name = ProducerName,
                                     sock = Sock}) ->
     Len = length(Messages),
-    Send = #commandsend{
-        producer_id = ProducerId,
-        sequence_id = SequenceId,
-        num_messages = Len
+    Send = #{
+        producer_id => ProducerId,
+        sequence_id => SequenceId,
+        num_messages => Len
     },
-    Metadata = #messagemetadata{
-        producer_name = ProducerName,
-        sequence_id = SequenceId,
-        publish_time = erlang:system_time(millisecond),
-        num_messages_in_batch = Len
+    Metadata = #{
+        producer_name => ProducerName,
+        sequence_id => SequenceId,
+        publish_time => erlang:system_time(millisecond),
+        num_messages_in_batch => Len
     },
     {Metadata1, BatchMessage} = case batch_message(Messages) of
-        {Key, Val} -> {Metadata#messagemetadata{partition_key = Key}, Val};
+        {Key, Val} -> {Metadata#{partition_key => Key}, Val};
         Val -> {Metadata, Val}
     end,
     gen_tcp:send(Sock, ?FRAME:send(Send, Metadata1, BatchMessage)).
@@ -230,10 +228,10 @@ pong(Sock) ->
     gen_tcp:send(Sock, ?FRAME:pong()).
 
 create_producer(Sock, Topic, RequestId, ProducerId) ->
-    Producer = #commandproducer{
-        topic = Topic,
-        producer_id = ProducerId,
-        request_id = RequestId
+    Producer = #{
+        topic => Topic,
+        producer_id => ProducerId,
+        request_id => RequestId
     },
     gen_tcp:send(Sock, ?FRAME:create_producer(Producer)).
 
@@ -242,8 +240,8 @@ batch_message(Messages) when length(Messages) =:= 1 ->
     {Key, Val};
 batch_message(Messages) ->
     lists:foldl(fun(#{key := Key, value := Message}, Acc) ->
-        Metadata = #singlemessagemetadata{payload_size = size(Message), partition_key = Key},
-        MetadataBin = iolist_to_binary('PulsarApi_pb':encode_singlemessagemetadata(Metadata)),
+        Metadata = #{payload_size => size(Message), partition_key => Key},
+        MetadataBin = iolist_to_binary(pulsar_api:encode_msg(Metadata, 'SingleMessageMetadata')),
         MetadataBinSize = size(MetadataBin),
         <<Acc/binary, MetadataBinSize:32, MetadataBin/binary, Message/binary>>
     end, <<>>, Messages).

@@ -46,59 +46,59 @@
          ]).
 
 connect(CommandConnect) ->
-    serialized_simple_command(#basecommand{
-        type = ?CONNECT,
-        connect = CommandConnect
+    serialized_simple_command(#{
+        type => ?CONNECT,
+        connect => CommandConnect
     }).
 
 topic_metadata(PartitionMetadata) ->
-    serialized_simple_command(#basecommand{
-        type = ?PARTITIONED_METADATA,
-        partitionmetadata = PartitionMetadata
+    serialized_simple_command(#{
+        type => ?PARTITIONED_METADATA,
+        partitionmetadata => PartitionMetadata
     }).
 
 lookup_topic(LookupTopic) ->
-    serialized_simple_command(#basecommand{
-        type = ?LOOKUP,
-        lookuptopic = LookupTopic
+    serialized_simple_command(#{
+        type => ?LOOKUP,
+        lookuptopic => LookupTopic
     }).
 
 create_producer(Producer) ->
-    serialized_simple_command(#basecommand{
-        type = ?PRODUCER,
-        producer = Producer
+    serialized_simple_command(#{
+        type => ?PRODUCER,
+        producer => Producer
     }).
 
 send(Send, Metadata, BatchPayload) ->
-    serialized_payload_command(#basecommand{
-        type = ?SEND,
-        send = Send
-    }, i2b('PulsarApi_pb':encode_messagemetadata(Metadata)), BatchPayload).
+    serialized_payload_command(#{
+        type => ?SEND,
+        send => Send
+    }, i2b(pulsar_api:encode_msg(Metadata, 'MessageMetadata')), BatchPayload).
 
 ping() ->
-    serialized_simple_command(#basecommand{
-        type = ?PING,
-        ping = #commandping{}
+    serialized_simple_command(#{
+        type => ?PING,
+        ping => #{}
     }).
 
 pong() ->
-    serialized_simple_command(#basecommand{
-        type = ?PONG,
-        pong = #commandpong{}
+    serialized_simple_command(#{
+        type => ?PONG,
+        pong => #{}
     }).
 
 parse(<<TotalSize:32, CmdBin:TotalSize/binary, LastBin/binary>>) ->
     Bin = <<TotalSize:32, CmdBin/binary>>,
-    BaseCommand = 'PulsarApi_pb':decode_basecommand(Bin),
-    Resp = case BaseCommand#basecommand.type of
-        ?CONNECTED -> BaseCommand#basecommand.connected;
-        ?PARTITIONED_METADATA_RESPONSE -> BaseCommand#basecommand.partitionmetadataresponse;
-        ?LOOKUP_RESPONSE -> BaseCommand#basecommand.lookuptopicresponse;
-        ?PRODUCER_SUCCESS -> BaseCommand#basecommand.producer_success;
-        ?SEND_RECEIPT -> BaseCommand#basecommand.send_receipt;
-        ?PING -> #commandping{};
-        ?PONG -> #commandpong{};
-        ?CLOSE_PRODUCER -> BaseCommand#basecommand.close_producer;
+    BaseCommand = pulsar_api:decode_msg(Bin, 'BaseCommand'),
+    Resp = case maps:get(type, BaseCommand, unknown) of
+        ?CONNECTED -> maps:get(connected, BaseCommand);
+        ?PARTITIONED_METADATA_RESPONSE -> maps:get(partitionmetadataresponse, BaseCommand);
+        ?LOOKUP_RESPONSE -> maps:get(lookuptopicresponse, BaseCommand);
+        ?PRODUCER_SUCCESS -> maps:get(producer_success, BaseCommand);
+        ?SEND_RECEIPT -> maps:get(send_receipt, BaseCommand);
+        ?PING -> maps:get([ping], BaseCommand);
+        ?PONG -> maps:get(pong, BaseCommand);
+        ?CLOSE_PRODUCER -> maps:get(close_producer, BaseCommand);
         _ -> unknown
     end,
     {Resp, LastBin};
@@ -106,13 +106,13 @@ parse(Bin) ->
     {undefined, Bin}.
 
 serialized_simple_command(BaseCommand) ->
-    BaseCommandBin = i2b('PulsarApi_pb':encode_basecommand(BaseCommand)),
+    BaseCommandBin = i2b(pulsar_api:encode_msg(BaseCommand, 'BaseCommand')),
     Size = size(BaseCommandBin),
     TotalSize = Size + ?SIMPLE_SIZE,
     <<TotalSize:32, Size:32, BaseCommandBin/binary>>.
 
 serialized_payload_command(BaseCommand, Metadata, BatchPayload) ->
-    BaseCommandBin = i2b('PulsarApi_pb':encode_basecommand(BaseCommand)),
+    BaseCommandBin = i2b(pulsar_api:encode_msg(BaseCommand, 'BaseCommand')),
     BaseCommandSize = size(BaseCommandBin),
     MetadataSize = size(Metadata),
     Payload = <<MetadataSize:32, Metadata/binary, BatchPayload/binary>>,

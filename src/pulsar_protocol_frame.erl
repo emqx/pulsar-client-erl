@@ -54,13 +54,14 @@ connect(CommandConnect) ->
 topic_metadata(PartitionMetadata) ->
     serialized_simple_command(#{
         type => ?PARTITIONED_METADATA,
-        partitionmetadata => PartitionMetadata
+        partitionMetadata => PartitionMetadata
+    
     }).
 
 lookup_topic(LookupTopic) ->
     serialized_simple_command(#{
         type => ?LOOKUP,
-        lookuptopic => LookupTopic
+        lookupTopic => LookupTopic
     }).
 
 create_producer(Producer) ->
@@ -91,14 +92,14 @@ parse(<<TotalSize:32, CmdBin:TotalSize/binary, LastBin/binary>>) ->
     Bin = <<TotalSize:32, CmdBin/binary>>,
     BaseCommand = pulsar_api:decode_msg(Bin, 'BaseCommand'),
     Resp = case maps:get(type, BaseCommand, unknown) of
-        ?CONNECTED -> maps:get(connected, BaseCommand);
-        ?PARTITIONED_METADATA_RESPONSE -> maps:get(partitionmetadataresponse, BaseCommand);
-        ?LOOKUP_RESPONSE -> maps:get(lookuptopicresponse, BaseCommand);
-        ?PRODUCER_SUCCESS -> maps:get(producer_success, BaseCommand);
-        ?SEND_RECEIPT -> maps:get(send_receipt, BaseCommand);
-        ?PING -> maps:get([ping], BaseCommand);
-        ?PONG -> maps:get(pong, BaseCommand);
-        ?CLOSE_PRODUCER -> maps:get(close_producer, BaseCommand);
+        ?CONNECTED -> {connected, maps:get(connected, BaseCommand)};
+        ?PARTITIONED_METADATA_RESPONSE -> {partitionMetadataResponse, maps:get(partitionMetadataResponse, BaseCommand)};
+        ?LOOKUP_RESPONSE -> {lookupTopicResponse, maps:get(lookupTopicResponse, BaseCommand)};
+        ?PRODUCER_SUCCESS -> {producer_success, maps:get(producer_success, BaseCommand)};
+        ?SEND_RECEIPT -> {send_receipt, maps:get(send_receipt, BaseCommand)};
+        ?PING -> {ping, maps:get(ping, BaseCommand)};
+        ?PONG -> {pong, maps:get(pong, BaseCommand)};
+        ?CLOSE_PRODUCER -> {close_producer, maps:get(close_producer, BaseCommand)};
         _ -> unknown
     end,
     {Resp, LastBin};

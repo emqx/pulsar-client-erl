@@ -147,7 +147,7 @@ handle_response({connected, _ConnectedData}, State = #state{from = From}) ->
     gen_server:reply(From, true),
     {noreply, State#state{from = undefined}, hibernate};
 
-handle_response({partitionmetadataresponse, #{partitions := Partitions,
+handle_response({partitionMetadataResponse, #{partitions := Partitions,
                                               request_id := RequestId}},
                 State = #state{requests   = Reqs}) ->
     case maps:get(RequestId, Reqs, undefined) of
@@ -158,7 +158,7 @@ handle_response({partitionmetadataresponse, #{partitions := Partitions,
             {noreply, State, hibernate}
     end;
 
-handle_response({lookuptopicresponse, #{brokerserviceurl := BrokerServiceUrl,
+handle_response({lookupTopicResponse, #{brokerServiceUrl := BrokerServiceUrl,
                                         request_id := RequestId}},
                 State = #state{requests = Reqs}) ->
     case maps:get(RequestId, Reqs, undefined) of

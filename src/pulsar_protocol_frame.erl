@@ -14,8 +14,6 @@
 
 -module(pulsar_protocol_frame).
 
--include ("PulsarApi_pb.hrl").
-
 -define(CONNECT, 'CONNECT').
 -define(CONNECTED, 'CONNECTED').
 -define(PARTITIONED_METADATA, 'PARTITIONED_METADATA').

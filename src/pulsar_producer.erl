@@ -85,7 +85,7 @@ init([PartitionTopic, BrokerServiceUrl, ProducerOpts]) ->
     State = #state{partitiontopic = PartitionTopic,
                    callback = maps:get(callback, ProducerOpts, undefined),
                    batch_size = maps:get(batch_size, ProducerOpts, 0),
-                   broker_service_url = BrokerServiceUrl,
+                   broker_service_url = binary_to_list(BrokerServiceUrl),
                    opts = maps:get(tcp_opts, ProducerOpts, [])},
     self() ! connecting,
     {ok, idle, State}.

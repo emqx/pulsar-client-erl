@@ -138,7 +138,7 @@ handle_info(timeout, State = #state{client_id = ClientId,
             end, Producers, PartitionTopics),
             {noreply, State#state{partitions = length(PartitionTopics), producers = NewProducers}};
         {error, Reason} ->
-            {stop, Reason, State}
+            {stop, {shutdown, Reason}, State}
     end;
 
 handle_info({'EXIT', Pid, _Error}, State = #state{workers = Workers, producers = Producers}) ->
@@ -161,7 +161,7 @@ handle_info({lookup_topic, Partition, PartitionTopic}, State = #state{client_id 
             NewProducers = start_producer(Pid, Partition, PartitionTopic, ProducerOpts, Workers, Producers),
             {noreply, State#state{producers = NewProducers}};
         {error, Reason} ->
-            {stop, Reason, State}
+            {stop, {shutdown, Reason}, State}
     end;
 
 handle_info(_Info, State) ->

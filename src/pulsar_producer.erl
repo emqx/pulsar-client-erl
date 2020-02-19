@@ -99,7 +99,7 @@ idle(_, connecting, State = #state{opts = Opts, broker_service_url = BrokerServi
             connect(Sock),
             {next_state, connecting, State#state{sock = Sock}};
         Error ->
-            {stop, Error, State}
+            {stop, {shutdown, Error}, State}
     end.
 
 connecting(_EventType, {tcp, _, Bin}, State) ->
@@ -166,7 +166,7 @@ handle_response({ping, #{}}, State = #state{sock = Sock}) ->
     {keep_state, State};
 handle_response({close_producer, #{}}, State = #state{partitiontopic = Topic}) ->
     log_error("Close producer: ~p~n", [Topic]),
-    {stop, closed_producer, State};
+    {stop, {shutdown, closed_producer}, State};
 handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                 State = #state{callback = undefined, requests = Reqs}) ->
     case maps:get(SequenceId, Reqs, undefined) of
@@ -231,7 +231,8 @@ create_producer(Sock, Topic, RequestId, ProducerId) ->
     Producer = #{
         topic => Topic,
         producer_id => ProducerId,
-        request_id => RequestId
+        request_id => RequestId,
+        producer_name => list_to_binary(lists:concat([Topic, "_",ProducerId]))
     },
     gen_tcp:send(Sock, ?FRAME:create_producer(Producer)).
 

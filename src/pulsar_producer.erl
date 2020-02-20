@@ -201,17 +201,30 @@ send_batch_payload(Messages, #state{sequence_id = SequenceId,
                                     producer_name = ProducerName,
                                     sock = Sock}) ->
     Len = length(Messages),
-    Send = #{
-        producer_id => ProducerId,
-        sequence_id => SequenceId,
-        num_messages => Len
-    },
-    Metadata = #{
-        producer_name => ProducerName,
-        sequence_id => SequenceId,
-        publish_time => erlang:system_time(millisecond),
-        num_messages_in_batch => Len
-    },
+    Send = case Len > 1 of
+        true ->
+            #{producer_id => ProducerId,
+              sequence_id => SequenceId,
+              num_messages => Len};
+        false ->
+            #{producer_id => ProducerId,
+              sequence_id => SequenceId}
+    end,
+    Metadata = case Len > 1 of
+        true ->
+            #{producer_name => ProducerName,
+              sequence_id => SequenceId,
+              publish_time => erlang:system_time(millisecond),
+              num_messages_in_batch => Len,
+              compression => 'NONE'
+            };
+        false ->
+            #{producer_name => ProducerName,
+              sequence_id => SequenceId,
+              publish_time => erlang:system_time(millisecond),
+              compression => 'NONE'
+            }
+    end,
     {Metadata1, BatchMessage} = case batch_message(Messages) of
         {Key, Val} -> {Metadata#{partition_key => Key}, Val};
         Val -> {Metadata, Val}
@@ -231,8 +244,7 @@ create_producer(Sock, Topic, RequestId, ProducerId) ->
     Producer = #{
         topic => Topic,
         producer_id => ProducerId,
-        request_id => RequestId,
-        producer_name => list_to_binary(lists:concat([Topic, "_",ProducerId]))
+        request_id => RequestId
     },
     gen_tcp:send(Sock, ?FRAME:create_producer(Producer)).
 

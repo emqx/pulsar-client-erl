@@ -210,25 +210,11 @@ send_batch_payload(Messages, #state{sequence_id = SequenceId,
             #{producer_id => ProducerId,
               sequence_id => SequenceId}
     end,
-    Metadata = case Len > 1 of
-        true ->
-            #{producer_name => ProducerName,
-              sequence_id => SequenceId,
-              publish_time => erlang:system_time(millisecond),
-              num_messages_in_batch => Len,
-              compression => 'NONE'
-            };
-        false ->
-            #{producer_name => ProducerName,
-              sequence_id => SequenceId,
-              publish_time => erlang:system_time(millisecond),
-              compression => 'NONE'
-            }
-    end,
-    {Metadata1, BatchMessage} = case batch_message(Messages) of
-        {Key, Val} -> {Metadata#{partition_key => Key}, Val};
-        Val -> {Metadata, Val}
-    end,
+    Metadata = #{producer_name => ProducerName,
+                 sequence_id => SequenceId,
+                 publish_time => erlang:system_time(millisecond),
+                 compression => 'NONE'},
+    {Metadata1, BatchMessage} = batch_message(Metadata, Len, Messages),
     gen_tcp:send(Sock, ?FRAME:send(Send, Metadata1, BatchMessage)).
 
 start_keepalive() ->
@@ -248,16 +234,26 @@ create_producer(Sock, Topic, RequestId, ProducerId) ->
     },
     gen_tcp:send(Sock, ?FRAME:create_producer(Producer)).
 
-batch_message(Messages) when length(Messages) =:= 1 ->
+batch_message(Metadata, Len, Messages) when Len =:= 1 ->
     [#{key := Key, value := Val}] = Messages,
-    {Key, Val};
-batch_message(Messages) ->
-    lists:foldl(fun(#{key := Key, value := Message}, Acc) ->
-        Metadata = #{payload_size => size(Message), partition_key => Key},
-        MetadataBin = iolist_to_binary(pulsar_api:encode_msg(Metadata, 'SingleMessageMetadata')),
-        MetadataBinSize = size(MetadataBin),
-        <<Acc/binary, MetadataBinSize:32, MetadataBin/binary, Message/binary>>
-    end, <<>>, Messages).
+    Metadata1 = case Key =:= undefined of
+        true  -> Metadata;
+        false -> Metadata#{partition_key => Key}
+    end,
+    {Metadata1, Val};
+batch_message(Metadata, Len, Messages) ->
+    Metadata1 = Metadata#{num_messages_in_batch => Len},
+    BatchMessage = lists:foldl(fun(#{key := Key, value := Message}, Acc) ->
+        SMetadata = case Key =:= undefined of
+            true  -> #{payload_size => size(Message)};
+            false -> #{payload_size => size(Message), partition_key => Key}
+        end,
+        SMetadataBin = iolist_to_binary(pulsar_api:encode_msg(SMetadata, 'SingleMessageMetadata')),
+        SMetadataBinSize = size(SMetadataBin),
+        <<Acc/binary, SMetadataBinSize:32, SMetadataBin/binary, Message/binary>>
+    end, <<>>, Messages),
+    {Metadata1, BatchMessage}.
+
 
 collect_send_calls(0) ->
     [];

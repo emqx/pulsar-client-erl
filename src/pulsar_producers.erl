@@ -46,12 +46,12 @@ start_supervised(ClientId, Topic, ProducerOpts) ->
          strategy => maps:get(strategy, ProducerOpts, random)
         }}.
 
-stop_supervised(#{client := ClientId, topic := Topic}) ->
-  pulsar_producers_sup:ensure_absence(ClientId, Topic).
+stop_supervised(#{client := ClientId, workers := Workers}) ->
+  pulsar_producers_sup:ensure_absence(ClientId, Workers).
 
 %% @doc start pulsar_producdrs gen_server
 start_link(ClientId, Topic, ProducerOpts) ->
-    gen_server:start_link({local, get_name(Topic)}, ?MODULE, [ClientId, Topic, ProducerOpts], []).
+    gen_server:start_link({local, get_name(ProducerOpts)}, ?MODULE, [ClientId, Topic, ProducerOpts], []).
 
 pick_producer(#{workers := Workers, partitions := Partitions, strategy := Strategy}, Batch) ->
     Partition = pick_partition(Partitions, Strategy, Batch),
@@ -113,7 +113,7 @@ init([ClientId, Topic, ProducerOpts]) ->
     {ok, #state{topic = Topic,
                 client_id = ClientId,
                 producer_opts = ProducerOpts,
-                workers = ets:new(get_name(Topic), [protected, named_table])}, 0}.
+                workers = ets:new(get_name(ProducerOpts), [protected, named_table])}, 0}.
 
 handle_call(get_workers, _From, State = #state{workers = Workers, partitions = Partitions}) ->
     {reply, {Partitions, Workers}, State};
@@ -180,8 +180,7 @@ create_partition_topic(Topic, Partitions) ->
         {lists:concat([Topic, "-partition-", Partition]), Partition}
     end,lists:seq(0, Partitions-1)).
 
-get_name(Topic) ->
-    list_to_atom(lists:concat(["pulsar_producers_", Topic])).
+get_name(ProducerOpts) -> maps:get(name, ProducerOpts, ?MODULE).
 
 log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).
 

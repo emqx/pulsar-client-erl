@@ -113,7 +113,7 @@ init([ClientId, Topic, ProducerOpts]) ->
     {ok, #state{topic = Topic,
                 client_id = ClientId,
                 producer_opts = ProducerOpts,
-                workers = ets:new(get_name(ProducerOpts), [protected, named_table])}, 0}.
+                workers = ets:new(get_name(ProducerOpts), [protected, named_table, {read_concurrency, true}])}, 0}.
 
 handle_call(get_workers, _From, State = #state{workers = Workers, partitions = Partitions}) ->
     {reply, {Partitions, Workers}, State};

@@ -106,7 +106,7 @@ pick_partition(Partitions, roundrobin, _) ->
     _ = put(pulsar_roundrobin, (Partition + 1) rem Partitions),
     Partition;
 pick_partition(Partitions, first_key_dispatch, [#{key := Key} | _]) ->
-  erlang_murmurhash:murmurhash3_32(Key) rem Partitions.
+  murmerl3:hash_32(Key) rem Partitions.
 
 init([ClientId, Topic, ProducerOpts]) ->
     erlang:process_flag(trap_exit, true),

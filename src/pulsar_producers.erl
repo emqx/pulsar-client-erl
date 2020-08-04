@@ -148,11 +148,11 @@ handle_info({'EXIT', Pid, _Error}, State = #state{workers = Workers, producers =
             {noreply, State};
         {Partition, PartitionTopic} ->
             ets:delete(Workers, Partition),
-            self() ! {lookup_topic, Partition, PartitionTopic},
+            self() ! {restart_producer, Partition, PartitionTopic},
             {noreply, State#state{producers = maps:remove(Pid, Producers)}}
     end;
 
-handle_info({lookup_topic, Partition, PartitionTopic}, State = #state{client_id = ClientId,
+handle_info({restart_producer, Partition, PartitionTopic}, State = #state{client_id = ClientId,
                                                                        producers = Producers,
                                                                        workers = Workers,
                                                                        producer_opts = ProducerOpts}) ->
@@ -191,8 +191,8 @@ start_producer(Pid, Partition, PartitionTopic, ProducerOpts, Workers, Producers)
         ets:insert(Workers, {Partition, Producer}),
         maps:put(Producer, {Partition, PartitionTopic}, Producers)
     catch
-        Error : Reason ->
-            log_error("Start producer: ~p, ~p", [Error, {Reason, erlang:get_stacktrace()}]),
-            self() ! {lookup_topic, Partition, PartitionTopic},
+        Error : Reason : Stacktrace ->
+            log_error("Start producer: ~p, ~p", [Error, {Reason, Stacktrace}]),
+            self() ! {restart_producer, Partition, PartitionTopic},
             Producers
     end.

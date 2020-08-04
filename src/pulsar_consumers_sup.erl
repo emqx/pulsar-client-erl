@@ -12,7 +12,7 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 
--module(pulsar_producers_sup).
+-module(pulsar_consumers_sup).
 
 -behaviour(supervisor).
 
@@ -35,8 +35,8 @@ init([]) ->
   {ok, {SupFlags, Children}}.
 
 %% ensure a client started under supervisor
-ensure_present(ClientId, Topic, ProducerOpts) ->
-  ChildSpec = child_spec(ClientId, Topic, ProducerOpts),
+ensure_present(ClientId, Topic, ConsumerOpts) ->
+  ChildSpec = child_spec(ClientId, Topic, ConsumerOpts),
   case supervisor:start_child(?SUPERVISOR, ChildSpec) of
     {ok, Pid} -> {ok, Pid};
     {error, {already_started, Pid}} -> {ok, Pid};
@@ -52,12 +52,12 @@ ensure_absence(ClientId, Name) ->
     {error, not_found} -> ok
   end.
 
-child_spec(ClientId, Topic, ProducerOpts) ->
-  #{id => ?WORKER_ID(ClientId, get_name(ProducerOpts)),
-    start => {pulsar_producers, start_link, [ClientId, Topic, ProducerOpts]},
+child_spec(ClientId, Topic, ConsumerOpts) ->
+  #{id => ?WORKER_ID(ClientId, get_name(ConsumerOpts)),
+    start => {pulsar_consumers, start_link, [ClientId, Topic, ConsumerOpts]},
     restart => transient,
     type => worker,
-    modules => [pulsar_producers]
+    modules => [pulsar_consumers]
    }.
 
-get_name(ProducerOpts) -> maps:get(name, ProducerOpts, pulsar_producers).
+get_name(ConsumerOpts) -> maps:get(name, ConsumerOpts, pulsar_consumers).

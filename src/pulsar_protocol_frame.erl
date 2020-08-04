@@ -21,6 +21,11 @@
 -define(LOOKUP, 'LOOKUP').
 -define(LOOKUP_RESPONSE, 'LOOKUP_RESPONSE').
 -define(PRODUCER, 'PRODUCER').
+-define(SUBSCRIBE, 'SUBSCRIBE').
+-define(SUCCESS, 'SUCCESS').
+-define(FLOW, 'FLOW').
+-define(MESSAGE, 'MESSAGE').
+-define(ACK, 'ACK').
 -define(PRODUCER_SUCCESS, 'PRODUCER_SUCCESS').
 -define(SEND, 'SEND').
 -define(SEND_RECEIPT, 'SEND_RECEIPT').
@@ -35,6 +40,9 @@
          , topic_metadata/1
          , lookup_topic/1
          , create_producer/1
+         , create_subscribe/1
+         , set_flow/1
+         , ack/1
          , ping/0
          , pong/0
          , serialized_simple_command/1
@@ -53,7 +61,7 @@ topic_metadata(PartitionMetadata) ->
     serialized_simple_command(#{
         type => ?PARTITIONED_METADATA,
         partitionMetadata => PartitionMetadata
-    
+
     }).
 
 lookup_topic(LookupTopic) ->
@@ -66,6 +74,24 @@ create_producer(Producer) ->
     serialized_simple_command(#{
         type => ?PRODUCER,
         producer => Producer
+    }).
+
+create_subscribe(SubInfo) ->
+    serialized_simple_command(#{
+        type => ?SUBSCRIBE,
+        subscribe => SubInfo
+    }).
+
+set_flow(FlowInfo) ->
+    serialized_simple_command(#{
+        type => ?FLOW,
+        flow => FlowInfo
+    }).
+
+ack(Ack) ->
+    serialized_simple_command(#{
+        type => ?ACK,
+        ack => Ack
     }).
 
 send(Send, Metadata, BatchPayload) ->
@@ -86,6 +112,22 @@ pong() ->
         pong => #{}
     }).
 
+parse(<<TotalSize:32, CommandSize:32, CmdBin:CommandSize/binary, MetadataSize:32, _Metadata:MetadataSize/binary, Rest/binary>> = AllBin) ->
+    Bin = <<CommandSize:32, CmdBin/binary>>,
+    PayloadSize = TotalSize - 4 - CommandSize - 4 - MetadataSize,
+    try
+            <<Payload:PayloadSize/binary, LastBin/binary>> = Rest,
+            BaseCommand = pulsar_api:decode_msg(Bin, 'BaseCommand'),
+            Resp = case maps:get(type, BaseCommand, unknown) of
+                ?MESSAGE -> {message, maps:get(message, BaseCommand), Payload};
+                _ -> unknown
+            end,
+            {Resp, LastBin}
+    catch
+        _E : _R : _S ->
+            {undefined, AllBin}
+    end;
+
 parse(<<TotalSize:32, CmdBin:TotalSize/binary, LastBin/binary>>) ->
     Bin = <<TotalSize:32, CmdBin/binary>>,
     BaseCommand = pulsar_api:decode_msg(Bin, 'BaseCommand'),
@@ -98,6 +140,7 @@ parse(<<TotalSize:32, CmdBin:TotalSize/binary, LastBin/binary>>) ->
         ?PING -> {ping, maps:get(ping, BaseCommand)};
         ?PONG -> {pong, maps:get(pong, BaseCommand)};
         ?CLOSE_PRODUCER -> {close_producer, maps:get(close_producer, BaseCommand)};
+        ?SUCCESS -> {subscribe_success, maps:get(success, BaseCommand)};
         _ -> unknown
     end,
     {Resp, LastBin};

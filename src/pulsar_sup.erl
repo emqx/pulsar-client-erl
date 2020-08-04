@@ -24,7 +24,7 @@ init([]) ->
   SupFlags = #{strategy => one_for_all,
                intensity => 10,
                period => 5},
-  Children = [client_sup(), producer_sup()],
+  Children = [client_sup(), producers_sup(), consumers_sup()],
   {ok, {SupFlags, Children}}.
 
 client_sup() ->
@@ -36,11 +36,19 @@ client_sup() ->
     modules => [pulsar_client_sup]
    }.
 
-producer_sup() ->
+producers_sup() ->
   #{id => pulsar_producers_sup,
     start => {pulsar_producers_sup, start_link, []},
     restart => permanent,
     shutdown => 5000,
     type => supervisor,
     modules => [pulsar_producers_sup]
+   }.
+consumers_sup() ->
+  #{id => pulsar_consumers_sup,
+    start => {pulsar_consumers_sup, start_link, []},
+    restart => permanent,
+    shutdown => 5000,
+    type => supervisor,
+    modules => [pulsar_consumers_sup]
    }.

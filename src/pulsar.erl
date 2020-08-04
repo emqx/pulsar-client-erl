@@ -26,6 +26,11 @@
         , stop_and_delete_supervised_producers/1
         ]).
 
+%% Primitive consumer worker management APIs
+-export([ ensure_supervised_consumers/3
+        , stop_and_delete_supervised_consumers/1
+        ]).
+
 %% Messaging APIs
 -export([ send/2
         , send_sync/3
@@ -46,6 +51,13 @@ ensure_supervised_producers(ClientId, Topic, Opts) ->
 
 stop_and_delete_supervised_producers(Producers) ->
     pulsar_producers:stop_supervised(Producers).
+
+ensure_supervised_consumers(ClientId, Topic, Opts) ->
+    pulsar_consumers:start_supervised(ClientId, Topic, Opts).
+
+stop_and_delete_supervised_consumers(Producers) ->
+    pulsar_consumers:stop_supervised(Producers).
+
 
 send(Producers, Batch) ->
     {_Partition, ProducerPid} = pulsar_producers:pick_producer(Producers, Batch),

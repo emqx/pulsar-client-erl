@@ -51,7 +51,9 @@ callback_mode() -> [state_functions].
                 opts = [],
                 cb_module,
                 cb_state,
-                last_bin = <<>>}).
+                last_bin = <<>>,
+                flow,
+                flow_rate}).
 
 -define (FRAME, pulsar_protocol_frame).
 
@@ -69,7 +71,9 @@ init([PartitionTopic, BrokerServiceUrl, ConsumerOpts]) ->
                    cb_module = CbModule,
                    cb_state = CbState,
                    opts = ConsumerOpts2,
-                   broker_service_url = binary_to_list(BrokerServiceUrl)},
+                   broker_service_url = binary_to_list(BrokerServiceUrl),
+                   flow = maps:get(flow, ConsumerOpts, 1000),
+                   flow_rate = maps:get(flow_rate, ConsumerOpts, 80)},
     self() ! connecting,
     {ok, idle, State}.
 
@@ -82,7 +86,9 @@ idle(_, connecting, State = #state{broker_service_url = BrokerServiceUrl}) ->
             {next_state, connecting, State#state{sock = Sock}};
         Error ->
             {stop, {shutdown, Error}, State}
-    end.
+    end;
+idle(_EventType, EventContent, State) ->
+    handle_response(EventContent, State).
 
 connecting(_EventType, {tcp, _, Bin}, State) ->
     {Cmd, _} = ?FRAME:parse(Bin),
@@ -125,10 +131,9 @@ handle_response({connected, _ConnectedData}, State = #state{sock = Sock,
                                                             consumer_id = ConsumerId,
                                                             partitiontopic = Topic,
                                                             opts = Opts}) ->
-    ping(Sock),
+    start_keepalive(),
     subscribe(Sock, Topic, RequestId, ConsumerId, Opts),
     {next_state, connected, next_request_id(State)};
-
 
 handle_response({pong, #{}}, State) ->
     start_keepalive(),
@@ -136,8 +141,10 @@ handle_response({pong, #{}}, State) ->
 handle_response({ping, #{}}, State = #state{sock = Sock}) ->
     pong(Sock),
     {keep_state, State};
-handle_response({subscribe_success, #{}}, State = #state{sock = Sock, consumer_id = ConsumerId}) ->
-    set_flow(Sock, ConsumerId, 1000),
+handle_response({subscribe_success, #{}}, State = #state{sock = Sock,
+                                                         consumer_id = ConsumerId,
+                                                         flow = Flow}) ->
+    set_flow(Sock, ConsumerId, Flow),
     {keep_state, State};
 handle_response({message, Msg, Payload}, State = #state{sock = Sock,
                                                         consumer_id = ConsumerId,
@@ -146,7 +153,7 @@ handle_response({message, Msg, Payload}, State = #state{sock = Sock,
     case CbModule:handle_message(Msg, Payload, CbState) of
         {ok, AckType, NState} ->
             ack(Sock, ConsumerId, AckType, Msg),
-            {keep_state, State#state{cb_state = NState}};
+            {keep_state, maybe_send_flow(State#state{cb_state = NState})};
         _ ->
             {keep_state, State}
     end;
@@ -199,6 +206,19 @@ ack(Sock, ConsumerId, AckType, Msg) ->
     },
     gen_tcp:send(Sock, ?FRAME:ack(Ack)).
 
+maybe_send_flow(State = #state{flow = Flow,
+                               flow_rate = FlowRate,
+                               sock = Sock,
+                               consumer_id = ConsumerId,
+                               opts = Opts}) ->
+    InitFlow = maps:get(flow, Opts, 1000),
+    case erlang:round(FlowRate * InitFlow) =< Flow of
+        true ->
+            set_flow(Sock, ConsumerId, InitFlow),
+            State#state{flow = InitFlow};
+        false ->
+            State
+    end.
 format_url("pulsar://" ++ Url) ->
     [Host, Port] = string:tokens(Url, ":"),
     {Host, list_to_integer(Port)};

@@ -151,7 +151,7 @@ handle_response({connected, _ConnectedData}, State = #state{sock = Sock,
                                                             request_id = RequestId,
                                                             producer_id = ProId,
                                                             partitiontopic = Topic}) ->
-    ping(Sock),
+    start_keepalive(),
     create_producer(Sock, Topic, RequestId, ProId),
     {next_state, connected, next_request_id(State)};
 

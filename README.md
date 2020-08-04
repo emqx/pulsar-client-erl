@@ -44,22 +44,22 @@ ok = pulsar:stop_and_delete_supervised_client('client1').
 ```erlang
 -module(my_subscriber).
 
--export([start/1]).
--export([init/2, handle_message/4]). %% callback api
+-export([start/0]).
+-export([init/2, handle_message/3]). %% callback api
 
 %% behaviour callback
 init(Topic, _Arg) -> {ok, []}.
 
 %% behaviour callback
 -spec handle_message(map(), binary(), any()) -> {ok, 'Individual' , any()} | {ok, 'Cumulative' , any()}.
-handle_message(Msg, Payload, CbState) ->
+handle_message(Msg, Payload, CState) ->
     #{consumer_id := ConsumerId,
-      message_id := #{entryId := EntryId,ledgerId := LedgerId} = Msg,
-    io:format("Receive payload:~p~n", [Payload])
+      message_id := #{entryId := EntryId,ledgerId := LedgerId}} = Msg,
+    io:format("Receive payload:~p~n", [Payload]),
     {ok, 'Individual', State}.
 
 -spec start(atom()) -> {ok, pid()}.
-start(ClientId) ->
+start() ->
     Client = 'client1',
     Topic = "persistent://public/default/test",
     ConsumerOpts = #{cb_init_args => [],
@@ -69,7 +69,7 @@ start(ClientId) ->
                      max_consumer_num => 1,
                      name = 'consumer1'},
     application:ensure_all_started(pulsar),
-    {ok, Pid} = pulsar:ensure_supervised_client(Client, [{"127.0.0.1", 6650}], #{}).
+    {ok, Pid} = pulsar:ensure_supervised_client(Client, [{"127.0.0.1", 6650}], #{}),
     pulsar:ensure_supervised_consumers(Client, Topic, ConsumerOpts).
 ```
 

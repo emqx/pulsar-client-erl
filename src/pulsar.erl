@@ -55,8 +55,8 @@ stop_and_delete_supervised_producers(Producers) ->
 ensure_supervised_consumers(ClientId, Topic, Opts) ->
     pulsar_consumers:start_supervised(ClientId, Topic, Opts).
 
-stop_and_delete_supervised_consumers(Producers) ->
-    pulsar_consumers:stop_supervised(Producers).
+stop_and_delete_supervised_consumers(Consumers) ->
+    pulsar_consumers:stop_supervised(Consumers).
 
 
 send(Producers, Batch) ->

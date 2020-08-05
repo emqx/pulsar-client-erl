@@ -64,7 +64,7 @@ start() ->
     Topic = "persistent://public/default/test",
     ConsumerOpts = #{cb_init_args => [],
                      cb_module => ?MODULE,
-                     subType => 'Shared',
+                     sub_type => 'Shared',
                      subscription => "SubscriptionName",
                      max_consumer_num => 1,
                      name = 'consumer1'},

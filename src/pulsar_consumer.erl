@@ -180,7 +180,7 @@ pong(Sock) ->
     gen_tcp:send(Sock, ?FRAME:pong()).
 
 subscribe(Sock, Topic, RequestId, ConsumerId, Opts) ->
-    SubType = maps:get(subType, Opts, 'Shared'),
+    SubType = maps:get(sub_type, Opts, 'Shared'),
     Subscription = maps:get(subscription, Opts, "my-subscription-name"),
     SubInfo = #{
         topic => Topic,

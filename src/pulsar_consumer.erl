@@ -212,12 +212,12 @@ maybe_send_flow(State = #state{flow = Flow,
                                consumer_id = ConsumerId,
                                opts = Opts}) ->
     InitFlow = maps:get(flow, Opts, 1000),
-    case erlang:round(FlowRate * InitFlow) =< Flow of
+    case (InitFlow - erlang:round(FlowRate * InitFlow)) >= Flow of
         true ->
             set_flow(Sock, ConsumerId, InitFlow),
             State#state{flow = InitFlow};
         false ->
-            State
+            State#state{flow = Flow - 1}
     end.
 format_url("pulsar://" ++ Url) ->
     [Host, Port] = string:tokens(Url, ":"),

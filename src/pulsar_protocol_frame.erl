@@ -112,23 +112,31 @@ pong() ->
         pong => #{}
     }).
 
+
 parse(<<TotalSize:32, CommandSize:32, CmdBin:CommandSize/binary, MetadataSize:32, _Metadata:MetadataSize/binary, Rest/binary>> = AllBin) ->
     Bin = <<CommandSize:32, CmdBin/binary>>,
     PayloadSize = TotalSize - 4 - CommandSize - 4 - MetadataSize,
     try
-            <<Payload:PayloadSize/binary, LastBin/binary>> = Rest,
-            BaseCommand = pulsar_api:decode_msg(Bin, 'BaseCommand'),
-            Resp = case maps:get(type, BaseCommand, unknown) of
-                ?MESSAGE -> {message, maps:get(message, BaseCommand), Payload};
-                _ -> unknown
-            end,
-            {Resp, LastBin}
+        <<Payload:PayloadSize/binary, LastBin/binary>> = Rest,
+        BaseCommand = pulsar_api:decode_msg(Bin, 'BaseCommand'),
+        Resp = case maps:get(type, BaseCommand, unknown) of
+            ?MESSAGE -> {message, maps:get(message, BaseCommand), Payload};
+            _ -> unknown
+        end,
+        {Resp, LastBin}
     catch
         _E : _R : _S ->
-            {undefined, AllBin}
+            <<TotalSize1:32, CmdBin1:TotalSize1/binary, LastBin1/binary>> = AllBin,
+            parse_(TotalSize1, CmdBin1, TotalSize1, LastBin1)
     end;
 
 parse(<<TotalSize:32, CmdBin:TotalSize/binary, LastBin/binary>>) ->
+    parse_(TotalSize, CmdBin, TotalSize, LastBin);
+parse(Bin) ->
+    {undefined, Bin}.
+
+
+parse_(TotalSize, CmdBin, TotalSize, LastBin) ->
     Bin = <<TotalSize:32, CmdBin/binary>>,
     BaseCommand = pulsar_api:decode_msg(Bin, 'BaseCommand'),
     Resp = case maps:get(type, BaseCommand, unknown) of
@@ -143,9 +151,7 @@ parse(<<TotalSize:32, CmdBin:TotalSize/binary, LastBin/binary>>) ->
         ?SUCCESS -> {subscribe_success, maps:get(success, BaseCommand)};
         _ -> unknown
     end,
-    {Resp, LastBin};
-parse(Bin) ->
-    {undefined, Bin}.
+    {Resp, LastBin}.
 
 serialized_simple_command(BaseCommand) ->
     BaseCommandBin = i2b(pulsar_api:encode_msg(BaseCommand, 'BaseCommand')),

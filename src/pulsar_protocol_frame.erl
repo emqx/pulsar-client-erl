@@ -112,46 +112,39 @@ pong() ->
         pong => #{}
     }).
 
+parse(<<TotalSize:32, CmdBin:TotalSize/binary, Rest/binary>>) ->
+    <<CommandSize:32, Command:CommandSize/binary, CmdRest/binary>> = CmdBin,
+    BaseCommand = pulsar_api:decode_msg(<<CommandSize:32, Command/binary>>, 'BaseCommand'),
+    Resp = case maps:get(type, BaseCommand, unknown) of
+        ?MESSAGE ->
+            <<MetadataSize:32, _Metadata:MetadataSize/binary, Payload/binary>> = CmdRest,
+            {message, maps:get(message, BaseCommand), Payload};
+        ?CONNECTED ->
+            {connected, maps:get(connected, BaseCommand)};
+        ?PARTITIONED_METADATA_RESPONSE ->
+            {partitionMetadataResponse, maps:get(partitionMetadataResponse, BaseCommand)};
+        ?LOOKUP_RESPONSE ->
+            {lookupTopicResponse, maps:get(lookupTopicResponse, BaseCommand)};
+        ?PRODUCER_SUCCESS ->
+            {producer_success, maps:get(producer_success, BaseCommand)};
+        ?SEND_RECEIPT ->
+            {send_receipt, maps:get(send_receipt, BaseCommand)};
+        ?PING ->
+            {ping, maps:get(ping, BaseCommand)};
+        ?PONG ->
+            {pong, maps:get(pong, BaseCommand)};
+        ?CLOSE_PRODUCER ->
+            {close_producer, maps:get(close_producer, BaseCommand)};
+        ?SUCCESS ->
+            {subscribe_success, maps:get(success, BaseCommand)};
+        _Type ->
+            error_logger:error_msg("parse unknown type:~p~n", [BaseCommand]),
+            unknown
+    end,
+    {Resp, Rest};
 
-parse(<<TotalSize:32, CommandSize:32, CmdBin:CommandSize/binary, MetadataSize:32, _Metadata:MetadataSize/binary, Rest/binary>> = AllBin) ->
-    Bin = <<CommandSize:32, CmdBin/binary>>,
-    PayloadSize = TotalSize - 4 - CommandSize - 4 - MetadataSize,
-    try
-        <<Payload:PayloadSize/binary, LastBin/binary>> = Rest,
-        BaseCommand = pulsar_api:decode_msg(Bin, 'BaseCommand'),
-        Resp = case maps:get(type, BaseCommand, unknown) of
-            ?MESSAGE -> {message, maps:get(message, BaseCommand), Payload};
-            _ -> unknown
-        end,
-        {Resp, LastBin}
-    catch
-        _E : _R : _S ->
-            <<TotalSize1:32, CmdBin1:TotalSize1/binary, LastBin1/binary>> = AllBin,
-            parse_(TotalSize1, CmdBin1, TotalSize1, LastBin1)
-    end;
-
-parse(<<TotalSize:32, CmdBin:TotalSize/binary, LastBin/binary>>) ->
-    parse_(TotalSize, CmdBin, TotalSize, LastBin);
 parse(Bin) ->
     {undefined, Bin}.
-
-
-parse_(TotalSize, CmdBin, TotalSize, LastBin) ->
-    Bin = <<TotalSize:32, CmdBin/binary>>,
-    BaseCommand = pulsar_api:decode_msg(Bin, 'BaseCommand'),
-    Resp = case maps:get(type, BaseCommand, unknown) of
-        ?CONNECTED -> {connected, maps:get(connected, BaseCommand)};
-        ?PARTITIONED_METADATA_RESPONSE -> {partitionMetadataResponse, maps:get(partitionMetadataResponse, BaseCommand)};
-        ?LOOKUP_RESPONSE -> {lookupTopicResponse, maps:get(lookupTopicResponse, BaseCommand)};
-        ?PRODUCER_SUCCESS -> {producer_success, maps:get(producer_success, BaseCommand)};
-        ?SEND_RECEIPT -> {send_receipt, maps:get(send_receipt, BaseCommand)};
-        ?PING -> {ping, maps:get(ping, BaseCommand)};
-        ?PONG -> {pong, maps:get(pong, BaseCommand)};
-        ?CLOSE_PRODUCER -> {close_producer, maps:get(close_producer, BaseCommand)};
-        ?SUCCESS -> {subscribe_success, maps:get(success, BaseCommand)};
-        _ -> unknown
-    end,
-    {Resp, LastBin}.
 
 serialized_simple_command(BaseCommand) ->
     BaseCommandBin = i2b(pulsar_api:encode_msg(BaseCommand, 'BaseCommand')),

@@ -117,7 +117,8 @@ parse(<<TotalSize:32, CmdBin:TotalSize/binary, Rest/binary>>) ->
     BaseCommand = pulsar_api:decode_msg(<<CommandSize:32, Command/binary>>, 'BaseCommand'),
     Resp = case maps:get(type, BaseCommand, unknown) of
         ?MESSAGE ->
-            <<MetadataSize:32, _Metadata:MetadataSize/binary, Payload/binary>> = CmdRest,
+            <<MetadataSize:32, _Metadata:MetadataSize/binary, Payload0/binary>> = CmdRest,
+            <<UnknownLen:32,_Unknown:UnknownLen/binary, Payload/binary>> = Payload0,
             {message, maps:get(message, BaseCommand), Payload};
         ?CONNECTED ->
             {connected, maps:get(connected, BaseCommand)};

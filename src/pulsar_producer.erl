@@ -234,13 +234,6 @@ create_producer(Sock, Topic, RequestId, ProducerId) ->
     },
     gen_tcp:send(Sock, ?FRAME:create_producer(Producer)).
 
-batch_message(Metadata, Len, Messages) when Len =:= 1 ->
-    [#{key := Key, value := Val}] = Messages,
-    Metadata1 = case Key =:= undefined of
-        true  -> Metadata;
-        false -> Metadata#{partition_key => Key}
-    end,
-    {Metadata1, Val};
 batch_message(Metadata, Len, Messages) ->
     Metadata1 = Metadata#{num_messages_in_batch => Len},
     BatchMessage = lists:foldl(fun(#{key := Key, value := Message}, Acc) ->

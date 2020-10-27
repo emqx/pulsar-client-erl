@@ -32,6 +32,7 @@
 -define(PING, 'PING').
 -define(PONG, 'PONG').
 -define(CLOSE_PRODUCER, 'CLOSE_PRODUCER').
+-define(CLOSE_CONSUMER, 'CLOSE_CONSUMER').
 -define(SIMPLE_SIZE, 4).
 -define(PAYLOAD_SIZE, 10).
 -define(MAGIC_NUMBER, 3585).
@@ -118,7 +119,7 @@ parse(<<TotalSize:32, CmdBin:TotalSize/binary, Rest/binary>>) ->
     Resp = case maps:get(type, BaseCommand, unknown) of
         ?MESSAGE ->
             <<MetadataSize:32, _Metadata:MetadataSize/binary, Payload0/binary>> = CmdRest,
-            <<UnknownLen:32,_Unknown:UnknownLen/binary, Payload/binary>> = Payload0,
+            <<SMetadataLen:32, _SMetadata:SMetadataLen/binary, Payload/binary>> = Payload0,
             {message, maps:get(message, BaseCommand), Payload};
         ?CONNECTED ->
             {connected, maps:get(connected, BaseCommand)};
@@ -136,6 +137,8 @@ parse(<<TotalSize:32, CmdBin:TotalSize/binary, Rest/binary>>) ->
             {pong, maps:get(pong, BaseCommand)};
         ?CLOSE_PRODUCER ->
             {close_producer, maps:get(close_producer, BaseCommand)};
+        ?CLOSE_CONSUMER ->
+            {close_consumer, maps:get(close_consumer, BaseCommand)};
         ?SUCCESS ->
             {subscribe_success, maps:get(success, BaseCommand)};
         _Type ->
@@ -152,6 +155,11 @@ serialized_simple_command(BaseCommand) ->
     Size = size(BaseCommandBin),
     TotalSize = Size + ?SIMPLE_SIZE,
     <<TotalSize:32, Size:32, BaseCommandBin/binary>>.
+
+
+
+
+
 
 serialized_payload_command(BaseCommand, Metadata, BatchPayload) ->
     BaseCommandBin = i2b(pulsar_api:encode_msg(BaseCommand, 'BaseCommand')),

@@ -1,0 +1,12 @@
+{"0.4.1",
+   [
+     {"0.4.0", [
+       {load_module, pulsar_producer, brutal_purge, soft_purge, []}
+     ]}
+   ],
+   [
+     {"0.4.0", [
+       {load_module, pulsar_producer, brutal_purge, soft_purge, []}
+     ]}
+   ]
+}.

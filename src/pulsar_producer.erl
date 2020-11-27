@@ -180,7 +180,10 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                 State = #state{callback = Callback, requests = Reqs}) ->
     case maps:get(SequenceId, Reqs, undefined) of
         undefined ->
-            Callback(Resp),
+            case Callback of
+                {M, F, A} -> erlang:apply(M, F, [Resp] ++ A);
+                _ -> Callback(Resp)
+            end,
             {keep_state, State};
         From ->
             gen_statem:reply(From, Resp),

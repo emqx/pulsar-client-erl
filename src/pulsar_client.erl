@@ -119,6 +119,10 @@ handle_info({tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
 handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
     {noreply, State#state{sock = undefined}, hibernate};
 
+handle_info(ping, State = #state{sock = Sock}) ->
+    ping(Sock),
+    {noreply, State, hibernate};
+
 handle_info(_Info, State) ->
     log_error("Pulsar_client Receive unknown message:~p~n", [_Info]),
     {noreply, State, hibernate}.
@@ -141,9 +145,11 @@ parse({Cmd, LastBin}, State) ->
     parse(pulsar_protocol_frame:parse(LastBin), State2).
 
 handle_response({connected, _ConnectedData}, State = #state{from = undefined}) ->
+    start_keepalive(),
     {noreply, State, hibernate};
 
 handle_response({connected, _ConnectedData}, State = #state{from = From}) ->
+    start_keepalive(),
     gen_server:reply(From, true),
     {noreply, State#state{from = undefined}, hibernate};
 
@@ -169,7 +175,12 @@ handle_response({lookupTopicResponse, #{brokerServiceUrl := BrokerServiceUrl,
             {noreply, State, hibernate}
     end;
 
-handle_response({ping, #{}}, State) ->
+handle_response({ping, #{}}, State = #state{sock = Sock}) ->
+    pong(Sock),
+    {noreply, State, hibernate};
+
+handle_response({pong, #{}}, State) ->
+    start_keepalive(),
     {noreply, State, hibernate};
 
 handle_response(_Info, State) ->
@@ -227,3 +238,12 @@ next_request_id(State = #state{request_id = RequestId}) ->
     State#state{request_id = RequestId+1}.
 
 log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).
+
+start_keepalive() ->
+    erlang:send_after(30*1000, self(), ping).
+
+ping(Sock) ->
+    gen_tcp:send(Sock, pulsar_protocol_frame:ping()).
+
+pong(Sock) ->
+    gen_tcp:send(Sock, pulsar_protocol_frame:pong()).

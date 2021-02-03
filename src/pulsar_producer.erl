@@ -123,7 +123,10 @@ connected({call, From}, {send, Message}, State = #state{sequence_id = SequenceId
     {keep_state, next_sequence_id(State#state{requests = maps:put(SequenceId, From, Reqs)})};
 
 connected(cast, {send, Message}, State = #state{batch_size = BatchSize}) ->
+    io:format("--------- BatchSize: ~p ~n", [BatchSize]),
     BatchMessage = Message ++ collect_send_calls(BatchSize),
+    io:format("--------- Message: ~p ~n", [Message]),
+    io:format("--------- BatchMessage: ~p ~n", [BatchMessage]),
     send_batch_payload(BatchMessage, State),
     {keep_state, next_sequence_id(State)};
 

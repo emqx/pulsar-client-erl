@@ -121,7 +121,7 @@ parse(<<TotalSize:32, CmdBin:TotalSize/binary, Rest/binary>>) ->
             <<MetadataSize:32, Metadata:MetadataSize/binary, Payload0/binary>> = CmdRest,
             MetadataCmd = pulsar_api:decode_msg(<<MetadataSize:32, Metadata/binary>>, 'MessageMetadata'),
             Payloads = parse_batch_message(Payload0, maps:get(num_messages_in_batch, MetadataCmd, 1)),
-            {message, maps:get(message, BaseCommand), lists:reverse(Payloads)};
+            {message, maps:get(message, BaseCommand), Payloads};
         ?CONNECTED ->
             {connected, maps:get(connected, BaseCommand)};
         ?PARTITIONED_METADATA_RESPONSE ->
@@ -172,7 +172,7 @@ i2b(I) -> I.
 parse_batch_message(Payloads, Size) ->
     parse_batch_message(Payloads, Size, []).
 parse_batch_message(_Payloads, 0, Acc) ->
-    Acc;
+    lists:reverse(Acc);
 parse_batch_message(Payloads, Size, Acc) ->
     <<SMetadataSize:32, SMetadata:SMetadataSize/binary, Rest/binary>> = Payloads,
     SingleMessageMetadata = pulsar_api:decode_msg(<<SMetadataSize:32, SMetadata/binary>>, 'SingleMessageMetadata'),

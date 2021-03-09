@@ -146,11 +146,11 @@ handle_response({subscribe_success, #{}}, State = #state{sock = Sock,
                                                          flow = Flow}) ->
     set_flow(Sock, ConsumerId, Flow),
     {keep_state, State};
-handle_response({message, Msg, Payload}, State = #state{sock = Sock,
-                                                        consumer_id = ConsumerId,
-                                                        cb_module = CbModule,
-                                                        cb_state = CbState}) ->
-    case CbModule:handle_message(Msg, Payload, CbState) of
+handle_response({message, Msg, Payloads}, State = #state{sock = Sock,
+                                                         consumer_id = ConsumerId,
+                                                         cb_module = CbModule,
+                                                         cb_state = CbState}) ->
+    case CbModule:handle_message(Msg, Payloads, CbState) of
         {ok, AckType, NState} ->
             ack(Sock, ConsumerId, AckType, Msg),
             {keep_state, maybe_send_flow(State#state{cb_state = NState})};

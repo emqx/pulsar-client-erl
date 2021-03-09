@@ -1,12 +1,24 @@
-{"0.4.1",
+{"0.4.2",
    [
      {"0.4.0", [
-       {load_module, pulsar_producer, brutal_purge, soft_purge, []}
+       {load_module, pulsar_producer, brutal_purge, soft_purge, []},
+       {load_module, pulsar_consumer, brutal_purge, soft_purge, []},
+       {load_module, pulsar_consumer, brutal_purge, soft_purge, []}
+     ]},
+     {"0.4.1", [
+       {load_module, pulsar_consumer, brutal_purge, soft_purge, []},
+       {load_module, pulsar_consumer, brutal_purge, soft_purge, []}
      ]}
    ],
    [
      {"0.4.0", [
-       {load_module, pulsar_producer, brutal_purge, soft_purge, []}
+       {load_module, pulsar_producer, brutal_purge, soft_purge, []},
+       {load_module, pulsar_consumer, brutal_purge, soft_purge, []},
+       {load_module, pulsar_consumer, brutal_purge, soft_purge, []}
+     ]},
+     {"0.4.1", [
+       {load_module, pulsar_consumer, brutal_purge, soft_purge, []},
+       {load_module, pulsar_consumer, brutal_purge, soft_purge, []}
      ]}
    ]
 }.

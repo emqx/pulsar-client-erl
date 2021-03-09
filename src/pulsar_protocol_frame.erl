@@ -118,9 +118,10 @@ parse(<<TotalSize:32, CmdBin:TotalSize/binary, Rest/binary>>) ->
     BaseCommand = pulsar_api:decode_msg(<<CommandSize:32, Command/binary>>, 'BaseCommand'),
     Resp = case maps:get(type, BaseCommand, unknown) of
         ?MESSAGE ->
-            <<MetadataSize:32, _Metadata:MetadataSize/binary, Payload0/binary>> = CmdRest,
-            <<SMetadataLen:32, _SMetadata:SMetadataLen/binary, Payload/binary>> = Payload0,
-            {message, maps:get(message, BaseCommand), Payload};
+            <<MetadataSize:32, Metadata:MetadataSize/binary, Payload0/binary>> = CmdRest,
+            MetadataCmd = pulsar_api:decode_msg(<<MetadataSize:32, Metadata/binary>>, 'MessageMetadata'),
+            Payloads = parse_batch_message(Payload0, maps:get(num_messages_in_batch, MetadataCmd, 1)),
+            {message, maps:get(message, BaseCommand), lists:reverse(Payloads)};
         ?CONNECTED ->
             {connected, maps:get(connected, BaseCommand)};
         ?PARTITIONED_METADATA_RESPONSE ->
@@ -156,11 +157,6 @@ serialized_simple_command(BaseCommand) ->
     TotalSize = Size + ?SIMPLE_SIZE,
     <<TotalSize:32, Size:32, BaseCommandBin/binary>>.
 
-
-
-
-
-
 serialized_payload_command(BaseCommand, Metadata, BatchPayload) ->
     BaseCommandBin = i2b(pulsar_api:encode_msg(BaseCommand, 'BaseCommand')),
     BaseCommandSize = size(BaseCommandBin),
@@ -172,3 +168,14 @@ serialized_payload_command(BaseCommand, Metadata, BatchPayload) ->
 
 i2b(I) when is_list(I) -> iolist_to_binary(I);
 i2b(I) -> I.
+
+parse_batch_message(Payloads, Size) ->
+    parse_batch_message(Payloads, Size, []).
+parse_batch_message(_Payloads, 0, Acc) ->
+    Acc;
+parse_batch_message(Payloads, Size, Acc) ->
+    <<SMetadataSize:32, SMetadata:SMetadataSize/binary, Rest/binary>> = Payloads,
+    SingleMessageMetadata = pulsar_api:decode_msg(<<SMetadataSize:32, SMetadata/binary>>, 'SingleMessageMetadata'),
+    PayloadSize = maps:get(payload_size, SingleMessageMetadata),
+    <<Payload:PayloadSize/binary, Rest1/binary>> = Rest,
+    parse_batch_message(Rest1, Size - 1, [Payload | Acc]).

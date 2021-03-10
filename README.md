@@ -51,11 +51,11 @@ ok = pulsar:stop_and_delete_supervised_client('client1').
 init(Topic, _Arg) -> {ok, []}.
 
 %% behaviour callback
--spec handle_message(map(), binary(), any()) -> {ok, 'Individual' , any()} | {ok, 'Cumulative' , any()}.
-handle_message(Msg, Payload, CState) ->
+-spec handle_message(map(), list(), any()) -> {ok, 'Individual' , any()} | {ok, 'Cumulative' , any()}.
+handle_message(Msg, Payloads, CState) ->
     #{consumer_id := ConsumerId,
       message_id := #{entryId := EntryId,ledgerId := LedgerId}} = Msg,
-    io:format("Receive payload:~p~n", [Payload]),
+    io:format("Receive payloads:~p~n", [Payloads]),
     {ok, 'Individual', State}.
 
 -spec start(atom()) -> {ok, pid()}.

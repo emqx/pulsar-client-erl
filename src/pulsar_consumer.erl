@@ -153,7 +153,8 @@ handle_response({message, Msg, Payloads}, State = #state{sock = Sock,
     case CbModule:handle_message(Msg, Payloads, CbState) of
         {ok, AckType, NState} ->
             ack(Sock, ConsumerId, AckType, Msg),
-            {keep_state, maybe_send_flow(State#state{cb_state = NState})};
+            set_flow(Sock, ConsumerId, length(Payloads)),
+            {keep_state, State#state{cb_state = NState}};
         _ ->
             {keep_state, State}
     end;
@@ -206,19 +207,6 @@ ack(Sock, ConsumerId, AckType, Msg) ->
     },
     gen_tcp:send(Sock, ?FRAME:ack(Ack)).
 
-maybe_send_flow(State = #state{flow = Flow,
-                               flow_rate = FlowRate,
-                               sock = Sock,
-                               consumer_id = ConsumerId,
-                               opts = Opts}) ->
-    InitFlow = maps:get(flow, Opts, 1000),
-    case (InitFlow - erlang:round(FlowRate * InitFlow)) >= Flow of
-        true ->
-            set_flow(Sock, ConsumerId, InitFlow),
-            State#state{flow = InitFlow};
-        false ->
-            State#state{flow = Flow - 1}
-    end.
 format_url("pulsar://" ++ Url) ->
     [Host, Port] = string:tokens(Url, ":"),
     {Host, list_to_integer(Port)};

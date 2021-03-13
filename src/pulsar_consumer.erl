@@ -72,8 +72,7 @@ init([PartitionTopic, BrokerServiceUrl, ConsumerOpts]) ->
                    cb_state = CbState,
                    opts = ConsumerOpts2,
                    broker_service_url = binary_to_list(BrokerServiceUrl),
-                   flow = maps:get(flow, ConsumerOpts, 1000),
-                   flow_rate = maps:get(flow_rate, ConsumerOpts, 80)},
+                   flow = maps:get(flow, ConsumerOpts, 1000)},
     self() ! connecting,
     {ok, idle, State}.
 
@@ -151,10 +150,10 @@ handle_response({message, Msg, Payloads}, State = #state{sock = Sock,
                                                          cb_module = CbModule,
                                                          cb_state = CbState}) ->
     case CbModule:handle_message(Msg, Payloads, CbState) of
-        {ok, AckType, NState} ->
+        {ok, AckType, NCbState} ->
             ack(Sock, ConsumerId, AckType, Msg),
-            set_flow(Sock, ConsumerId, length(Payloads)),
-            {keep_state, State#state{cb_state = NState}};
+            NState = maybe_set_flow(length(Payloads), State),
+            {keep_state, NState#state{cb_state = NCbState}};
         _ ->
             {keep_state, State}
     end;
@@ -191,6 +190,19 @@ subscribe(Sock, Topic, RequestId, ConsumerId, Opts) ->
         request_id => RequestId
     },
     gen_tcp:send(Sock, ?FRAME:create_subscribe(SubInfo)).
+
+maybe_set_flow(Len, State = #state{sock = Sock,
+                                   consumer_id = ConsumerId,
+                                   flow = Flow,
+                                   opts = Opts}) ->
+    InitFlow = maps:get(flow, Opts, 1000),
+    case (InitFlow div 2) > Flow of
+        true ->
+            set_flow(Sock, ConsumerId, InitFlow - (Flow - Len)),
+            State#state{flow = InitFlow};
+        false ->
+            State#state{flow = Flow - Len}
+    end.
 
 set_flow(Sock, ConsumerId, FlowSize) ->
     FlowInfo = #{

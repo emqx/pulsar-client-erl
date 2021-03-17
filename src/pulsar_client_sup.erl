@@ -25,45 +25,45 @@
 start_link() -> supervisor:start_link({local, ?SUPERVISOR}, ?MODULE, []).
 
 init([]) ->
-  SupFlags = #{strategy => one_for_one,
-               intensity => 10,
-               period => 5
-              },
-  Children = [], %% dynamically added/stopped
-  {ok, {SupFlags, Children}}.
+    SupFlags = #{strategy => one_for_one,
+                 intensity => 10,
+                 period => 5
+               },
+    Children = [], %% dynamically added/stopped
+    {ok, {SupFlags, Children}}.
 
 %% ensure a client started under supervisor
 ensure_present(ClientId, Hosts, Opts) ->
-  ChildSpec = child_spec(ClientId, Hosts, Opts),
-  case supervisor:start_child(?SUPERVISOR, ChildSpec) of
-    {ok, Pid} -> {ok, Pid};
-    {error, {already_started, Pid}} -> {ok, Pid};
-    {error, already_present} -> {error, client_not_running}
-  end.
+    ChildSpec = child_spec(ClientId, Hosts, Opts),
+    case supervisor:start_child(?SUPERVISOR, ChildSpec) of
+        {ok, Pid} -> {ok, Pid};
+        {error, {already_started, Pid}} -> {ok, Pid};
+        {error, already_present} -> {error, client_not_running}
+    end.
 
 %% ensure client stopped and deleted under supervisor
 ensure_absence(ClientId) ->
-  case supervisor:terminate_child(?SUPERVISOR, ClientId) of
-    ok -> ok = supervisor:delete_child(?SUPERVISOR, ClientId);
-    {error, not_found} -> ok
-  end.
+    case supervisor:terminate_child(?SUPERVISOR, ClientId) of
+        ok -> ok = supervisor:delete_child(?SUPERVISOR, ClientId);
+        {error, not_found} -> ok
+    end.
 
 %% find client pid from client id
 find_client(ClientId) ->
-  Children = supervisor:which_children(?SUPERVISOR),
-  case lists:keyfind(ClientId, 1, Children) of
-    {ClientId, Client, _, _} when is_pid(Client) ->
-      {ok, Client};
-    {ClientId, Restarting, _, _} ->
-      {error, Restarting};
-    false ->
-      erlang:error({no_such_client, ClientId})
-  end.
+    Children = supervisor:which_children(?SUPERVISOR),
+    case lists:keyfind(ClientId, 1, Children) of
+        {ClientId, Client, _, _} when is_pid(Client) ->
+            {ok, Client};
+        {ClientId, Restarting, _, _} ->
+            {error, Restarting};
+        false ->
+            erlang:error({no_such_client, ClientId})
+    end.
 
 child_spec(ClientId, Hosts, Opts) ->
-  #{id => ClientId,
-    start => {pulsar_client, start_link, [ClientId, Hosts, Opts]},
-    restart => transient,
-    type => worker,
-    modules => [pulsar_client]
-   }.
+    #{id => ClientId,
+      start => {pulsar_client, start_link, [ClientId, Hosts, Opts]},
+      restart => transient,
+      type => worker,
+      modules => [pulsar_client]
+    }.

@@ -99,7 +99,7 @@ send(Send, Metadata, BatchPayload) ->
     serialized_payload_command(#{
         type => ?SEND,
         send => Send
-    }, i2b(pulsar_api:encode_msg(Metadata, 'MessageMetadata')), BatchPayload).
+    }, pulsar_api:encode_msg(Metadata, 'MessageMetadata'), BatchPayload).
 
 ping() ->
     serialized_simple_command(#{
@@ -152,22 +152,19 @@ parse(Bin) ->
     {undefined, Bin}.
 
 serialized_simple_command(BaseCommand) ->
-    BaseCommandBin = i2b(pulsar_api:encode_msg(BaseCommand, 'BaseCommand')),
+    BaseCommandBin = pulsar_api:encode_msg(BaseCommand, 'BaseCommand'),
     Size = size(BaseCommandBin),
     TotalSize = Size + ?SIMPLE_SIZE,
     <<TotalSize:32, Size:32, BaseCommandBin/binary>>.
 
 serialized_payload_command(BaseCommand, Metadata, BatchPayload) ->
-    BaseCommandBin = i2b(pulsar_api:encode_msg(BaseCommand, 'BaseCommand')),
+    BaseCommandBin = pulsar_api:encode_msg(BaseCommand, 'BaseCommand'),
     BaseCommandSize = size(BaseCommandBin),
     MetadataSize = size(Metadata),
     Payload = <<MetadataSize:32, Metadata/binary, BatchPayload/binary>>,
     Checksum = crc32cer:nif(Payload),
     TotalSize = BaseCommandSize + size(Payload) + ?PAYLOAD_SIZE,
     <<TotalSize:32, BaseCommandSize:32, BaseCommandBin/binary, ?MAGIC_NUMBER:16, Checksum:32, Payload/binary>>.
-
-i2b(I) when is_list(I) -> iolist_to_binary(I);
-i2b(I) -> I.
 
 parse_batch_message(Payloads, Size) ->
     parse_batch_message(Payloads, Size, []).

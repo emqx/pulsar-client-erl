@@ -51,7 +51,7 @@ start_link(ClientId, Servers, Opts) ->
 
 get_topic_metadata(Pid, Topic) ->
     Call = self(),
-    gen_server:call(Pid, {get_topic_metadata, Topic, Call}).
+    gen_server:call(Pid, {get_topic_metadata, Topic, Call}, 30000).
 
 lookup_topic(Pid, PartitionTopic) ->
     gen_server:call(Pid, {lookup_topic, PartitionTopic}, 30000).
@@ -65,7 +65,7 @@ init([Servers, Opts]) ->
     State = #state{servers = Servers, opts = Opts},
     case get_sock(Servers, undefined) of
         error ->
-            {error, fail_to_connect_pulser_server};
+            {error, fail_to_connect_pulsar_server};
         Sock ->
             {ok, State#state{sock = Sock}}
     end.

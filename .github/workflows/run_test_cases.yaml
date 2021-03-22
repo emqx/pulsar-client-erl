@@ -21,12 +21,9 @@ jobs:
           PULSAR_TAG: ${{ matrix.pulsar_tag }}
         run: |
           docker-compose -f ./docker-compose.yml up -d
+          sleep 3m
+          docker exec -i pulsar sh -c "bin/pulsar-admin topics create-partitioned-topic persistent://public/default/test -p 4"
           docker exec -i erlang sh -c "make -C /pulsar_client_erl xref"
           docker exec -i erlang sh -c "make -C /pulsar_client_erl eunit"
           docker exec -i erlang sh -c "make -C /pulsar_client_erl ct"
           docker exec -i erlang sh -c "make -C /pulsar_client_erl cover"
-      - uses: actions/upload-artifact@v1
-        if: failure()
-        with:
-          name: logs_pulsar${{ matrix.pulsar_tag }}
-          path: _build/test/logs

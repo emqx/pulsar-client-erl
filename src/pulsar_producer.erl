@@ -81,11 +81,13 @@ send_sync(Pid, Message, Timeout) ->
 %%--------------------------------------------------------------------
 %% gen_server callback
 %%--------------------------------------------------------------------
+init([PartitionTopic, BrokerServiceUrl, ProducerOpts]) when is_binary(BrokerServiceUrl)->
+    init([PartitionTopic, binary_to_list(BrokerServiceUrl), ProducerOpts]);
 init([PartitionTopic, BrokerServiceUrl, ProducerOpts]) ->
     State = #state{partitiontopic = PartitionTopic,
                    callback = maps:get(callback, ProducerOpts, undefined),
                    batch_size = maps:get(batch_size, ProducerOpts, 0),
-                   broker_service_url = binary_to_list(BrokerServiceUrl),
+                   broker_service_url = BrokerServiceUrl,
                    opts = maps:get(tcp_opts, ProducerOpts, [])},
     self() ! connecting,
     {ok, idle, State}.
@@ -104,7 +106,13 @@ idle(_, connecting, State = #state{opts = Opts, broker_service_url = BrokerServi
 
 connecting(_EventType, {tcp, _, Bin}, State) ->
     {Cmd, _} = ?FRAME:parse(Bin),
-    handle_response(Cmd, State).
+    handle_response(Cmd, State);
+
+connecting({call, From}, {send, _Message}, State) ->
+    {keep_state, State, [{reply, From ,{fail, producer_connecting}}]};
+
+connecting(cast, {send, _Message}, _State) ->
+    keep_state_and_data.
 
 connected(_EventType, {tcp_closed, Sock}, State = #state{sock = Sock, partitiontopic = Topic}) ->
     log_error("TcpClosed producer: ~p~n", [Topic]),
@@ -118,9 +126,15 @@ connected(_EventType, ping, State = #state{sock = Sock}) ->
     ping(Sock),
     {keep_state, State};
 
+connected({call, From}, {send, _Message}, State = #state{producer_name = undefined}) ->
+    {keep_state, State, [{reply, From ,{fail, producer_connecting}}]};
+
 connected({call, From}, {send, Message}, State = #state{sequence_id = SequenceId, requests = Reqs}) ->
     send_batch_payload(Message, State),
     {keep_state, next_sequence_id(State#state{requests = maps:put(SequenceId, From, Reqs)})};
+
+connected(cast, {send, _Message}, #state{producer_name = undefined}) ->
+    keep_state_and_data;
 
 connected(cast, {send, Message}, State = #state{batch_size = BatchSize}) ->
     BatchMessage = Message ++ collect_send_calls(BatchSize),

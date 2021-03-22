@@ -63,6 +63,8 @@ start_link(PartitionTopic, BrokerServiceUrl, ConsumerOpts) ->
 %%--------------------------------------------------------------------
 %% gen_server callback
 %%--------------------------------------------------------------------
+init([PartitionTopic, BrokerServiceUrl, ConsumerOpts]) when is_binary(BrokerServiceUrl) ->
+    init([PartitionTopic, binary_to_list(BrokerServiceUrl), ConsumerOpts]);
 init([PartitionTopic, BrokerServiceUrl, ConsumerOpts]) ->
     {CbModule, ConsumerOpts1} = maps:take(cb_module, ConsumerOpts),
     {CbInitArg, ConsumerOpts2} = maps:take(cb_init_args, ConsumerOpts1),
@@ -71,7 +73,7 @@ init([PartitionTopic, BrokerServiceUrl, ConsumerOpts]) ->
                    cb_module = CbModule,
                    cb_state = CbState,
                    opts = ConsumerOpts2,
-                   broker_service_url = binary_to_list(BrokerServiceUrl),
+                   broker_service_url = BrokerServiceUrl,
                    flow = maps:get(flow, ConsumerOpts, 1000)},
     self() ! connecting,
     {ok, idle, State}.

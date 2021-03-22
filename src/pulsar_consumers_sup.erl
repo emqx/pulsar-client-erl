@@ -18,7 +18,7 @@
 
 -export([start_link/0, init/1]).
 
--export([ensure_present/3, ensure_absence/2]).
+-export([ensure_present/3, ensure_absence/1]).
 
 -define(SUPERVISOR, ?MODULE).
 -define(WORKER_ID(ClientId, Name), {ClientId, Name}).
@@ -45,10 +45,9 @@ ensure_present(ClientId, Topic, ConsumerOpts) ->
     end.
 
 %% ensure client stopped and deleted under supervisor
-ensure_absence(ClientId, Name) ->
-    Id = ?WORKER_ID(ClientId, Name),
-    case supervisor:terminate_child(?SUPERVISOR, Id) of
-        ok -> ok = supervisor:delete_child(?SUPERVISOR, Id);
+ensure_absence(ClientId) ->
+    case supervisor:terminate_child(?SUPERVISOR, ClientId) of
+        ok -> ok = supervisor:delete_child(?SUPERVISOR, ClientId);
         {error, not_found} -> ok
     end.
 

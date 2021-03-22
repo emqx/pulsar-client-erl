@@ -49,7 +49,7 @@ start_supervised(ClientId, Topic, ProducerOpts) ->
 stop_supervised(#{client := ClientId, workers := Workers}) ->
   pulsar_producers_sup:ensure_absence(ClientId, Workers).
 
-%% @doc start pulsar_producdrs gen_server
+%% @doc start pulsar_producers gen_server
 start_link(ClientId, Topic, ProducerOpts) ->
     gen_server:start_link({local, get_name(ProducerOpts)}, ?MODULE, [ClientId, Topic, ProducerOpts], []).
 

@@ -69,7 +69,9 @@ init([PartitionTopic, BrokerServiceUrl, ConsumerOpts]) ->
     {CbModule, ConsumerOpts1} = maps:take(cb_module, ConsumerOpts),
     {CbInitArg, ConsumerOpts2} = maps:take(cb_init_args, ConsumerOpts1),
     {ok, CbState} = CbModule:init(PartitionTopic, CbInitArg),
-    State = #state{partitiontopic = PartitionTopic,
+    State = #state{
+                   consumer_id = maps:get(consumer_id, ConsumerOpts),
+                   partitiontopic = PartitionTopic,
                    cb_module = CbModule,
                    cb_state = CbState,
                    opts = ConsumerOpts2,
@@ -147,10 +149,13 @@ handle_response({subscribe_success, #{}}, State = #state{sock = Sock,
                                                          flow = Flow}) ->
     set_flow(Sock, ConsumerId, Flow),
     {keep_state, State};
-handle_response({message, Msg, Payloads}, State = #state{sock = Sock,
+handle_response({message, Msg, Payloads}, State = #state{
+                                                         partitiontopic = PartitionTopic,
+                                                         sock = Sock,
                                                          consumer_id = ConsumerId,
                                                          cb_module = CbModule,
                                                          cb_state = CbState}) ->
+    pulsar_metrics:recv(PartitionTopic, length(Payloads)),
     case CbModule:handle_message(Msg, Payloads, CbState) of
         {ok, AckType, NCbState} ->
             ack(Sock, ConsumerId, AckType, Msg),

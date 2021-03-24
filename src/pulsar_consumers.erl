@@ -12,6 +12,8 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 -module(pulsar_consumers).
+-define(MAX_CONSUMER_ID, 65535).
+
 
 %% APIs
 -export([start_supervised/3, stop_supervised/1, start_link/3]).
@@ -29,6 +31,7 @@
                 client_id,
                 partitions,
                 consumer_opts,
+                consumer_id = 0,
                 consumers = #{}}).
 
 %% @doc Start supervised consumer.
@@ -55,18 +58,17 @@ handle_call(_Call, _From, State) ->
 handle_cast(_Cast, State) ->
     {noreply, State}.
 
-handle_info(timeout, State = #state{client_id = ClientId,
-                                    topic = Topic,
-                                    consumers = Consumers,
-                                    consumer_opts = ConsumerOpts}) ->
+handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
     case pulsar_client_sup:find_client(ClientId) of
         {ok, Pid} ->
             {_, Partitions} = pulsar_client:get_topic_metadata(Pid, Topic),
             PartitionTopics = create_partition_topic(Topic, Partitions),
-            NewConsumers = lists:foldl(fun(PartitionTopic, Acc) ->
-                start_consumer(Pid, PartitionTopic, ConsumerOpts, Acc)
-            end, Consumers, PartitionTopics),
-            {noreply, State#state{partitions = length(PartitionTopics), consumers = NewConsumers}};
+            NewState = lists:foldl(
+                fun(PartitionTopic, CurrentState) ->
+                    start_consumer(Pid, PartitionTopic, CurrentState)
+                end,
+                State, PartitionTopics),
+            {noreply, NewState#state{partitions = length(PartitionTopics)}};
         {error, Reason} ->
             {stop, {shutdown, Reason}, State}
     end;
@@ -81,13 +83,10 @@ handle_info({'EXIT', Pid, _Error}, State = #state{consumers = Consumers}) ->
             {noreply, State#state{consumers = maps:remove(Pid, Consumers)}}
     end;
 
-handle_info({restart_consumer, PartitionTopic}, State = #state{client_id = ClientId,
-                                                               consumers = Consumers,
-                                                               consumer_opts = ConsumerOpts}) ->
+handle_info({restart_consumer, PartitionTopic}, State = #state{client_id = ClientId}) ->
     case pulsar_client_sup:find_client(ClientId) of
         {ok, Pid} ->
-            NewConsumers = start_consumer(Pid, PartitionTopic, ConsumerOpts, Consumers),
-            {noreply, State#state{consumers = NewConsumers}};
+            {noreply, start_consumer(Pid, PartitionTopic, State)};
         {error, Reason} ->
             {stop, {shutdown, Reason}, State}
     end;
@@ -112,20 +111,30 @@ get_name(ConsumerOpts) -> maps:get(name, ConsumerOpts, ?MODULE).
 
 log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).
 
-start_consumer(Pid, PartitionTopic, ConsumerOpts, Consumers) ->
+start_consumer(Pid, PartitionTopic, #state{consumer_opts = ConsumerOpts} = State) ->
     try
         BrokerServiceUrl = pulsar_client:lookup_topic(Pid, PartitionTopic),
         {MaxConsumerMum, ConsumerOpts1} = case maps:take(max_consumer_num, ConsumerOpts) of
             error -> {1, ConsumerOpts};
             Res -> Res
         end,
-        lists:foldl(fun(_, Acc) ->
-            {ok, Consumer} = pulsar_consumer:start_link(PartitionTopic, BrokerServiceUrl, ConsumerOpts1),
-            maps:put(Consumer, PartitionTopic, Acc)
-        end, Consumers, lists:seq(1, MaxConsumerMum))
+        lists:foldl(
+            fun(_, #state{consumer_id = CurrentID, consumers = Consumers} = CurrentState) ->
+                ConsumerOptsWithConsumerID = maps:put(consumer_id, CurrentID, ConsumerOpts1),
+                {ok, Consumer} =
+                    pulsar_consumer:start_link(PartitionTopic, BrokerServiceUrl, ConsumerOptsWithConsumerID),
+                NewState = next_consumer_id(CurrentState),
+                NewState#state{consumers = maps:put(Consumer, PartitionTopic, Consumers)}
+            end,
+            State, lists:seq(1, MaxConsumerMum))
     catch
         Error : Reason : Stacktrace ->
             log_error("Start consumer: ~p, ~p", [Error, {Reason, Stacktrace}]),
             self() ! {restart_consumer, PartitionTopic},
-            Consumers
+            State
     end.
+
+next_consumer_id(#state{consumer_id = ?MAX_CONSUMER_ID} = Stat) ->
+    Stat#state{consumer_id = 0};
+next_consumer_id(#state{consumer_id = ID} = Stat) ->
+    Stat#state{consumer_id = ID + 1}.

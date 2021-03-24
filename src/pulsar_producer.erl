@@ -85,6 +85,8 @@ init([PartitionTopic, BrokerServiceUrl, ProducerOpts]) when is_binary(BrokerServ
     init([PartitionTopic, binary_to_list(BrokerServiceUrl), ProducerOpts]);
 init([PartitionTopic, BrokerServiceUrl, ProducerOpts]) ->
     State = #state{partitiontopic = PartitionTopic,
+                   producer_id = maps:get(producer_id, ProducerOpts),
+                   producer_name = maps:get(producer_name, ProducerOpts, pulsar_producer),
                    callback = maps:get(callback, ProducerOpts, undefined),
                    batch_size = maps:get(batch_size, ProducerOpts, 0),
                    broker_service_url = BrokerServiceUrl,
@@ -207,7 +209,9 @@ connect(Sock) ->
              protocol_version => 6},
     gen_tcp:send(Sock, ?FRAME:connect(Conn)).
 
-send_batch_payload(Messages, #state{sequence_id = SequenceId,
+send_batch_payload(Messages, #state{
+                                    partitiontopic = PartitionTopic,
+                                    sequence_id = SequenceId,
                                     producer_id = ProducerId,
                                     producer_name = ProducerName,
                                     sock = Sock}) ->
@@ -226,7 +230,8 @@ send_batch_payload(Messages, #state{sequence_id = SequenceId,
                  publish_time => erlang:system_time(millisecond),
                  compression => 'NONE'},
     {Metadata1, BatchMessage} = batch_message(Metadata, Len, Messages),
-    gen_tcp:send(Sock, ?FRAME:send(Send, Metadata1, BatchMessage)).
+    gen_tcp:send(Sock, ?FRAME:send(Send, Metadata1, BatchMessage)),
+    pulsar_metrics:send(PartitionTopic, Len).
 
 start_keepalive() ->
     erlang:send_after(30*1000, self(), ping).

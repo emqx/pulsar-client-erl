@@ -14,6 +14,8 @@
 
 -module(pulsar_producers).
 
+-define(MAX_PRODUCER_ID, 65535).
+
 %% APIs
 -export([start_supervised/3, stop_supervised/1, start_link/3]).
 
@@ -33,6 +35,7 @@
                 workers,
                 partitions,
                 producer_opts,
+                producer_id = 0,
                 producers = #{}}).
 
 %% @doc Start supervised producers.
@@ -124,19 +127,18 @@ handle_call(_Call, _From, State) ->
 handle_cast(_Cast, State) ->
     {noreply, State}.
 
-handle_info(timeout, State = #state{client_id = ClientId,
-                                    topic = Topic,
-                                    workers = Workers,
-                                    producer_opts = ProducerOpts,
-                                    producers = Producers}) ->
+handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
     case pulsar_client_sup:find_client(ClientId) of
         {ok, Pid} ->
             {_, Partitions} = pulsar_client:get_topic_metadata(Pid, Topic),
             PartitionTopics = create_partition_topic(Topic, Partitions),
-            NewProducers = lists:foldl(fun({PartitionTopic, Partition}, Acc) ->
-                start_producer(Pid, Partition, PartitionTopic, ProducerOpts, Workers, Acc)
-            end, Producers, PartitionTopics),
-            {noreply, State#state{partitions = length(PartitionTopics), producers = NewProducers}};
+            NewState = lists:foldl(
+                fun({PartitionTopic, Partition}, CurrentState) ->
+                    start_producer(Pid, Partition, PartitionTopic, CurrentState)
+                end,
+                State,
+                PartitionTopics),
+            {noreply, NewState#state{partitions = length(PartitionTopics)}};
         {error, Reason} ->
             {stop, {shutdown, Reason}, State}
     end;
@@ -152,14 +154,10 @@ handle_info({'EXIT', Pid, _Error}, State = #state{workers = Workers, producers =
             {noreply, State#state{producers = maps:remove(Pid, Producers)}}
     end;
 
-handle_info({restart_producer, Partition, PartitionTopic}, State = #state{client_id = ClientId,
-                                                                       producers = Producers,
-                                                                       workers = Workers,
-                                                                       producer_opts = ProducerOpts}) ->
+handle_info({restart_producer, Partition, PartitionTopic}, State = #state{client_id = ClientId}) ->
     case pulsar_client_sup:find_client(ClientId) of
         {ok, Pid} ->
-            NewProducers = start_producer(Pid, Partition, PartitionTopic, ProducerOpts, Workers, Producers),
-            {noreply, State#state{producers = NewProducers}};
+            {noreply, start_producer(Pid, Partition, PartitionTopic, State)};
         {error, Reason} ->
             {stop, {shutdown, Reason}, State}
     end;
@@ -184,15 +182,27 @@ get_name(ProducerOpts) -> maps:get(name, ProducerOpts, ?MODULE).
 
 log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).
 
-start_producer(Pid, Partition, PartitionTopic, ProducerOpts, Workers, Producers) ->
+start_producer(Pid, Partition, PartitionTopic,
+    #state{
+        producers = Producers,
+        workers = Workers,
+        producer_opts = ProducerOpts,
+        producer_id = ProducerID} = State) ->
     try
+        NewProducerOpts = maps:put(producer_id, ProducerID, ProducerOpts),
         BrokerServiceUrl = pulsar_client:lookup_topic(Pid, PartitionTopic),
-        {ok, Producer} = pulsar_producer:start_link(PartitionTopic, BrokerServiceUrl, ProducerOpts),
+        {ok, Producer} = pulsar_producer:start_link(PartitionTopic, BrokerServiceUrl, NewProducerOpts),
         ets:insert(Workers, {Partition, Producer}),
-        maps:put(Producer, {Partition, PartitionTopic}, Producers)
+        NewState = next_producer_id(State),
+        NewState#state{producers = maps:put(Producer, {Partition, PartitionTopic}, Producers)}
     catch
         Error : Reason : Stacktrace ->
             log_error("Start producer: ~p, ~p", [Error, {Reason, Stacktrace}]),
             self() ! {restart_producer, Partition, PartitionTopic},
-            Producers
+            next_producer_id(State)
     end.
+
+next_producer_id(#state{producer_id = ?MAX_PRODUCER_ID} = State) ->
+    State#state{producer_id = 0};
+next_producer_id(#state{producer_id = ProducerID} = State) ->
+    State#state{producer_id = ProducerID + 1}.

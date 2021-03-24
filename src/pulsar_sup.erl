@@ -15,12 +15,14 @@
 -module(pulsar_sup).
 
 -behaviour(supervisor).
+-include("pulsar.hrl").
 
 -export([start_link/0, init/1]).
 
 start_link() -> supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
+    ets:new(?PULSAR_METRICS_ETS, [named_table, public, {write_concurrency, true}]),
     SupFlags = #{strategy => one_for_all,
                  intensity => 10,
                  period => 5},
@@ -52,3 +54,4 @@ consumers_sup() ->
       type => supervisor,
       modules => [pulsar_consumers_sup]
     }.
+

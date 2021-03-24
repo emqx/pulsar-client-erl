@@ -71,10 +71,9 @@ t_pulsar_client(_Args) ->
 
 t_pulsar_produce(_) ->
     application:ensure_all_started(pulsar),
-    {ok, Server} = gen_server:start(pulsar_test_suit_server, [], []),
     {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
     ConsumerOpts = #{
-        cb_init_args => Server,
+        cb_init_args => no_args,
         cb_module => ?MODULE,
         sub_type => 'Shared',
         subscription => "pulsar_test_suite_subscription",
@@ -94,19 +93,19 @@ t_pulsar_produce(_) ->
     %% wait server connect
     timer:sleep(500),
 %%    todo pulsar in docker will change brokers uri
-%%    ?assertMatch(#{sequence_id := _}, pulsar:send_sync(Producers, [Data], 300)),
+    ?assertMatch(#{sequence_id := _}, pulsar:send_sync(Producers, [Data], 300)),
     timer:sleep(500),
     %% match the send_sync message
-%%    ?assertMatch({1, _}, pulsar_test_suit_server:consumer_state(Server)),
+    ?assertEqual(1, pulsar_metrics:consumer()),
+    ?assertEqual(1, pulsar_metrics:producer()),
     %% loop send data
     lists:foreach(fun(_) -> pulsar:send(Producers, [Data]) end, lists:seq(1, ?BATCH_SIZE)),
     timer:sleep(500),
     %% should be equal BatchSize
-    {_NewCount, _} = pulsar_test_suit_server:consumer_state(Server),
+    %% send ==  consumer
+    ?assertEqual(pulsar_metrics:producer(), pulsar_metrics:consumer()),
     %% stop consumers
     ?assertEqual(ok, pulsar:stop_and_delete_supervised_consumers(Consumers)),
-    %% stop
-    gen_server:stop(Server),
     %% stop producers
     ?assertEqual(ok, pulsar:stop_and_delete_supervised_producers(Producers)),
     %% stop clients
@@ -124,9 +123,8 @@ t_pulsar_consumer_(_, ConsumersMaxNum) ->
     application:ensure_all_started(pulsar),
     {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
     %% start counter server
-    {ok, Server} = gen_server:start(pulsar_test_suit_server, [], []),
     ConsumerOpts = #{
-        cb_init_args => Server,
+        cb_init_args => no_args,
         cb_module => ?MODULE,
         sub_type => 'Shared',
         subscription => "pulsar_test_suite_subscription",
@@ -144,14 +142,13 @@ t_pulsar_consumer_(_, ConsumersMaxNum) ->
     timer:sleep(100),
     Data = #{key => <<"pulsar">>, value => <<"hello world">>},
     lists:foreach(fun(_) -> pulsar:send(Producers, [Data]) end, lists:seq(1, ?BATCH_SIZE)),
+    timer:sleep(500),
     %% stop producers
     ?assertEqual(ok, pulsar:stop_and_delete_supervised_producers(Producers)),
     %% wait consumer
-    timer:sleep(600),
-    %% should consumer BatchSize data
-    {_NewCount, _LastMessage} = pulsar_test_suit_server:consumer_state(Server),
-    %% stop server
-    gen_server:stop(Server),
+    timer:sleep(500),
+    %% send ==  consumer
+    ?assertEqual(pulsar_metrics:producer(), pulsar_metrics:consumer()),
     %% stop consumers
     ?assertEqual(ok, pulsar:stop_and_delete_supervised_consumers(Consumers)),
     %% stop client
@@ -165,9 +162,8 @@ t_pulsar_consumer_(_, ConsumersMaxNum) ->
 %% pulsar callback
 %%  #{highest_sequence_id => 18446744073709551615,message_id => #{ack_set => [],entryId => 13,ledgerId => 225},producer_id => 1,sequence_id => 1}
 %%----------------------
-init(_Topic, Server) ->
-    {ok, Server}.
-handle_message(Msg, Payloads, Server) ->
-    pulsar_test_suit_server:consumer_new_msg(Server, Msg, Payloads),
-    {ok, 'Individual', Server}.
+init(_Topic, Args) ->
+    {ok, Args}.
+handle_message(_Msg, _Payloads, Loop) ->
+    {ok, 'Individual', Loop}.
 

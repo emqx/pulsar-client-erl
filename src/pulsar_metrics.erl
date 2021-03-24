@@ -7,16 +7,11 @@
 -module(pulsar_metrics).
 -include("pulsar.hrl").
 %% APIs
--export([start_link/0]).
-
 -export([all/0, all_detail/0]).
 
 -export([send/1, send/2, recv/1, recv/2]).
 
 -export([consumer/0, consumer/1, producer/0, producer/1]).
-
-start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 all() ->
     [{producer, producer()}, {consumer, consumer()}].

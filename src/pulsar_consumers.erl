@@ -33,10 +33,11 @@
 
 %% @doc Start supervised consumer.
 start_supervised(ClientId, Topic, ConsumerOpts) ->
-    {ok, _Pid} = pulsar_consumers_sup:ensure_present(ClientId, Topic, ConsumerOpts).
+    {ok, _Pid} = pulsar_consumers_sup:ensure_present(ClientId, Topic, ConsumerOpts),
+    {ok, #{client => ClientId, topic => Topic, name => get_name(ConsumerOpts)}}.
 
-stop_supervised(ClientId) ->
-    pulsar_consumers_sup:ensure_absence(ClientId).
+stop_supervised(#{client := ClientId, name := Name}) ->
+    pulsar_consumers_sup:ensure_absence(ClientId, Name).
 
 %% @doc start pulsar_consumers gen_server
 start_link(ClientId, Topic, ConsumerOpts) ->

@@ -9,7 +9,7 @@ services:
 #    networks:
 #      - emqx_bridge
     depends_on:
-      - pulsar_server
+      - pulsar
     tty: true
 
   pulsar:

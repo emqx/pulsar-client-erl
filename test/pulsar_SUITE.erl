@@ -21,6 +21,7 @@
 -define(TEST_SUIT_CLIENT, client_erl_suit).
 -define(BATCH_SIZE , 100).
 -define(PULSAR_HOST, {"pulsar", 6650}).
+%%-define(PULSAR_HOST, {"127.0.0.1", 6650}).
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
@@ -81,7 +82,7 @@ t_pulsar_produce(_) ->
         name => pulsar_test_suite_subscription
     },
     %% start producers
-    {ok, _Consumers} = pulsar:ensure_supervised_consumers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ConsumerOpts),
+    {ok, Consumers} = pulsar:ensure_supervised_consumers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ConsumerOpts),
 
     ProducerOpts = #{
         batch_size => ?BATCH_SIZE,
@@ -102,6 +103,8 @@ t_pulsar_produce(_) ->
     timer:sleep(500),
     %% should be equal BatchSize
     {_NewCount, _} = pulsar_test_suit_server:consumer_state(Server),
+    %% stop consumers
+    ?assertEqual(ok, pulsar:stop_and_delete_supervised_consumers(Consumers)),
     %% stop
     gen_server:stop(Server),
     %% stop producers
@@ -128,7 +131,6 @@ t_pulsar_consumer_(_, ConsumersMaxNum) ->
         sub_type => 'Shared',
         subscription => "pulsar_test_suite_subscription",
         max_consumer_num => ConsumersMaxNum
-%%        name => pulsar_test_suite_consumer
     },
     %% start consumers
     {ok, Consumers} = pulsar:ensure_supervised_consumers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ConsumerOpts),
@@ -150,8 +152,6 @@ t_pulsar_consumer_(_, ConsumersMaxNum) ->
     {_NewCount, _LastMessage} = pulsar_test_suit_server:consumer_state(Server),
     %% stop server
     gen_server:stop(Server),
-    %% stop  consumer
-    ?assertEqual(true, is_process_alive(Consumers)),
     %% stop consumers
     ?assertEqual(ok, pulsar:stop_and_delete_supervised_consumers(Consumers)),
     %% stop client

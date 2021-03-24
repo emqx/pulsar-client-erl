@@ -108,7 +108,7 @@ connecting(_EventType, {tcp, _, Bin}, State) ->
     {Cmd, _} = ?FRAME:parse(Bin),
     handle_response(Cmd, State);
 
-connecting({call, From}, {send, _Message}, State) ->
+connecting({call, From}, _, State) ->
     {keep_state, State, [{reply, From ,{fail, producer_connecting}}]};
 
 connecting(cast, {send, _Message}, _State) ->
@@ -126,15 +126,9 @@ connected(_EventType, ping, State = #state{sock = Sock}) ->
     ping(Sock),
     {keep_state, State};
 
-connected({call, From}, {send, _Message}, State = #state{producer_name = undefined}) ->
-    {keep_state, State, [{reply, From ,{fail, producer_connecting}}]};
-
 connected({call, From}, {send, Message}, State = #state{sequence_id = SequenceId, requests = Reqs}) ->
     send_batch_payload(Message, State),
     {keep_state, next_sequence_id(State#state{requests = maps:put(SequenceId, From, Reqs)})};
-
-connected(cast, {send, _Message}, #state{producer_name = undefined}) ->
-    keep_state_and_data;
 
 connected(cast, {send, Message}, State = #state{batch_size = BatchSize}) ->
     BatchMessage = Message ++ collect_send_calls(BatchSize),
@@ -167,10 +161,10 @@ handle_response({connected, _ConnectedData}, State = #state{sock = Sock,
                                                             partitiontopic = Topic}) ->
     start_keepalive(),
     create_producer(Sock, Topic, RequestId, ProId),
-    {next_state, connected, next_request_id(State)};
+    {keep_state, next_request_id(State)};
 
 handle_response({producer_success, #{producer_name := ProName}}, State) ->
-    {keep_state, State#state{producer_name = ProName}};
+    {next_state, connected, State#state{producer_name = ProName}};
 
 handle_response({pong, #{}}, State) ->
     start_keepalive(),

@@ -169,7 +169,7 @@ handle_response({close_consumer, #{}}, State = #state{partitiontopic = Topic}) -
     log_error("Close consumer: ~p~n", [Topic]),
     {stop, {shutdown, close_consumer}, State};
 handle_response(Msg, State) ->
-    log_error("Receive unknown message:~p~n", [Msg]),
+    log_error("Consumer Receive unknown message:~p~n", [Msg]),
     {keep_state, State}.
 
 connect(Sock) ->

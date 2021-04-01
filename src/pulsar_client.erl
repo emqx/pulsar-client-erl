@@ -119,6 +119,14 @@ handle_info({tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
 handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
     {noreply, State#state{sock = undefined}, hibernate};
 
+handle_info(ping, State = #state{sock = undefined, servers = Servers}) ->
+    case get_sock(Servers, undefined) of
+        error ->
+            {noreply, State, hibernate};
+        Sock ->
+            ping(Sock),
+            {noreply, State#state{sock = Sock}, hibernate}
+    end;
 handle_info(ping, State = #state{sock = Sock}) ->
     ping(Sock),
     {noreply, State, hibernate};

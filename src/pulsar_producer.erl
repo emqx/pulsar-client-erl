@@ -132,10 +132,10 @@ connected({call, From}, {send, Message}, State = #state{sequence_id = SequenceId
     send_batch_payload(Message, State),
     {keep_state, next_sequence_id(State#state{requests = maps:put(SequenceId, From, Reqs)})};
 
-connected(cast, {send, Message}, State = #state{batch_size = BatchSize}) ->
+connected(cast, {send, Message}, State = #state{batch_size = BatchSize, sequence_id = SequenceId, requests = Reqs}) ->
     BatchMessage = Message ++ collect_send_calls(BatchSize),
     send_batch_payload(BatchMessage, State),
-    {keep_state, next_sequence_id(State)};
+    {keep_state, next_sequence_id(State#state{requests = maps:put(SequenceId, BatchMessage, Reqs)})};
 
 connected(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
@@ -182,6 +182,8 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
     case maps:get(SequenceId, Reqs, undefined) of
         undefined ->
             {keep_state, State};
+        Messages when is_list(Messages) ->
+            {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
         From ->
             gen_statem:reply(From, Resp),
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}}
@@ -195,6 +197,9 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                 _ -> Callback(Resp)
             end,
             {keep_state, State};
+        Messages when is_list(Messages) ->
+            Callback(Resp),
+            {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
         From ->
             gen_statem:reply(From, Resp),
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}}

@@ -6,8 +6,6 @@ services:
     image: erlang:22.3
     volumes:
       - ./:/pulsar_client_erl
-#    networks:
-#      - emqx_bridge
     depends_on:
       - pulsar
     tty: true
@@ -16,17 +14,11 @@ services:
     container_name: pulsar
     image: apachepulsar/pulsar:${PULSAR_TAG}
     volumes:
-    - ./test/standalone.conf:/conf/standalone.conf
+    - ./test/test_SUITE_data/standalone.conf:/pulsar/conf/standalone.conf
     ports:
       - 6650:6650
       - 8080:8080
     restart: always
-#    networks:
-#      - emqx_bridge
     command:
       - bin/pulsar
       - standalone
-
-#networks:
-#  emqx_bridge:
-#    driver: bridge

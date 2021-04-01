@@ -58,7 +58,7 @@ t_pulsar_client(_Args) ->
 
     ?assertMatch({_, 4}, pulsar_client:get_topic_metadata(ClientPid, <<"test">>)),
 
-    ?assertEqual("pulsar://localhost:6650", pulsar_client:lookup_topic(ClientPid, <<"test-partition-0">>)),
+    ?assertEqual("pulsar://pulsar:6650", pulsar_client:lookup_topic(ClientPid, <<"test-partition-0">>)),
 
     ?assertEqual(true, pulsar_client:get_status(ClientPid)),
 
@@ -92,7 +92,6 @@ t_pulsar_produce(_) ->
     {ok, Producers} = pulsar:ensure_supervised_producers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ProducerOpts),
     %% wait server connect
     timer:sleep(500),
-%%    todo pulsar in docker will change brokers uri
     ?assertMatch(#{sequence_id := _}, pulsar:send_sync(Producers, [Data], 300)),
     timer:sleep(500),
     %% match the send_sync message

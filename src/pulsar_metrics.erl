@@ -9,7 +9,7 @@
 %% APIs
 -export([all/0, all_detail/0]).
 
--export([send/1, send/2, recv/1, recv/2]).
+-export([send/2, recv/2]).
 
 -export([consumer/0, consumer/1, producer/0, producer/1]).
 
@@ -32,14 +32,10 @@ consumer(Topic) ->
 %%-------------------------------------------------------------------------
 %% internal api
 %%-------------------------------------------------------------------------
-send(Topic) ->
-    send(Topic, 1).
 send(Topic, Inc) ->
     ok = bump_counter({producer, all}, Inc),
     ok = bump_counter({producer, Topic}, Inc).
 
-recv(Topic) ->
-    recv(Topic, 1).
 recv(Topic, Inc) ->
     ok = bump_counter({consumer, all}, Inc),
     ok = bump_counter({consumer, Topic}, Inc).

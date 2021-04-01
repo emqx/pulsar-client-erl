@@ -33,6 +33,7 @@
 
 %% Messaging APIs
 -export([ send/2
+        , send_sync/2
         , send_sync/3
         ]).
 
@@ -66,3 +67,7 @@ send(Producers, Batch) ->
 send_sync(Producers, Batch, Timeout) ->
     {_Partition, ProducerPid} = pulsar_producers:pick_producer(Producers, Batch),
     pulsar_producer:send_sync(ProducerPid, Batch, Timeout).
+
+send_sync(Producers, Batch) ->
+    {_Partition, ProducerPid} = pulsar_producers:pick_producer(Producers, Batch),
+    pulsar_producer:send_sync(ProducerPid, Batch).

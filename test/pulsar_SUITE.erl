@@ -21,7 +21,10 @@
 -define(TEST_SUIT_CLIENT, client_erl_suit).
 -define(BATCH_SIZE , 100).
 -define(PULSAR_HOST, {"pulsar", 6650}).
-%%-define(PULSAR_HOST, {"127.0.0.1", 6650}).
+-define(LOOKUP_TOPIC_RESP, "pulsar://pulsar:6650").
+
+%%-define(PULSAR_HOST, {"localhost", 6650}).
+%%-define(LOOKUP_TOPIC_RESP, "pulsar://localhost:6650").
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
@@ -33,8 +36,7 @@
 all() ->
     [
         t_pulsar_client
-        , t_pulsar_produce
-        , t_pulsar_consumer
+        , t_pulsar
     ].
 
 init_per_suite(Cfg) ->
@@ -50,15 +52,18 @@ set_special_configs(_Args) ->
 %%--------------------------------------------------------------------
 
 t_pulsar_client(_Args) ->
+%%    pulsar:start(),
     application:ensure_all_started(pulsar),
 
     {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
 
-    timer:sleep(500),
+    timer:sleep(1000),
+    %% for coverage
+    {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
 
     ?assertMatch({_, 4}, pulsar_client:get_topic_metadata(ClientPid, <<"test">>)),
 
-    ?assertEqual("pulsar://pulsar:6650", pulsar_client:lookup_topic(ClientPid, <<"test-partition-0">>)),
+    ?assertEqual(?LOOKUP_TOPIC_RESP, pulsar_client:lookup_topic(ClientPid, <<"test-partition-0">>)),
 
     ?assertEqual(true, pulsar_client:get_status(ClientPid)),
 
@@ -69,7 +74,10 @@ t_pulsar_client(_Args) ->
     ?assertEqual(false, is_process_alive(ClientPid)),
     application:stop(pulsar).
 
-t_pulsar_produce(_) ->
+t_pulsar(_) ->
+    t_pulsar_(random),
+    t_pulsar_(roundrobin).
+t_pulsar_(Strategy) ->
     application:ensure_all_started(pulsar),
     {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
     ConsumerOpts = #{
@@ -82,21 +90,39 @@ t_pulsar_produce(_) ->
     },
     %% start producers
     {ok, Consumers} = pulsar:ensure_supervised_consumers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ConsumerOpts),
+    timer:sleep(200),
+    {ok, Consumers} = pulsar:ensure_supervised_consumers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ConsumerOpts),
 
     ProducerOpts = #{
         batch_size => ?BATCH_SIZE,
-%%        strategy => random
-        strategy => roundrobin
+        strategy => Strategy,
+        callback => {?MODULE, producer_callback, no_arg}
     },
     Data = #{key => <<"pulsar">>, value => <<"hello world">>},
     {ok, Producers} = pulsar:ensure_supervised_producers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ProducerOpts),
     %% wait server connect
     timer:sleep(500),
+    {ok, Producers} = pulsar:ensure_supervised_producers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ProducerOpts),
+
+
     ?assertMatch(#{sequence_id := _}, pulsar:send_sync(Producers, [Data], 300)),
+    %% keepalive test
+    timer:sleep(30*1000 + 5*1000),
+    ?assertMatch(#{sequence_id := _}, pulsar:send_sync(Producers, [Data])),
     timer:sleep(500),
+
+    %% restart test
+    {_, ProducerPid} = pulsar_producers:pick_producer(Producers, [Data]),
+    [{_, ConsumersPid, _, _} | _] = supervisor:which_children(pulsar_consumers_sup),
+    {_, _, _, _, _, _, ConsumerMap} = sys:get_state(ConsumersPid),
+    [ConsumerPid | _] = maps:keys(ConsumerMap),
+    erlang:exit(ProducerPid, kill),
+    erlang:exit(ConsumerPid, kill),
+    timer:sleep(2000),
+
     %% match the send_sync message
-    ?assertEqual(1, pulsar_metrics:consumer()),
-    ?assertEqual(1, pulsar_metrics:producer()),
+    ?assertEqual(2, pulsar_metrics:consumer()),
+    ?assertEqual(2, pulsar_metrics:producer()),
     %% loop send data
     lists:foreach(fun(_) -> pulsar:send(Producers, [Data]) end, lists:seq(1, ?BATCH_SIZE)),
     timer:sleep(500),
@@ -111,51 +137,26 @@ t_pulsar_produce(_) ->
     ?assertEqual(ok, pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT)),
     %% check alive
     ?assertEqual(false, is_process_alive(ClientPid)),
+    %% metrics test
+    [{producer, PCount}, {consumer, CCounter}] = pulsar_metrics:all(),
+    ?assertEqual(PCount, CCounter),
+    %% 4 producer , 4 consumer , 2 all
+    AllMetrics = pulsar_metrics:all_detail(),
+    ?assertEqual(10, length(AllMetrics)),
+    ?assertEqual({PCount, CCounter}, count_test(AllMetrics)),
+    ?assertEqual(0, pulsar_metrics:producer("no exist topic name")),
+    ?assertEqual(0, pulsar_metrics:consumer("no exist topic name")),
     application:stop(pulsar).
 
-t_pulsar_consumer(Args) ->
-    t_pulsar_consumer_(Args, 1),
-    t_pulsar_consumer_(Args, 2),
-    t_pulsar_consumer_(Args, 3).
-
-t_pulsar_consumer_(_, ConsumersMaxNum) ->
-    application:ensure_all_started(pulsar),
-    {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
-    %% start counter server
-    ConsumerOpts = #{
-        cb_init_args => no_args,
-        cb_module => ?MODULE,
-        sub_type => 'Shared',
-        subscription => "pulsar_test_suite_subscription",
-        max_consumer_num => ConsumersMaxNum
-    },
-    %% start consumers
-    {ok, Consumers} = pulsar:ensure_supervised_consumers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ConsumerOpts),
-    %% loop time :BatchSize
-    ProducerOpts = #{
-        batch_size => ?BATCH_SIZE,
-        strategy => roundrobin
-    },
-    %% start produce date
-    {ok, Producers} = pulsar:ensure_supervised_producers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ProducerOpts),
-    timer:sleep(100),
-    Data = #{key => <<"pulsar">>, value => <<"hello world">>},
-    lists:foreach(fun(_) -> pulsar:send(Producers, [Data]) end, lists:seq(1, ?BATCH_SIZE)),
-    timer:sleep(500),
-    %% stop producers
-    ?assertEqual(ok, pulsar:stop_and_delete_supervised_producers(Producers)),
-    %% wait consumer
-    timer:sleep(500),
-    %% send ==  consumer
-    ?assertEqual(pulsar_metrics:producer(), pulsar_metrics:consumer()),
-    %% stop consumers
-    ?assertEqual(ok, pulsar:stop_and_delete_supervised_consumers(Consumers)),
-    %% stop client
-    ?assertEqual(ok, pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT)),
-    timer:sleep(50),
-    ?assertEqual(false, is_process_alive(ClientPid)),
-    %% stop app
-    application:stop(pulsar).
+count_test(AllMetrics)-> count_test(AllMetrics, 0, 0).
+count_test([], PCountNow, CCountNow) ->
+    {PCountNow, CCountNow};
+count_test([{{_, all}, _}| Tail], PCountNow, CCountNow) ->
+    count_test(Tail, PCountNow, CCountNow);
+count_test([{{producer, _}, Data}| Tail], PCountNow, CCountNow) ->
+    count_test(Tail, PCountNow + Data, CCountNow);
+count_test([{{consumer, _}, Data}| Tail], PCountNow, CCountNow) ->
+    count_test(Tail, PCountNow, CCountNow + Data).
 
 %%----------------------
 %% pulsar callback
@@ -165,4 +166,6 @@ init(_Topic, Args) ->
     {ok, Args}.
 handle_message(_Msg, _Payloads, Loop) ->
     {ok, 'Individual', Loop}.
+
+producer_callback(_Args) -> ok.
 

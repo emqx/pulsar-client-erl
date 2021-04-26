@@ -21,4 +21,8 @@ distclean:
 	@rm -rf _build
 	@rm -f rebar.lock
 
+dialyzer:
+	$(REBAR) dialyzer
 
+cover:
+	$(REBAR) cover

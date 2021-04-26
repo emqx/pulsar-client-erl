@@ -19,6 +19,6 @@
 -export([start/2, stop/1]).
 
 start(_, _) ->
-  pulsar_sup:start_link().
+    pulsar_sup:start_link().
 
 stop(_) -> ok.

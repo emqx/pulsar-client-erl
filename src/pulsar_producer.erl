@@ -81,11 +81,15 @@ send_sync(Pid, Message, Timeout) ->
 %%--------------------------------------------------------------------
 %% gen_server callback
 %%--------------------------------------------------------------------
+init([PartitionTopic, BrokerServiceUrl, ProducerOpts]) when is_binary(BrokerServiceUrl)->
+    init([PartitionTopic, binary_to_list(BrokerServiceUrl), ProducerOpts]);
 init([PartitionTopic, BrokerServiceUrl, ProducerOpts]) ->
     State = #state{partitiontopic = PartitionTopic,
+                   producer_id = maps:get(producer_id, ProducerOpts),
+                   producer_name = maps:get(producer_name, ProducerOpts, pulsar_producer),
                    callback = maps:get(callback, ProducerOpts, undefined),
                    batch_size = maps:get(batch_size, ProducerOpts, 0),
-                   broker_service_url = binary_to_list(BrokerServiceUrl),
+                   broker_service_url = BrokerServiceUrl,
                    opts = maps:get(tcp_opts, ProducerOpts, [])},
     self() ! connecting,
     {ok, idle, State}.
@@ -104,7 +108,13 @@ idle(_, connecting, State = #state{opts = Opts, broker_service_url = BrokerServi
 
 connecting(_EventType, {tcp, _, Bin}, State) ->
     {Cmd, _} = ?FRAME:parse(Bin),
-    handle_response(Cmd, State).
+    handle_response(Cmd, State);
+
+connecting({call, From}, _, State) ->
+    {keep_state, State, [{reply, From ,{fail, producer_connecting}}]};
+
+connecting(cast, {send, _Message}, _State) ->
+    keep_state_and_data.
 
 connected(_EventType, {tcp_closed, Sock}, State = #state{sock = Sock, partitiontopic = Topic}) ->
     log_error("TcpClosed producer: ~p~n", [Topic]),
@@ -122,10 +132,10 @@ connected({call, From}, {send, Message}, State = #state{sequence_id = SequenceId
     send_batch_payload(Message, State),
     {keep_state, next_sequence_id(State#state{requests = maps:put(SequenceId, From, Reqs)})};
 
-connected(cast, {send, Message}, State = #state{batch_size = BatchSize}) ->
+connected(cast, {send, Message}, State = #state{batch_size = BatchSize, sequence_id = SequenceId, requests = Reqs}) ->
     BatchMessage = Message ++ collect_send_calls(BatchSize),
     send_batch_payload(BatchMessage, State),
-    {keep_state, next_sequence_id(State)};
+    {keep_state, next_sequence_id(State#state{requests = maps:put(SequenceId, BatchMessage, Reqs)})};
 
 connected(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
@@ -153,10 +163,10 @@ handle_response({connected, _ConnectedData}, State = #state{sock = Sock,
                                                             partitiontopic = Topic}) ->
     start_keepalive(),
     create_producer(Sock, Topic, RequestId, ProId),
-    {next_state, connected, next_request_id(State)};
+    {keep_state, next_request_id(State)};
 
 handle_response({producer_success, #{producer_name := ProName}}, State) ->
-    {keep_state, State#state{producer_name = ProName}};
+    {next_state, connected, State#state{producer_name = ProName}};
 
 handle_response({pong, #{}}, State) ->
     start_keepalive(),
@@ -172,6 +182,8 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
     case maps:get(SequenceId, Reqs, undefined) of
         undefined ->
             {keep_state, State};
+        Messages when is_list(Messages) ->
+            {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
         From ->
             gen_statem:reply(From, Resp),
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}}
@@ -185,6 +197,9 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                 _ -> Callback(Resp)
             end,
             {keep_state, State};
+        Messages when is_list(Messages) ->
+            Callback(Resp),
+            {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
         From ->
             gen_statem:reply(From, Resp),
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}}
@@ -199,7 +214,9 @@ connect(Sock) ->
              protocol_version => 6},
     gen_tcp:send(Sock, ?FRAME:connect(Conn)).
 
-send_batch_payload(Messages, #state{sequence_id = SequenceId,
+send_batch_payload(Messages, #state{
+                                    partitiontopic = PartitionTopic,
+                                    sequence_id = SequenceId,
                                     producer_id = ProducerId,
                                     producer_name = ProducerName,
                                     sock = Sock}) ->
@@ -218,7 +235,8 @@ send_batch_payload(Messages, #state{sequence_id = SequenceId,
                  publish_time => erlang:system_time(millisecond),
                  compression => 'NONE'},
     {Metadata1, BatchMessage} = batch_message(Metadata, Len, Messages),
-    gen_tcp:send(Sock, ?FRAME:send(Send, Metadata1, BatchMessage)).
+    gen_tcp:send(Sock, ?FRAME:send(Send, Metadata1, BatchMessage)),
+    pulsar_metrics:send(PartitionTopic, Len).
 
 start_keepalive() ->
     erlang:send_after(30*1000, self(), ping).

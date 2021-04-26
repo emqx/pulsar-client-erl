@@ -24,40 +24,41 @@
 -define(WORKER_ID(ClientId, Name), {ClientId, Name}).
 
 start_link() ->
-  supervisor:start_link({local, ?SUPERVISOR}, ?MODULE, []).
+    supervisor:start_link({local, ?SUPERVISOR}, ?MODULE, []).
 
 init([]) ->
-  SupFlags = #{strategy => one_for_one,
-               intensity => 10,
-               period => 5
-              },
-  Children = [], %% dynamically added/stopped
-  {ok, {SupFlags, Children}}.
+    SupFlags = #{strategy => one_for_one,
+                 intensity => 10,
+                 period => 5
+               },
+    Children = [], %% dynamically added/stopped
+    {ok, {SupFlags, Children}}.
 
 %% ensure a client started under supervisor
 ensure_present(ClientId, Topic, ProducerOpts) ->
-  ChildSpec = child_spec(ClientId, Topic, ProducerOpts),
-  case supervisor:start_child(?SUPERVISOR, ChildSpec) of
-    {ok, Pid} -> {ok, Pid};
-    {error, {already_started, Pid}} -> {ok, Pid};
-    {error, {{already_started, Pid}, _}} -> {ok, Pid};
-    {error, already_present} -> {error, not_running}
-  end.
+    ChildSpec = child_spec(ClientId, Topic, ProducerOpts),
+    case supervisor:start_child(?SUPERVISOR, ChildSpec) of
+        {ok, Pid} -> {ok, Pid};
+        {error, {already_started, Pid}} -> {ok, Pid};
+        {error, {{already_started, Pid}, _}} -> {ok, Pid};
+        {error, already_present} -> {error, not_running}
+    end.
 
 %% ensure client stopped and deleted under supervisor
 ensure_absence(ClientId, Name) ->
-  Id = ?WORKER_ID(ClientId, Name),
-  case supervisor:terminate_child(?SUPERVISOR, Id) of
-    ok -> ok = supervisor:delete_child(?SUPERVISOR, Id);
-    {error, not_found} -> ok
-  end.
+    Id = ?WORKER_ID(ClientId, Name),
+    case supervisor:terminate_child(?SUPERVISOR, Id) of
+        ok -> ok = supervisor:delete_child(?SUPERVISOR, Id);
+        {error, not_found} -> ok
+    end.
 
 child_spec(ClientId, Topic, ProducerOpts) ->
-  #{id => ?WORKER_ID(ClientId, get_name(ProducerOpts)),
-    start => {pulsar_producers, start_link, [ClientId, Topic, ProducerOpts]},
-    restart => transient,
-    type => worker,
-    modules => [pulsar_producers]
-   }.
+    #{id => ?WORKER_ID(ClientId, get_name(ProducerOpts)),
+      start => {pulsar_producers, start_link, [ClientId, Topic, ProducerOpts]},
+      restart => transient,
+      type => worker,
+      modules => [pulsar_producers]
+    }.
 
-get_name(ProducerOpts) -> maps:get(name, ProducerOpts, pulsar_producers).
+get_name(ProducerOpts) ->
+    maps:get(name, ProducerOpts, pulsar_producers).

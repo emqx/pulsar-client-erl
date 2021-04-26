@@ -1,0 +1,24 @@
+version: '3'
+
+services:
+  erlang:
+    container_name: erlang
+    image: erlang:22.3
+    volumes:
+      - ./:/pulsar_client_erl
+    depends_on:
+      - pulsar
+    tty: true
+
+  pulsar:
+    container_name: pulsar
+    image: apachepulsar/pulsar:${PULSAR_TAG}
+    volumes:
+    - ./test/test_SUITE_data/standalone.conf:/pulsar/conf/standalone.conf
+    ports:
+      - 6650:6650
+      - 8080:8080
+    restart: always
+    command:
+      - bin/pulsar
+      - standalone

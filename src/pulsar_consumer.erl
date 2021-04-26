@@ -63,15 +63,19 @@ start_link(PartitionTopic, BrokerServiceUrl, ConsumerOpts) ->
 %%--------------------------------------------------------------------
 %% gen_server callback
 %%--------------------------------------------------------------------
+init([PartitionTopic, BrokerServiceUrl, ConsumerOpts]) when is_binary(BrokerServiceUrl) ->
+    init([PartitionTopic, binary_to_list(BrokerServiceUrl), ConsumerOpts]);
 init([PartitionTopic, BrokerServiceUrl, ConsumerOpts]) ->
     {CbModule, ConsumerOpts1} = maps:take(cb_module, ConsumerOpts),
     {CbInitArg, ConsumerOpts2} = maps:take(cb_init_args, ConsumerOpts1),
     {ok, CbState} = CbModule:init(PartitionTopic, CbInitArg),
-    State = #state{partitiontopic = PartitionTopic,
+    State = #state{
+                   consumer_id = maps:get(consumer_id, ConsumerOpts),
+                   partitiontopic = PartitionTopic,
                    cb_module = CbModule,
                    cb_state = CbState,
                    opts = ConsumerOpts2,
-                   broker_service_url = binary_to_list(BrokerServiceUrl),
+                   broker_service_url = BrokerServiceUrl,
                    flow = maps:get(flow, ConsumerOpts, 1000)},
     self() ! connecting,
     {ok, idle, State}.
@@ -145,10 +149,13 @@ handle_response({subscribe_success, #{}}, State = #state{sock = Sock,
                                                          flow = Flow}) ->
     set_flow(Sock, ConsumerId, Flow),
     {keep_state, State};
-handle_response({message, Msg, Payloads}, State = #state{sock = Sock,
+handle_response({message, Msg, Payloads}, State = #state{
+                                                         partitiontopic = PartitionTopic,
+                                                         sock = Sock,
                                                          consumer_id = ConsumerId,
                                                          cb_module = CbModule,
                                                          cb_state = CbState}) ->
+    pulsar_metrics:recv(PartitionTopic, length(Payloads)),
     case CbModule:handle_message(Msg, Payloads, CbState) of
         {ok, AckType, NCbState} ->
             ack(Sock, ConsumerId, AckType, Msg),
@@ -162,7 +169,7 @@ handle_response({close_consumer, #{}}, State = #state{partitiontopic = Topic}) -
     log_error("Close consumer: ~p~n", [Topic]),
     {stop, {shutdown, close_consumer}, State};
 handle_response(Msg, State) ->
-    log_error("Receive unknown message:~p~n", [Msg]),
+    log_error("Consumer Receive unknown message:~p~n", [Msg]),
     {keep_state, State}.
 
 connect(Sock) ->

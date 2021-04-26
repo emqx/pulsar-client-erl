@@ -51,7 +51,7 @@ start_link(ClientId, Servers, Opts) ->
 
 get_topic_metadata(Pid, Topic) ->
     Call = self(),
-    gen_server:call(Pid, {get_topic_metadata, Topic, Call}).
+    gen_server:call(Pid, {get_topic_metadata, Topic, Call}, 30000).
 
 lookup_topic(Pid, PartitionTopic) ->
     gen_server:call(Pid, {lookup_topic, PartitionTopic}, 30000).
@@ -65,7 +65,7 @@ init([Servers, Opts]) ->
     State = #state{servers = Servers, opts = Opts},
     case get_sock(Servers, undefined) of
         error ->
-            {error, fail_to_connect_pulser_server};
+            {error, fail_to_connect_pulsar_server};
         Sock ->
             {ok, State#state{sock = Sock}}
     end.
@@ -119,6 +119,14 @@ handle_info({tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
 handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
     {noreply, State#state{sock = undefined}, hibernate};
 
+handle_info(ping, State = #state{sock = undefined, servers = Servers}) ->
+    case get_sock(Servers, undefined) of
+        error ->
+            {noreply, State, hibernate};
+        Sock ->
+            ping(Sock),
+            {noreply, State#state{sock = Sock}, hibernate}
+    end;
 handle_info(ping, State = #state{sock = Sock}) ->
     ping(Sock),
     {noreply, State, hibernate};
@@ -139,7 +147,6 @@ parse({Cmd, <<>>}, State) ->
     handle_response(Cmd, State#state{last_bin = <<>>});
 parse({Cmd, LastBin}, State) ->
     State2 = case handle_response(Cmd, State) of
-        {_, State1} -> State1;
         {_, State1, _} -> State1
     end,
     parse(pulsar_protocol_frame:parse(LastBin), State2).

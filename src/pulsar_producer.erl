@@ -198,7 +198,10 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
             end,
             {keep_state, State};
         Messages when is_list(Messages) ->
-            Callback(Resp),
+            case Callback of
+                {M, F, A} -> erlang:apply(M, F, [Resp] ++ A);
+                _ -> Callback(Resp)
+            end,
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
         From ->
             gen_statem:reply(From, Resp),

@@ -61,13 +61,22 @@ stop_and_delete_supervised_consumers(Consumers) ->
 
 
 send(Producers, Batch) ->
-    {_Partition, ProducerPid} = pulsar_producers:pick_producer(Producers, Batch),
-    pulsar_producer:send(ProducerPid, Batch).
+    case pulsar_producers:pick_producer(Producers, Batch) of
+        {error, Reason} -> {error, Reason};
+        {_Partition, ProducerPid} ->
+            pulsar_producer:send(ProducerPid, Batch)
+    end.
 
 send_sync(Producers, Batch, Timeout) ->
-    {_Partition, ProducerPid} = pulsar_producers:pick_producer(Producers, Batch),
-    pulsar_producer:send_sync(ProducerPid, Batch, Timeout).
+    case pulsar_producers:pick_producer(Producers, Batch) of
+        {error, Reason} -> {error, Reason};
+        {_Partition, ProducerPid} ->
+            pulsar_producer:send_sync(ProducerPid, Batch, Timeout)
+    end.
 
 send_sync(Producers, Batch) ->
-    {_Partition, ProducerPid} = pulsar_producers:pick_producer(Producers, Batch),
-    pulsar_producer:send_sync(ProducerPid, Batch).
+    case pulsar_producers:pick_producer(Producers, Batch) of
+        {error, Reason} -> {error, Reason};
+        {_Partition, ProducerPid} ->
+            pulsar_producer:send_sync(ProducerPid, Batch)
+    end.

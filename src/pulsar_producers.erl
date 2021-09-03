@@ -72,14 +72,14 @@ do_pick_producer(Strategy, Partition, Partitions, Workers) ->
             _ = put(pulsar_roundrobin, (Partition + 1) rem Partitions),
             R;
         false ->
-            erlang:error({producer_down, Pid})
+            {error, producer_down}
     end.
 
 pick_next_alive(Workers, Partition, Partitions) ->
     pick_next_alive(Workers, (Partition + 1) rem Partitions, Partitions, _Tried = 1).
 
 pick_next_alive(_Workers, _Partition, Partitions, Partitions) ->
-    erlang:error(all_producers_down);
+    {error, no_producers_available};
 pick_next_alive(Workers, Partition, Partitions, Tried) ->
     Pid = lookup_producer(Workers, Partition),
     case is_alive(Pid) of

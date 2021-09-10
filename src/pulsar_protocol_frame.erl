@@ -115,7 +115,7 @@ pong() ->
 
 parse(<<TotalSize:32, CmdBin:TotalSize/binary, Rest/binary>>) ->
     <<CommandSize:32, Command:CommandSize/binary, CmdRest/binary>> = CmdBin,
-    BaseCommand = pulsar_api:decode_msg(<<CommandSize:32, Command/binary>>, 'BaseCommand'),
+    BaseCommand = try_decode(CommandSize, Command),
     Resp = case maps:get(type, BaseCommand, unknown) of
         ?MESSAGE ->
             <<MetadataSize:32, Metadata:MetadataSize/binary, Payload0/binary>> = CmdRest,
@@ -142,6 +142,8 @@ parse(<<TotalSize:32, CmdBin:TotalSize/binary, Rest/binary>>) ->
             {close_consumer, maps:get(close_consumer, BaseCommand)};
         ?SUCCESS ->
             {subscribe_success, maps:get(success, BaseCommand)};
+        'ERROR' ->
+            {error, maps:get(error, BaseCommand)};
         _Type ->
             error_logger:error_msg("parse unknown type:~p~n", [BaseCommand]),
             unknown
@@ -176,3 +178,10 @@ parse_batch_message(Payloads, Size, Acc) ->
     PayloadSize = maps:get(payload_size, SingleMessageMetadata),
     <<Payload:PayloadSize/binary, Rest1/binary>> = Rest,
     parse_batch_message(Rest1, Size - 1, [Payload | Acc]).
+
+try_decode(CommandSize, Command) ->
+    try pulsar_api:decode_msg(<<CommandSize:32, Command/binary>>, 'BaseCommand') of
+        BaseCommand -> BaseCommand
+    catch _:_ ->
+        pulsar_api:decode_msg(Command, 'BaseCommand')
+    end.

@@ -68,7 +68,7 @@ do_pick_producer(Strategy, Partition, Partitions, Workers) ->
         false when Strategy =:= random ->
             pick_next_alive(Workers, Partition, Partitions);
         false when Strategy =:= roundrobin ->
-            R = {Partition, Pid} = pick_next_alive(Workers, Partition, Partitions),
+            R = {Partition, _Pid1} = pick_next_alive(Workers, Partition, Partitions),
             _ = put(pulsar_roundrobin, (Partition + 1) rem Partitions),
             R;
         false ->
@@ -143,14 +143,19 @@ handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
             {stop, {shutdown, Reason}, State}
     end;
 
-handle_info({'EXIT', Pid, _Error}, State = #state{workers = Workers, producers = Producers}) ->
+handle_info({'EXIT', Pid, Error}, State = #state{workers = Workers, producers = Producers}) ->
     case maps:get(Pid, Producers, undefined) of
         undefined ->
             log_error("Not find Pid:~p producer", [Pid]),
             {noreply, State};
         {Partition, PartitionTopic} ->
             ets:delete(Workers, Partition),
-            self() ! {restart_producer, Partition, PartitionTopic},
+            case Error of
+                {shutdown, 'ServiceNotReady'} ->
+                    erlang:send_after(2000, self(), {restart_producer, Partition, PartitionTopic});
+                _ ->
+                    self() ! {restart_producer, Partition, PartitionTopic}
+            end,
             {noreply, State#state{producers = maps:remove(Pid, Producers)}}
     end;
 

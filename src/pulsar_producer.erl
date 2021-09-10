@@ -208,6 +208,11 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}}
     end;
 
+
+handle_response({error, #{error := Error, message := Msg}}, State) ->
+    log_error("Response error:~p, msg:~p~n", [Error, Msg]),
+    {stop, {shutdown, Error}, State};
+
 handle_response(Msg, State) ->
     log_error("Receive unknown message:~p~n", [Msg]),
     {keep_state, State}.

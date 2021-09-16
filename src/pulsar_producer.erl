@@ -345,5 +345,6 @@ maybe_compression(Bin, 'SNAPPY') ->
 
 maybe_compression(Bin, 'ZLIB') ->
   zlib:compress(Bin);
+
 maybe_compression(Bin, _) ->
     iolist_to_binary(Bin).

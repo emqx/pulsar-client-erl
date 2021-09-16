@@ -84,6 +84,8 @@ send_sync(Pid, Message, Timeout) ->
 init([PartitionTopic, BrokerServiceUrl, ProducerOpts]) when is_binary(BrokerServiceUrl)->
     init([PartitionTopic, binary_to_list(BrokerServiceUrl), ProducerOpts]);
 init([PartitionTopic, BrokerServiceUrl, ProducerOpts]) ->
+    Compression = maps:get(compression, ProducerOpts, no_compression),
+    erlang:put(compression, Compression),
     State = #state{partitiontopic = PartitionTopic,
                    producer_id = maps:get(producer_id, ProducerOpts),
                    producer_name = maps:get(producer_name, ProducerOpts, pulsar_producer),
@@ -265,14 +267,20 @@ create_producer(Sock, Topic, RequestId, ProducerId) ->
 
 batch_message(Metadata, Len, Messages) ->
     Metadata1 = Metadata#{num_messages_in_batch => Len},
+    Compression = case erlang:get(compression) of
+        snappy -> 'SNAPPY';
+        zlib -> 'ZLIB';
+        _ -> 'NONE'
+    end,
     BatchMessage = lists:foldl(fun(#{key := Key, value := Message}, Acc) ->
+        Message1 = maybe_compression(Message, Compression),
         SMetadata = case Key =:= undefined of
-            true  -> #{payload_size => size(Message)};
-            false -> #{payload_size => size(Message), partition_key => Key}
+            true  -> #{payload_size => size(Message1), compression => Compression};
+            false -> #{payload_size => size(Message1), partition_key => Key, compression => Compression}
         end,
-        SMetadataBin = iolist_to_binary(pulsar_api:encode_msg(SMetadata, 'SingleMessageMetadata')),
+        SMetadataBin = pulsar_api:encode_msg(SMetadata, 'SingleMessageMetadata'),
         SMetadataBinSize = size(SMetadataBin),
-        <<Acc/binary, SMetadataBinSize:32, SMetadataBin/binary, Message/binary>>
+        <<Acc/binary, SMetadataBinSize:32, SMetadataBin/binary, Message1/binary>>
     end, <<>>, Messages),
     {Metadata1, BatchMessage}.
 
@@ -330,3 +338,13 @@ next_sequence_id(State = #state{sequence_id = SequenceId}) ->
     State#state{sequence_id = SequenceId+1}.
 
 log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).
+
+maybe_compression(Bin, 'SNAPPY') ->
+    {ok, Compressed} = snappyer:compress(Bin),
+    Compressed;
+
+maybe_compression(Bin, 'ZLIB') ->
+    zlib:compress(Bin);
+
+maybe_compression(Bin, _) ->
+    iolist_to_binary(Bin).

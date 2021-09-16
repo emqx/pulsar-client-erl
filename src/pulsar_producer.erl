@@ -340,11 +340,11 @@ next_sequence_id(State = #state{sequence_id = SequenceId}) ->
 log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).
 
 maybe_compression(Bin, 'SNAPPY') ->
-  {ok, Compressed} = snappyer:compress(Bin),
-  Compressed;
+    {ok, Compressed} = snappyer:compress(Bin),
+    Compressed;
 
 maybe_compression(Bin, 'ZLIB') ->
-  zlib:compress(Bin);
+    zlib:compress(Bin);
 
 maybe_compression(Bin, _) ->
     iolist_to_binary(Bin).

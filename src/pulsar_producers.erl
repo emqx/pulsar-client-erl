@@ -68,7 +68,7 @@ do_pick_producer(Strategy, Partition, Partitions, Workers) ->
         false when Strategy =:= random ->
             pick_next_alive(Workers, Partition, Partitions);
         false when Strategy =:= roundrobin ->
-            R = {Partition, _Pid1} = pick_next_alive(Workers, Partition, Partitions),
+            R = pick_next_alive(Workers, Partition, Partitions),
             _ = put(pulsar_roundrobin, (Partition + 1) rem Partitions),
             R;
         false ->

@@ -36,6 +36,9 @@
 -record(state, {sock, servers, opts, producers = #{}, request_id = 0, requests = #{}, from, last_bin = <<>>}).
 
 -define(TIMEOUT, 60000).
+-define(PING_INTERVAL, 30000). %% 30s
+-define(PONG_TS, {pulsar_rcvd, pong}).
+-define(PONG_TIMEOUT, ?PING_INTERVAL * 2). %% 60s
 
 -define(TCPOPTIONS, [
     binary,
@@ -105,7 +108,7 @@ handle_call(get_status, From, State = #state{sock = undefined, servers = Servers
         Sock -> {noreply, State#state{from = From, sock = Sock}}
     end;
 handle_call(get_status, _From, State) ->
-    {reply, true, State};
+    {reply, not is_pong_longtime_no_received(), State};
 
 handle_call(_Req, _From, State) ->
     {reply, ok, State, hibernate}.
@@ -187,6 +190,7 @@ handle_response({ping, #{}}, State = #state{sock = Sock}) ->
     {noreply, State, hibernate};
 
 handle_response({pong, #{}}, State) ->
+    pong_received(),
     start_keepalive(),
     {noreply, State, hibernate};
 
@@ -247,10 +251,23 @@ next_request_id(State = #state{request_id = RequestId}) ->
 log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).
 
 start_keepalive() ->
-    erlang:send_after(30*1000, self(), ping).
+    erlang:send_after(?PING_INTERVAL, self(), ping).
 
 ping(Sock) ->
     gen_tcp:send(Sock, pulsar_protocol_frame:ping()).
 
 pong(Sock) ->
     gen_tcp:send(Sock, pulsar_protocol_frame:pong()).
+
+pong_received() ->
+    _ = erlang:put(?PONG_TS, now_ts()),
+    ok.
+
+is_pong_longtime_no_received() ->
+    case erlang:get(?PONG_TS) of
+        undefined -> false;
+        Ts -> now_ts() - Ts > ?PONG_TIMEOUT
+    end.
+
+now_ts() ->
+    erlang:system_time(millisecond).

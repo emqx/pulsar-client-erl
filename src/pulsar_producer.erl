@@ -210,8 +210,13 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
         {SequenceId, BatchLen} ->
             case Callback of
                 {M, F, A} ->
-                    [erlang:apply(M, F, [Resp] ++ A)|| _Item <- lists:seq(1, BatchLen)];
-                _ -> [Callback(Resp) || _Item <- lists:seq(1, BatchLen)]
+                    lists:foreach(fun(_) ->
+                        erlang:apply(M, F, [Resp] ++ A)
+                    end,  lists:seq(1, BatchLen));
+                _ ->
+                    lists:foreach(fun(_) ->
+                        Callback(Resp)
+                    end,  lists:seq(1, BatchLen))
             end,
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
         From ->

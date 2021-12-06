@@ -137,7 +137,7 @@ connected({call, From}, {send, Message}, State = #state{sequence_id = SequenceId
 connected(cast, {send, Message}, State = #state{batch_size = BatchSize, sequence_id = SequenceId, requests = Reqs}) ->
     BatchMessage = Message ++ collect_send_calls(BatchSize),
     send_batch_payload(BatchMessage, State),
-    {keep_state, next_sequence_id(State#state{requests = maps:put(SequenceId, SequenceId, Reqs)})};
+    {keep_state, next_sequence_id(State#state{requests = maps:put(SequenceId, {SequenceId, length(BatchMessage)}, Reqs)})};
 
 connected(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
@@ -186,6 +186,8 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
             {keep_state, State};
         SequenceId ->
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
+        {SequenceId, _} ->
+            {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
         From ->
             gen_statem:reply(From, Resp),
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}}
@@ -203,6 +205,13 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
             case Callback of
                 {M, F, A} -> erlang:apply(M, F, [Resp] ++ A);
                 _ -> Callback(Resp)
+            end,
+            {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
+        {SequenceId, BatchLen} ->
+            case Callback of
+                {M, F, A} ->
+                    [erlang:apply(M, F, [Resp] ++ A)|| _Item <- lists:seq(1, BatchLen)];
+                _ -> [Callback(Resp) || _Item <- lists:seq(1, BatchLen)]
             end,
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
         From ->

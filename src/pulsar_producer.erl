@@ -62,8 +62,6 @@ callback_mode() -> [state_functions].
                 requests = #{},
                 last_bin = <<>>}).
 
--define (FRAME, pulsar_protocol_frame).
-
 start_link(PartitionTopic, BrokerServiceUrl, ProducerOpts) ->
     gen_statem:start_link(?MODULE, [PartitionTopic, BrokerServiceUrl, ProducerOpts], []).
 
@@ -109,7 +107,7 @@ idle(_, connecting, State = #state{opts = Opts, broker_service_url = BrokerServi
     end.
 
 connecting(_EventType, {tcp, _, Bin}, State) ->
-    {Cmd, _} = ?FRAME:parse(Bin),
+    {Cmd, _} = pulsar_protocol_frame:parse(Bin),
     handle_response(Cmd, State);
 
 connecting({call, From}, _, State) ->
@@ -124,7 +122,7 @@ connected(_EventType, {tcp_closed, Sock}, State = #state{sock = Sock, partitiont
     {next_state, idle, State#state{sock = undefined}};
 
 connected(_EventType, {tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
-    parse(?FRAME:parse(<<LastBin/binary, Bin/binary>>), State);
+    parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
 
 connected(_EventType, ping, State = #state{sock = Sock}) ->
     ping(Sock),
@@ -157,7 +155,7 @@ parse({Cmd, LastBin}, State) ->
         {_, State1} -> State1;
         {_, _, State1} -> State1
     end,
-    parse(?FRAME:parse(LastBin), State2).
+    parse(pulsar_protocol_frame:parse(LastBin), State2).
 
 handle_response({connected, _ConnectedData}, State = #state{sock = Sock,
                                                             request_id = RequestId,
@@ -234,9 +232,7 @@ handle_response(Msg, State) ->
     {keep_state, State}.
 
 connect(Sock) ->
-    Conn = #{client_version => "Pulsar-Client-Erlang-v0.0.1",
-             protocol_version => 6},
-    gen_tcp:send(Sock, ?FRAME:connect(Conn)).
+    gen_tcp:send(Sock, pulsar_protocol_frame:connect()).
 
 send_batch_payload(Messages, #state{
                                     partitiontopic = PartitionTopic,
@@ -259,17 +255,17 @@ send_batch_payload(Messages, #state{
                  publish_time => erlang:system_time(millisecond),
                  compression => 'NONE'},
     {Metadata1, BatchMessage} = batch_message(Metadata, Len, Messages),
-    gen_tcp:send(Sock, ?FRAME:send(Send, Metadata1, BatchMessage)),
+    gen_tcp:send(Sock, pulsar_protocol_frame:send(Send, Metadata1, BatchMessage)),
     pulsar_metrics:send(PartitionTopic, Len).
 
 start_keepalive() ->
     erlang:send_after(30*1000, self(), ping).
 
 ping(Sock) ->
-    gen_tcp:send(Sock, ?FRAME:ping()).
+    gen_tcp:send(Sock, pulsar_protocol_frame:ping()).
 
 pong(Sock) ->
-    gen_tcp:send(Sock, ?FRAME:pong()).
+    gen_tcp:send(Sock, pulsar_protocol_frame:pong()).
 
 create_producer(Sock, Topic, RequestId, ProducerId) ->
     Producer = #{
@@ -277,7 +273,7 @@ create_producer(Sock, Topic, RequestId, ProducerId) ->
         producer_id => ProducerId,
         request_id => RequestId
     },
-    gen_tcp:send(Sock, ?FRAME:create_producer(Producer)).
+    gen_tcp:send(Sock, pulsar_protocol_frame:create_producer(Producer)).
 
 batch_message(Metadata, Len, Messages) ->
     Metadata1 = Metadata#{num_messages_in_batch => Len},

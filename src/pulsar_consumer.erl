@@ -55,8 +55,6 @@ callback_mode() -> [state_functions].
                 flow,
                 flow_rate}).
 
--define (FRAME, pulsar_protocol_frame).
-
 start_link(PartitionTopic, BrokerServiceUrl, ConsumerOpts) ->
     gen_statem:start_link(?MODULE, [PartitionTopic, BrokerServiceUrl, ConsumerOpts], []).
 
@@ -94,7 +92,7 @@ idle(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
 
 connecting(_EventType, {tcp, _, Bin}, State) ->
-    {Cmd, _} = ?FRAME:parse(Bin),
+    {Cmd, _} = pulsar_protocol_frame:parse(Bin),
     handle_response(Cmd, State).
 
 connected(_EventType, {tcp_closed, Sock}, State = #state{sock = Sock, partitiontopic = Topic}) ->
@@ -103,7 +101,7 @@ connected(_EventType, {tcp_closed, Sock}, State = #state{sock = Sock, partitiont
     {next_state, idle, State#state{sock = undefined}};
 
 connected(_EventType, {tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
-    parse(?FRAME:parse(<<LastBin/binary, Bin/binary>>), State);
+    parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
 
 connected(_EventType, ping, State = #state{sock = Sock}) ->
     ping(Sock),
@@ -127,7 +125,7 @@ parse({Cmd, LastBin}, State) ->
         {_, State1} -> State1;
         {_, _, State1} -> State1
     end,
-    parse(?FRAME:parse(LastBin), State2).
+    parse(pulsar_protocol_frame:parse(LastBin), State2).
 
 handle_response({connected, _ConnectedData}, State = #state{sock = Sock,
                                                             request_id = RequestId,
@@ -173,18 +171,16 @@ handle_response(Msg, State) ->
     {keep_state, State}.
 
 connect(Sock) ->
-    Conn = #{client_version => "Pulsar-Client-Erlang-v0.0.1",
-             protocol_version => 6},
-    gen_tcp:send(Sock, ?FRAME:connect(Conn)).
+    gen_tcp:send(Sock, pulsar_protocol_frame:connect()).
 
 start_keepalive() ->
     erlang:send_after(30*1000, self(), ping).
 
 ping(Sock) ->
-    gen_tcp:send(Sock, ?FRAME:ping()).
+    gen_tcp:send(Sock, pulsar_protocol_frame:ping()).
 
 pong(Sock) ->
-    gen_tcp:send(Sock, ?FRAME:pong()).
+    gen_tcp:send(Sock, pulsar_protocol_frame:pong()).
 
 subscribe(Sock, Topic, RequestId, ConsumerId, Opts) ->
     SubType = maps:get(sub_type, Opts, 'Shared'),
@@ -196,7 +192,7 @@ subscribe(Sock, Topic, RequestId, ConsumerId, Opts) ->
         consumer_id => ConsumerId,
         request_id => RequestId
     },
-    gen_tcp:send(Sock, ?FRAME:create_subscribe(SubInfo)).
+    gen_tcp:send(Sock, pulsar_protocol_frame:create_subscribe(SubInfo)).
 
 maybe_set_flow(Len, State = #state{sock = Sock,
                                    consumer_id = ConsumerId,
@@ -216,7 +212,7 @@ set_flow(Sock, ConsumerId, FlowSize) ->
         consumer_id => ConsumerId,
         messagePermits => FlowSize
     },
-    gen_tcp:send(Sock, ?FRAME:set_flow(FlowInfo)).
+    gen_tcp:send(Sock, pulsar_protocol_frame:set_flow(FlowInfo)).
 
 ack(Sock, ConsumerId, AckType, Msg) ->
     Ack = #{
@@ -224,7 +220,7 @@ ack(Sock, ConsumerId, AckType, Msg) ->
         ack_type => AckType,
         message_id => [maps:get(message_id, Msg)]
     },
-    gen_tcp:send(Sock, ?FRAME:ack(Ack)).
+    gen_tcp:send(Sock, pulsar_protocol_frame:ack(Ack)).
 
 format_url("pulsar://" ++ Url) ->
     [Host, Port] = string:tokens(Url, ":"),

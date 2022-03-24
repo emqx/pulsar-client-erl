@@ -36,8 +36,11 @@
 -define(SIMPLE_SIZE, 4).
 -define(PAYLOAD_SIZE, 10).
 -define(MAGIC_NUMBER, 3585).
+-define(PROTO_VSN, 19).
+-define(CLIENT_VSN, "Pulsar-Client-Erlang-v0.0.1").
 
--export ([ connect/1
+-export ([ connect/0
+         , connect/1
          , topic_metadata/1
          , lookup_topic/1
          , create_producer/1
@@ -52,9 +55,14 @@
          , send/3
          ]).
 
+connect() ->
+    connect(#{}).
+
 connect(CommandConnect) ->
     serialized_simple_command(#{
         type => ?CONNECT,
+        client_version => ?CLIENT_VSN,
+        protocol_version => ?PROTO_VSN,
         connect => CommandConnect
     }).
 
@@ -62,7 +70,6 @@ topic_metadata(PartitionMetadata) ->
     serialized_simple_command(#{
         type => ?PARTITIONED_METADATA,
         partitionMetadata => PartitionMetadata
-
     }).
 
 lookup_topic(LookupTopic) ->

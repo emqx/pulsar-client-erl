@@ -83,7 +83,8 @@ handle_call({get_topic_metadata, Topic, Call}, From, State = #state{sock = Sock,
             log_error("Servers: ~p down", [Servers]),
             {noreply, State};
         Sock1 ->
-            Metadata = topic_metadata(Sock1, Topic, RequestId),
+            Metadata = topic_metadata(Topic, RequestId),
+            gen_tcp:send(Sock1, pulsar_protocol_frame:topic_metadata(Metadata)),
             {noreply, next_request_id(State#state{requests = maps:put(RequestId, {From, Metadata}, Reqs),
                                                   producers = maps:put(Topic, Call, Producers),
                                                   sock = Sock1})}
@@ -98,8 +99,12 @@ handle_call({lookup_topic, PartitionTopic}, From, State = #state{sock = Sock,
             log_error("Servers: ~p down", [Servers]),
             {noreply, State};
         Sock1 ->
-            LookupTopic = lookup_topic(Sock1, PartitionTopic, RequestId),
-            {noreply, next_request_id(State#state{requests = maps:put(RequestId, {From, LookupTopic}, Reqs), sock = Sock1})}
+            LookupTopic = lookup_topic_cmd(PartitionTopic, RequestId),
+            gen_tcp:send(Sock, pulsar_protocol_frame:lookup_topic(LookupTopic)),
+            {noreply, next_request_id(State#state{
+                requests = maps:put(RequestId, {From, LookupTopic}, Reqs),
+                sock = Sock1
+            })}
     end;
 
 handle_call(get_status, From, State = #state{sock = undefined, servers = Servers}) ->
@@ -163,12 +168,34 @@ handle_response({connected, _ConnectedData}, State = #state{from = From}) ->
     gen_server:reply(From, true),
     {noreply, State#state{from = undefined}, hibernate};
 
+handle_response({partitionMetadataResponse, #{error := Reason, message := Msg,
+                                        request_id := RequestId, response := 'Failed'}},
+                State = #state{requests = Reqs}) ->
+    case maps:get(RequestId, Reqs, undefined) of
+        {From, #{}} ->
+            gen_server:reply(From, {error, #{error => Reason, message => Msg}}),
+            {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
+        undefined ->
+            {noreply, State, hibernate}
+    end;
+
 handle_response({partitionMetadataResponse, #{partitions := Partitions,
                                               request_id := RequestId}},
-                State = #state{requests   = Reqs}) ->
+                State = #state{requests = Reqs}) ->
     case maps:get(RequestId, Reqs, undefined) of
         {From, #{topic := Topic}} ->
-            gen_server:reply(From, {Topic, Partitions}),
+            gen_server:reply(From, {ok, {Topic, Partitions}}),
+            {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
+        undefined ->
+            {noreply, State, hibernate}
+    end;
+
+handle_response({lookupTopicResponse, #{error := Reason, message := Msg,
+                                        request_id := RequestId, response := 'Failed'}},
+                State = #state{requests = Reqs}) ->
+    case maps:get(RequestId, Reqs, undefined) of
+        {From, #{}} ->
+            gen_server:reply(From, {error, #{error => Reason, message => Msg}}),
             {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
         undefined ->
             {noreply, State, hibernate}
@@ -179,7 +206,7 @@ handle_response({lookupTopicResponse, #{brokerServiceUrl := BrokerServiceUrl,
                 State = #state{requests = Reqs}) ->
     case maps:get(RequestId, Reqs, undefined) of
         {From, #{}} ->
-            gen_server:reply(From, BrokerServiceUrl),
+            gen_server:reply(From, {ok, BrokerServiceUrl}),
             {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
         undefined ->
             {noreply, State, hibernate}
@@ -225,28 +252,24 @@ try_connect([{Host, Port} | Servers]) ->
 connect(Sock) ->
     gen_tcp:send(Sock, pulsar_protocol_frame:connect()).
 
-topic_metadata(Sock, Topic, RequestId) ->
-    Metadata = #{
+topic_metadata(Topic, RequestId) ->
+    #{
         topic => Topic,
         request_id => RequestId
-    },
-    gen_tcp:send(Sock, pulsar_protocol_frame:topic_metadata(Metadata)),
-    Metadata.
+    }.
 
-lookup_topic(Sock, Topic, RequestId) ->
-    LookupTopic = #{
+lookup_topic_cmd(Topic, RequestId) ->
+    #{
         topic => Topic,
         request_id => RequestId
-    },
-    gen_tcp:send(Sock, pulsar_protocol_frame:lookup_topic(LookupTopic)),
-    LookupTopic.
+    }.
 
 next_request_id(State = #state{request_id = 65535}) ->
     State#state{request_id = 1};
 next_request_id(State = #state{request_id = RequestId}) ->
     State#state{request_id = RequestId+1}.
 
-log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).
+log_error(Fmt, Args) -> logger:error(Fmt, Args).
 
 start_keepalive() ->
     erlang:send_after(?PING_INTERVAL, self(), ping).

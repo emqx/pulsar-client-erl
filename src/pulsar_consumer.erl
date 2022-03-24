@@ -233,4 +233,4 @@ next_request_id(State = #state{request_id = ?MAX_QUE_ID}) ->
 next_request_id(State = #state{request_id = RequestId}) ->
     State#state{request_id = RequestId+1}.
 
-log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).
+log_error(Fmt, Args) -> logger:error(Fmt, Args).

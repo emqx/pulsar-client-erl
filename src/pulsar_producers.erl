@@ -130,7 +130,7 @@ handle_cast(_Cast, State) ->
 handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
     case pulsar_client_sup:find_client(ClientId) of
         {ok, Pid} ->
-            {_, Partitions} = pulsar_client:get_topic_metadata(Pid, Topic),
+            {ok, {_, Partitions}} = pulsar_client:get_topic_metadata(Pid, Topic),
             PartitionTopics = create_partition_topic(Topic, Partitions),
             NewState = lists:foldl(
                 fun({PartitionTopic, Partition}, CurrentState) ->
@@ -144,18 +144,15 @@ handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
     end;
 
 handle_info({'EXIT', Pid, Error}, State = #state{workers = Workers, producers = Producers}) ->
+    log_error("Received EXIT from ~p, error: ~p", [Pid, Error]),
     case maps:get(Pid, Producers, undefined) of
         undefined ->
-            log_error("Not find Pid:~p producer", [Pid]),
+            log_error("Cannot find ~p from producers", [Pid]),
             {noreply, State};
         {Partition, PartitionTopic} ->
             ets:delete(Workers, Partition),
-            case Error of
-                {shutdown, 'ServiceNotReady'} ->
-                    erlang:send_after(2000, self(), {restart_producer, Partition, PartitionTopic});
-                _ ->
-                    self() ! {restart_producer, Partition, PartitionTopic}
-            end,
+            log_error("Producer ~p down, restart it later", [Pid]),
+            erlang:send_after(5000, self(), {restart_producer, Partition, PartitionTopic}),
             {noreply, State#state{producers = maps:remove(Pid, Producers)}}
     end;
 
@@ -181,11 +178,11 @@ create_partition_topic(Topic, 0) ->
 create_partition_topic(Topic, Partitions) ->
     lists:map(fun(Partition) ->
         {lists:concat([Topic, "-partition-", Partition]), Partition}
-    end,lists:seq(0, Partitions-1)).
+    end, lists:seq(0, Partitions-1)).
 
 get_name(ProducerOpts) -> maps:get(name, ProducerOpts, ?MODULE).
 
-log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).
+log_error(Fmt, Args) -> logger:error("[pulsar_producers] " ++ Fmt, Args).
 
 start_producer(Pid, Partition, PartitionTopic,
     #state{
@@ -195,7 +192,7 @@ start_producer(Pid, Partition, PartitionTopic,
         producer_id = ProducerID} = State) ->
     try
         NewProducerOpts = maps:put(producer_id, ProducerID, ProducerOpts),
-        BrokerServiceUrl = pulsar_client:lookup_topic(Pid, PartitionTopic),
+        {ok, BrokerServiceUrl} = pulsar_client:lookup_topic(Pid, PartitionTopic),
         {ok, Producer} = pulsar_producer:start_link(PartitionTopic, BrokerServiceUrl, NewProducerOpts),
         ets:insert(Workers, {Partition, Producer}),
         NewState = next_producer_id(State),

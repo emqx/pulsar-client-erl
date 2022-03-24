@@ -223,9 +223,7 @@ try_connect([{Host, Port} | Servers]) ->
     end.
 
 connect(Sock) ->
-    Conn = #{client_version => "Pulsar-Client-Erlang-v0.0.1",
-             protocol_version => 6},
-    gen_tcp:send(Sock, pulsar_protocol_frame:connect(Conn)).
+    gen_tcp:send(Sock, pulsar_protocol_frame:connect()).
 
 topic_metadata(Sock, Topic, RequestId) ->
     Metadata = #{

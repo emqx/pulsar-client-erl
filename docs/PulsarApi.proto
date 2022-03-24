@@ -61,6 +61,9 @@ message MessageIdData {
     optional int32 batch_index = 4 [default = -1];
     repeated int64 ack_set = 5;
     optional int32 batch_size = 6;
+
+    // For the chunk message id, we need to specify the first chunk message id.
+    optional MessageIdData first_chunk_message_id = 7;
 }
 
 message KeyValue {
@@ -90,6 +93,12 @@ enum CompressionType {
     ZLIB   = 2;
     ZSTD   = 3;
     SNAPPY   = 4;
+}
+
+enum ProducerAccessMode {
+    Shared = 0; // By default multiple producers can publish on a topic
+    Exclusive = 1; // Require exclusive access for producer. Fail immediately if there's already a producer connected.
+    WaitForExclusive = 2; // Producer creation is pending until it can acquire exclusive access
 }
 
 message MessageMetadata {
@@ -144,11 +153,11 @@ message MessageMetadata {
     optional uint64 highest_sequence_id = 24 [default = 0];
 
     // Indicate if the message payload value is set
-    optional bool null_value = 25 [ default = false ];
+    optional bool null_value = 25 [default = false];
     optional string uuid = 26;
-	optional int32 num_chunks_from_msg = 27;
-	optional int32 total_chunk_msg_size = 28;
-	optional int32 chunk_id = 29;
+    optional int32 num_chunks_from_msg = 27;
+    optional int32 total_chunk_msg_size = 28;
+    optional int32 chunk_id = 29;
 
     // Indicate if the message partition key is set
     optional bool null_partition_key = 30 [default = false];
@@ -174,6 +183,12 @@ message SingleMessageMetadata {
     optional bool null_partition_key = 10 [ default = false];
 }
 
+// metadata added for entry from broker
+message BrokerEntryMetadata {
+    optional uint64 broker_timestamp = 1;
+    optional uint64 index = 2;
+}
+
 enum ServerError {
     UnknownError        = 0;
     MetadataError       = 1; // Error with ZK/metadata
@@ -182,7 +197,7 @@ enum ServerError {
     AuthorizationError  = 4; // Not authorized to use resource
 
     ConsumerBusy        = 5; // Unable to subscribe/unsubscribe because
-                             // other consumers are connected
+                            // other consumers are connected
     ServiceNotReady     = 6; // Any error that requires client retry operation with a fresh lookup
     ProducerBlockedQuotaExceededError = 7; // Unable to create producer because backlog quota exceeded
     ProducerBlockedQuotaExceededException = 8; // Exception while creating producer because quota exceeded
@@ -206,6 +221,12 @@ enum ServerError {
 
     TransactionConflict = 23; // Ack with transaction conflict
     TransactionNotFound = 24; // Transaction not found
+
+    ProducerFenced = 25; // When a producer asks and fail to get exclusive producer access,
+                        // or loses the eclusive status after a reconnection, the broker will
+                        // use this error to indicate that this producer is now permanently
+                        // fenced. Applications are now supposed to close it and create a
+                        // new producer
 }
 
 enum AuthMethod {
@@ -230,12 +251,16 @@ enum ProtocolVersion {
     v10 = 10;// Added proxy to broker
     v11 = 11;// C++ consumers before this version are not correctly handling the checksum field
     v12 = 12;// Added get topic's last messageId from broker
-             // Added CommandActiveConsumerChange
-             // Added CommandGetTopicsOfNamespace
+            // Added CommandActiveConsumerChange
+            // Added CommandGetTopicsOfNamespace
     v13 = 13; // Schema-registry : added avro schema format for json
     v14 = 14; // Add CommandAuthChallenge and CommandAuthResponse for mutual auth
-              // Added Key_Shared subscription
+            // Added Key_Shared subscription
     v15 = 15; // Add CommandGetOrCreateSchema and CommandGetOrCreateSchemaResponse
+    v16 = 16; // Add support for broker entry metadata
+    v17 = 17; // Added support ack receipt
+    v18 = 18; // Add client support for broker entry metadata
+    v19 = 19; // Add CommandTcClientConnectRequest and CommandTcClientConnectResponse
 }
 
 message CommandConnect {
@@ -265,7 +290,9 @@ message CommandConnect {
 }
 
 message FeatureFlags {
-  optional bool supports_auth_refresh = 1 [default = false];
+    optional bool supports_auth_refresh = 1 [default = false];
+    optional bool supports_broker_entry_metadata = 2 [default = false];
+    optional bool supports_partial_producer = 3 [default = false];
 }
 
 message CommandConnected {
@@ -359,6 +386,11 @@ message CommandSubscribe {
     optional uint64 start_message_rollback_duration_sec = 16 [default = 0];
 
     optional KeySharedMeta keySharedMeta = 17;
+
+    repeated KeyValue subscription_properties = 18;
+
+    // The consumer epoch, when exclusive and failover consumer redeliver unack message will increase the epoch
+    optional uint64 consumer_epoch = 19;
 }
 
 message CommandPartitionedTopicMetadata {
@@ -450,6 +482,24 @@ message CommandProducer {
     // Indicate the name of the producer is generated or user provided
     // Use default true here is in order to be forward compatible with the client
     optional bool user_provided_producer_name = 9 [default = true];
+
+    // Require that this producers will be the only producer allowed on the topic
+    optional ProducerAccessMode producer_access_mode = 10 [default = Shared];
+
+    // Topic epoch is used to fence off producers that reconnects after a new
+    // exclusive producer has already taken over. This id is assigned by the
+    // broker on the CommandProducerSuccess. The first time, the client will
+    // leave it empty and then it will always carry the same epoch number on
+    // the subsequent reconnections.
+    optional uint64 topic_epoch = 11;
+
+    optional bool txn_enabled = 12 [default = false];
+
+    // Name of the initial subscription of the topic.
+    // If this field is not set, the initial subscription will not be created.
+    // If this field is set but the broker's `allowAutoSubscriptionCreation`
+    // is disabled, the producer will fail to be created.
+    optional string initial_subscription_name = 13;
 }
 
 message CommandSend {
@@ -462,6 +512,9 @@ message CommandSend {
     /// Add highest sequence id to support batch message with external sequence id
     optional uint64 highest_sequence_id = 6 [default = 0];
     optional bool is_chunk     =7 [default = false];
+
+    // Specify if the message being published is a Pulsar marker or not
+    optional bool marker = 8 [default = false];
 }
 
 message CommandSendReceipt {
@@ -483,6 +536,7 @@ message CommandMessage {
     required MessageIdData message_id = 2;
     optional uint32 redelivery_count  = 3 [default = 0];
     repeated int64 ack_set = 4;
+    optional uint64 consumer_epoch = 5;
 }
 
 message CommandAck {
@@ -573,6 +627,7 @@ message CommandCloseConsumer {
 message CommandRedeliverUnacknowledgedMessages {
     required uint64 consumer_id = 1;
     repeated MessageIdData message_ids = 2;
+    optional uint64 consumer_epoch = 3;
 }
 
 message CommandSuccess {
@@ -589,6 +644,15 @@ message CommandProducerSuccess {
     // This will only be meaningful if deduplication has been enabled.
     optional int64  last_sequence_id = 3 [default = -1];
     optional bytes schema_version = 4;
+
+    // The topic epoch assigned by the broker. This field will only be set if we
+    // were requiring exclusive access when creating the producer.
+    optional uint64 topic_epoch = 5;
+
+    // If producer is not "ready", the client will avoid to timeout the request
+    // for creating the producer. Instead it will wait indefinitely until it gets
+    // a subsequent  `CommandProducerSuccess` with `producer_ready==true`.
+    optional bool producer_ready = 6 [default = true];
 }
 
 message CommandError {
@@ -718,6 +782,17 @@ enum TxnAction {
     ABORT = 1;
 }
 
+message CommandTcClientConnectRequest {
+    required uint64 request_id = 1;
+    required uint64 tc_id = 2 [default = 0];
+}
+
+message CommandTcClientConnectResponse {
+    required uint64 request_id = 1;
+    optional ServerError error  = 2;
+    optional string message     = 3;
+}
+
 message CommandNewTxn {
     required uint64 request_id = 1;
     optional uint64 txn_ttl_seconds = 2 [default = 0];
@@ -771,7 +846,6 @@ message CommandEndTxn {
     optional uint64 txnid_least_bits = 2 [default = 0];
     optional uint64 txnid_most_bits = 3 [default = 0];
     optional TxnAction txn_action = 4;
-    repeated MessageIdData message_id = 5;
 }
 
 message CommandEndTxnResponse {
@@ -788,7 +862,7 @@ message CommandEndTxnOnPartition {
     optional uint64 txnid_most_bits = 3 [default = 0];
     optional string topic = 4;
     optional TxnAction txn_action = 5;
-    repeated MessageIdData message_id = 6;
+    optional uint64 txnid_least_bits_of_low_watermark = 6;
 }
 
 message CommandEndTxnOnPartitionResponse {
@@ -805,6 +879,7 @@ message CommandEndTxnOnSubscription {
     optional uint64 txnid_most_bits = 3 [default = 0];
     optional Subscription subscription= 4;
     optional TxnAction txn_action = 5;
+    optional uint64 txnid_least_bits_of_low_watermark = 6;
 }
 
 message CommandEndTxnOnSubscriptionResponse {
@@ -897,6 +972,8 @@ message BaseCommand {
 
         END_TXN_ON_SUBSCRIPTION = 60;
         END_TXN_ON_SUBSCRIPTION_RESPONSE = 61;
+        TC_CLIENT_CONNECT_REQUEST = 62;
+        TC_CLIENT_CONNECT_RESPONSE = 63;
 
     }
 
@@ -972,4 +1049,6 @@ message BaseCommand {
     optional CommandEndTxnOnPartitionResponse endTxnOnPartitionResponse = 59;
     optional CommandEndTxnOnSubscription endTxnOnSubscription = 60;
     optional CommandEndTxnOnSubscriptionResponse endTxnOnSubscriptionResponse = 61;
+    optional CommandTcClientConnectRequest tcClientConnectRequest = 62;
+    optional CommandTcClientConnectResponse tcClientConnectResponse = 63;
 }

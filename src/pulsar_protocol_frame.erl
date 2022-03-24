@@ -37,7 +37,7 @@
 -define(PAYLOAD_SIZE, 10).
 -define(MAGIC_NUMBER, 3585).
 -define(PROTO_VSN, 19).
--define(CLIENT_VSN, "Pulsar-Client-Erlang-v0.0.1").
+-define(CLIENT_VSN, "Pulsar-Client-Erlang-v0.0.2").
 
 -export ([ connect/0
          , connect/1
@@ -61,9 +61,7 @@ connect() ->
 connect(CommandConnect) ->
     serialized_simple_command(#{
         type => ?CONNECT,
-        client_version => ?CLIENT_VSN,
-        protocol_version => ?PROTO_VSN,
-        connect => CommandConnect
+        connect => maps:merge(default_connect_fields(), CommandConnect)
     }).
 
 topic_metadata(PartitionMetadata) ->
@@ -120,6 +118,11 @@ pong() ->
         pong => #{}
     }).
 
+default_connect_fields() ->
+    #{ client_version => ?CLIENT_VSN
+     , protocol_version => ?PROTO_VSN
+     }.
+
 parse(<<TotalSize:32, CmdBin:TotalSize/binary, Rest/binary>>) ->
     <<CommandSize:32, Command:CommandSize/binary, CmdRest/binary>> = CmdBin,
     BaseCommand = try_decode(CommandSize, Command),
@@ -152,7 +155,7 @@ parse(<<TotalSize:32, CmdBin:TotalSize/binary, Rest/binary>>) ->
         'ERROR' ->
             {error, maps:get(error, BaseCommand)};
         _Type ->
-            error_logger:error_msg("parse unknown type:~p~n", [BaseCommand]),
+            logger:error("parse unknown type:~p~n", [BaseCommand]),
             unknown
     end,
     {Resp, Rest};

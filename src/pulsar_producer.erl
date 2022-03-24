@@ -103,6 +103,7 @@ idle(_, connecting, State = #state{opts = Opts, broker_service_url = BrokerServi
             connect(Sock),
             {next_state, connecting, State#state{sock = Sock}};
         Error ->
+            log_error("connect error: ~p, server: ~p~n", [Error, {Host, Port}]),
             {stop, {shutdown, Error}, State}
     end.
 
@@ -117,7 +118,7 @@ connecting(cast, {send, _Message}, _State) ->
     keep_state_and_data.
 
 connected(_EventType, {tcp_closed, Sock}, State = #state{sock = Sock, partitiontopic = Topic}) ->
-    log_error("TcpClosed producer: ~p~n", [Topic]),
+    log_error("connection closed by peer, topic: ~p~n", [Topic]),
     erlang:send_after(5000, self(), connecting),
     {next_state, idle, State#state{sock = undefined}};
 
@@ -347,7 +348,7 @@ next_sequence_id(State = #state{sequence_id = ?MAX_SEQ_ID}) ->
 next_sequence_id(State = #state{sequence_id = SequenceId}) ->
     State#state{sequence_id = SequenceId+1}.
 
-log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).
+log_error(Fmt, Args) -> logger:error("[pulsar-producer] " ++ Fmt, Args).
 
 maybe_compression(Bin, 'SNAPPY') ->
     {ok, Compressed} = snappyer:compress(Bin),

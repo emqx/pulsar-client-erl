@@ -61,7 +61,7 @@ handle_cast(_Cast, State) ->
 handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
     case pulsar_client_sup:find_client(ClientId) of
         {ok, Pid} ->
-            {_, Partitions} = pulsar_client:get_topic_metadata(Pid, Topic),
+            {ok, {_, Partitions}} = pulsar_client:get_topic_metadata(Pid, Topic),
             PartitionTopics = create_partition_topic(Topic, Partitions),
             NewState = lists:foldl(
                 fun(PartitionTopic, CurrentState) ->
@@ -109,11 +109,11 @@ create_partition_topic(Topic, Partitions) ->
 
 get_name(ConsumerOpts) -> maps:get(name, ConsumerOpts, ?MODULE).
 
-log_error(Fmt, Args) -> error_logger:error_msg(Fmt, Args).
+log_error(Fmt, Args) -> logger:error(Fmt, Args).
 
 start_consumer(Pid, PartitionTopic, #state{consumer_opts = ConsumerOpts} = State) ->
     try
-        BrokerServiceUrl = pulsar_client:lookup_topic(Pid, PartitionTopic),
+        {ok, BrokerServiceUrl} = pulsar_client:lookup_topic(Pid, PartitionTopic),
         {MaxConsumerMum, ConsumerOpts1} = case maps:take(max_consumer_num, ConsumerOpts) of
             error -> {1, ConsumerOpts};
             Res -> Res

@@ -122,7 +122,9 @@ t_pulsar_(Strategy) ->
     ?assertEqual(2, pulsar_metrics:consumer()),
     ?assertEqual(2, pulsar_metrics:producer()),
     %% loop send data
-    lists:foreach(fun(_) -> pulsar:send(Producers, [Data]) end, lists:seq(1, ?BATCH_SIZE)),
+    lists:foreach(fun(_) ->
+            pulsar:send(Producers, [Data]), timer:sleep(30)
+        end, lists:seq(1, ?BATCH_SIZE)),
     timer:sleep(2000),
     %% should be equal BatchSize
     %% send == consumer

@@ -38,6 +38,8 @@
                 producer_id = 0,
                 producers = #{}}).
 
+-define(T_RETRY_START, 5000).
+
 %% @doc Start supervised producers.
 start_supervised(ClientId, Topic, ProducerOpts) ->
   {ok, Pid} = pulsar_producers_sup:ensure_present(ClientId, Topic, ProducerOpts),
@@ -152,7 +154,7 @@ handle_info({'EXIT', Pid, Error}, State = #state{workers = Workers, producers = 
         {Partition, PartitionTopic} ->
             ets:delete(Workers, Partition),
             log_error("Producer ~p down, restart it later", [Pid]),
-            erlang:send_after(5000, self(), {restart_producer, Partition, PartitionTopic}),
+            restart_producer_later(Partition, PartitionTopic),
             {noreply, State#state{producers = maps:remove(Pid, Producers)}}
     end;
 
@@ -172,6 +174,9 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 terminate(_, _St) -> ok.
+
+restart_producer_later(Partition, PartitionTopic) ->
+    erlang:send_after(?T_RETRY_START, self(), {restart_producer, Partition, PartitionTopic}).
 
 create_partition_topic(Topic, 0) ->
     [{Topic, 0}];
@@ -200,7 +205,7 @@ start_producer(Pid, Partition, PartitionTopic,
     catch
         Error : Reason : Stacktrace ->
             log_error("Start producer: ~p, ~p", [Error, {Reason, Stacktrace}]),
-            self() ! {restart_producer, Partition, PartitionTopic},
+            restart_producer_later(Partition, PartitionTopic),
             next_producer_id(State)
     end.
 

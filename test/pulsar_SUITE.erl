@@ -20,11 +20,8 @@
 
 -define(TEST_SUIT_CLIENT, client_erl_suit).
 -define(BATCH_SIZE , 100).
--define(PULSAR_HOST, {"pulsar", 6650}).
--define(LOOKUP_TOPIC_RESP, "pulsar://pulsar:6650").
-
-%%-define(PULSAR_HOST, {"localhost", 6650}).
-%%-define(LOOKUP_TOPIC_RESP, "pulsar://localhost:6650").
+%-define(PULSAR_HOST, {"pulsar", 6650}).
+-define(PULSAR_HOST, {"localhost", 6650}).
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
@@ -34,9 +31,8 @@
 %%--------------------------------------------------------------------
 
 all() ->
-    [
-        t_pulsar_client
-        , t_pulsar
+    [ t_pulsar_client
+    , t_pulsar
     ].
 
 init_per_suite(Cfg) ->
@@ -53,7 +49,7 @@ set_special_configs(_Args) ->
 
 t_pulsar_client(_Args) ->
 %%    pulsar:start(),
-    application:ensure_all_started(pulsar),
+    {ok, _} = application:ensure_all_started(pulsar),
 
     {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
 
@@ -61,9 +57,11 @@ t_pulsar_client(_Args) ->
     %% for coverage
     {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
 
-    ?assertMatch({_, 4}, pulsar_client:get_topic_metadata(ClientPid, <<"test">>)),
+    ?assertMatch({ok,{<<"test">>, PNum}} when is_integer(PNum),
+        pulsar_client:get_topic_metadata(ClientPid, <<"test">>)),
 
-    ?assertEqual(?LOOKUP_TOPIC_RESP, pulsar_client:lookup_topic(ClientPid, <<"test-partition-0">>)),
+    ?assertMatch({ok, BrokerUri} when is_list(BrokerUri) orelse is_binary(BrokerUri),
+        pulsar_client:lookup_topic(ClientPid, <<"test-partition-0">>)),
 
     ?assertEqual(true, pulsar_client:get_status(ClientPid)),
 
@@ -75,10 +73,10 @@ t_pulsar_client(_Args) ->
     application:stop(pulsar).
 
 t_pulsar(_) ->
+    {ok, _} = application:ensure_all_started(pulsar),
     t_pulsar_(random),
     t_pulsar_(roundrobin).
 t_pulsar_(Strategy) ->
-    application:ensure_all_started(pulsar),
     {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
     ConsumerOpts = #{
         cb_init_args => no_args,

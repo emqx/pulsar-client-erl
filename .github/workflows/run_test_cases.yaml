@@ -10,7 +10,7 @@ jobs:
       matrix:
         pulsar_tag:
           - 2.7.0
-          - 2.9.1
+          - 2.9.2.6
     steps:
       - name: install docker-compose
         run: |

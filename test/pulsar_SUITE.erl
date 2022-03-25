@@ -20,8 +20,8 @@
 
 -define(TEST_SUIT_CLIENT, client_erl_suit).
 -define(BATCH_SIZE , 100).
-%-define(PULSAR_HOST, {"pulsar", 6650}).
--define(PULSAR_HOST, {"localhost", 6650}).
+-define(PULSAR_HOST, {"pulsar", 6650}).
+%-define(PULSAR_HOST, {"localhost", 6650}).
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
@@ -73,10 +73,10 @@ t_pulsar_client(_Args) ->
     application:stop(pulsar).
 
 t_pulsar(_) ->
-    {ok, _} = application:ensure_all_started(pulsar),
     t_pulsar_(random),
     t_pulsar_(roundrobin).
 t_pulsar_(Strategy) ->
+    {ok, _} = application:ensure_all_started(pulsar),
     {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
     ConsumerOpts = #{
         cb_init_args => no_args,
@@ -140,7 +140,7 @@ t_pulsar_(Strategy) ->
     ?assertEqual(PCount, CCounter),
     %% 4 producer , 4 consumer , 2 all
     AllMetrics = pulsar_metrics:all_detail(),
-    ?assertEqual(10, length(AllMetrics)),
+    ?assertMatch(N when N > 0, length(AllMetrics)),
     ?assertEqual({PCount, CCounter}, count_test(AllMetrics)),
     ?assertEqual(0, pulsar_metrics:producer("no exist topic name")),
     ?assertEqual(0, pulsar_metrics:consumer("no exist topic name")),

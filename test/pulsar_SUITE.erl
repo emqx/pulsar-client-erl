@@ -79,7 +79,7 @@ t_pulsar_(Strategy) ->
     {ok, _} = application:ensure_all_started(pulsar),
     {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
     ConsumerOpts = #{
-        cb_init_args => no_args,
+        cb_init_args => [],
         cb_module => ?MODULE,
         sub_type => 'Shared',
         subscription => "pulsar_test_suite_subscription",
@@ -94,7 +94,7 @@ t_pulsar_(Strategy) ->
     ProducerOpts = #{
         batch_size => ?BATCH_SIZE,
         strategy => Strategy,
-        callback => {?MODULE, producer_callback, no_arg}
+        callback => {?MODULE, producer_callback, []}
     },
     Data = #{key => <<"pulsar">>, value => <<"hello world">>},
     {ok, Producers} = pulsar:ensure_supervised_producers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ProducerOpts),
@@ -123,9 +123,9 @@ t_pulsar_(Strategy) ->
     ?assertEqual(2, pulsar_metrics:producer()),
     %% loop send data
     lists:foreach(fun(_) -> pulsar:send(Producers, [Data]) end, lists:seq(1, ?BATCH_SIZE)),
-    timer:sleep(500),
+    timer:sleep(2000),
     %% should be equal BatchSize
-    %% send ==  consumer
+    %% send == consumer
     ?assertEqual(pulsar_metrics:producer(), pulsar_metrics:consumer()),
     %% stop consumers
     ?assertEqual(ok, pulsar:stop_and_delete_supervised_consumers(Consumers)),
@@ -166,4 +166,3 @@ handle_message(_Msg, _Payloads, Loop) ->
     {ok, 'Individual', Loop}.
 
 producer_callback(_Args) -> ok.
-

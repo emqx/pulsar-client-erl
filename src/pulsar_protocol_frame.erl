@@ -36,7 +36,9 @@
 -define(SIMPLE_SIZE, 4).
 -define(PAYLOAD_SIZE, 10).
 -define(MAGIC_NUMBER, 3585).
--define(PROTO_VSN, 19).
+
+%% Use protocol version 10 to work with pulsar proxy
+-define(PROTO_VSN, 10).
 -define(CLIENT_VSN, "Pulsar-Client-Erlang-v0.0.2").
 
 -export ([ connect/0

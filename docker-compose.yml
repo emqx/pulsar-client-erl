@@ -12,7 +12,7 @@ services:
 
   pulsar:
     container_name: pulsar
-    image: apachepulsar/pulsar:${PULSAR_TAG}
+    image: streamnative/pulsar:${PULSAR_TAG}
     volumes:
     - ./test/test_SUITE_data/standalone.conf:/pulsar/conf/standalone.conf
     ports:

@@ -34,6 +34,8 @@
                 consumer_id = 0,
                 consumers = #{}}).
 
+-define(T_RETRY_START, 5000).
+
 %% @doc Start supervised consumer.
 start_supervised(ClientId, Topic, ConsumerOpts) ->
     {ok, _Pid} = pulsar_consumers_sup:ensure_present(ClientId, Topic, ConsumerOpts),
@@ -79,7 +81,7 @@ handle_info({'EXIT', Pid, _Error}, State = #state{consumers = Consumers}) ->
             log_error("Not find Pid:~p consumer", [Pid]),
             {noreply, State};
         PartitionTopic ->
-            self() ! {restart_consumer, PartitionTopic},
+            restart_producer_later(PartitionTopic),
             {noreply, State#state{consumers = maps:remove(Pid, Consumers)}}
     end;
 
@@ -130,9 +132,12 @@ start_consumer(Pid, PartitionTopic, #state{consumer_opts = ConsumerOpts} = State
     catch
         Error : Reason : Stacktrace ->
             log_error("Start consumer: ~p, ~p", [Error, {Reason, Stacktrace}]),
-            self() ! {restart_consumer, PartitionTopic},
+            restart_producer_later(PartitionTopic),
             State
     end.
+
+restart_producer_later(PartitionTopic) ->
+    erlang:send_after(?T_RETRY_START, self(), {restart_consumer, PartitionTopic}).
 
 next_consumer_id(#state{consumer_id = ?MAX_CONSUMER_ID} = Stat) ->
     Stat#state{consumer_id = 0};

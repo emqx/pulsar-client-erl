@@ -73,28 +73,29 @@ init([PartitionTopic, Server, ProxyToBrokerUrl, ConsumerOpts]) ->
                    opts = ConsumerOpts2,
                    broker_service = Server,
                    flow = maps:get(flow, ConsumerOpts, 1000)},
-    self() ! {connecting, ProxyToBrokerUrl},
-    {ok, idle, State}.
+    %% use process dict to avoid the trouble of relup
+    erlang:put(proxy_to_broker_url, ProxyToBrokerUrl),
+    {ok, idle, State, [{next_event, internal, do_connect}]}.
 
-idle(_, {connecting, ProxyToBrokerUrl}, State = #state{broker_service = {Host, Port}}) ->
-    case gen_tcp:connect(Host, Port, ?TCPOPTIONS, ?TIMEOUT) of
-        {ok, Sock} ->
-            gen_tcp:controlling_process(Sock, self()),
-            pulsar_socket:send_connect(Sock, ProxyToBrokerUrl),
-            {next_state, connecting, State#state{sock = Sock}};
-        Error ->
-            {stop, {shutdown, Error}, State}
-    end;
+idle(_, do_connect, State) ->
+    do_connect(State);
+
 idle(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
+
+connecting(_, do_connect, State) ->
+    do_connect(State);
 
 connecting(_EventType, {tcp, _, Bin}, State) ->
     {Cmd, _} = pulsar_protocol_frame:parse(Bin),
     handle_response(Cmd, State).
 
+connected(_, do_connect, _State) ->
+    keep_state_and_data;
+
 connected(_EventType, {tcp_closed, Sock}, State = #state{sock = Sock, partitiontopic = Topic}) ->
     log_error("TcpClosed consumer: ~p~n", [Topic]),
-    erlang:send_after(5000, self(), connecting),
+    erlang:send_after(5000, self(), do_connect),
     {next_state, idle, State#state{sock = undefined}};
 
 connected(_EventType, {tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
@@ -106,6 +107,16 @@ connected(_EventType, ping, State = #state{sock = Sock}) ->
 
 connected(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
+
+do_connect(State = #state{broker_service = {Host, Port}}) ->
+    case gen_tcp:connect(Host, Port, ?TCPOPTIONS, ?TIMEOUT) of
+        {ok, Sock} ->
+            gen_tcp:controlling_process(Sock, self()),
+            pulsar_socket:send_connect(Sock, erlang:get(proxy_to_broker_url)),
+            {next_state, connecting, State#state{sock = Sock}};
+        Error ->
+            {stop, {shutdown, Error}, State}
+    end.
 
 code_change(_Vsn, State, Data, _Extra) ->
     {ok, State, Data}.

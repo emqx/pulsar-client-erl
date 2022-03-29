@@ -38,7 +38,8 @@ ensure_present(ClientId, Hosts, Opts) ->
     case supervisor:start_child(?SUPERVISOR, ChildSpec) of
         {ok, Pid} -> {ok, Pid};
         {error, {already_started, Pid}} -> {ok, Pid};
-        {error, already_present} -> {error, client_not_running}
+        {error, already_present} -> {error, client_not_running};
+        {error, Reason} -> {error, Reason}
     end.
 
 %% ensure client stopped and deleted under supervisor

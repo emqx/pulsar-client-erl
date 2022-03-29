@@ -74,7 +74,7 @@ init([Servers, Opts]) ->
     State = #state{servers = Servers, opts = Opts},
     case get_sock(Servers, undefined) of
         {error, Reason} ->
-            {error, Reason};
+            {stop, Reason};
         {ok, Sock} ->
             {ok, State#state{sock = Sock}}
     end.

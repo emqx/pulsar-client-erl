@@ -60,7 +60,11 @@ t_pulsar_client(_Args) ->
     ?assertMatch({ok,{<<"test">>, PNum}} when is_integer(PNum),
         pulsar_client:get_topic_metadata(ClientPid, <<"test">>)),
 
-    ?assertMatch({ok, BrokerUri} when is_list(BrokerUri) orelse is_binary(BrokerUri),
+    ?assertMatch({ok, #{
+            brokerServiceUrl := BrokerServiceUrl,
+            proxy_through_service_url := IsProxy
+        }} when (is_list(BrokerServiceUrl) orelse is_binary(BrokerServiceUrl))
+                andalso is_boolean(IsProxy),
         pulsar_client:lookup_topic(ClientPid, <<"test-partition-0">>)),
 
     ?assertEqual(true, pulsar_client:get_status(ClientPid)),

@@ -15,7 +15,7 @@
 
 -behaviour(gen_statem).
 
--export([ start_link/3
+-export([ start_link/4
         , idle/3
         , connecting/3
         , connected/3
@@ -43,7 +43,7 @@ callback_mode() -> [state_functions].
     {send_timeout, ?TIMEOUT}]).
 
 -record(state, {partitiontopic,
-                broker_service_url,
+                broker_service,
                 sock,
                 request_id = 1,
                 consumer_id = 1,
@@ -55,15 +55,13 @@ callback_mode() -> [state_functions].
                 flow,
                 flow_rate}).
 
-start_link(PartitionTopic, BrokerServiceUrl, ConsumerOpts) ->
-    gen_statem:start_link(?MODULE, [PartitionTopic, BrokerServiceUrl, ConsumerOpts], []).
+start_link(PartitionTopic, Server, ProxyToBrokerUrl, ConsumerOpts) ->
+    gen_statem:start_link(?MODULE, [PartitionTopic, Server, ProxyToBrokerUrl, ConsumerOpts], []).
 
 %%--------------------------------------------------------------------
 %% gen_server callback
 %%--------------------------------------------------------------------
-init([PartitionTopic, BrokerServiceUrl, ConsumerOpts]) when is_binary(BrokerServiceUrl) ->
-    init([PartitionTopic, binary_to_list(BrokerServiceUrl), ConsumerOpts]);
-init([PartitionTopic, BrokerServiceUrl, ConsumerOpts]) ->
+init([PartitionTopic, Server, ProxyToBrokerUrl, ConsumerOpts]) ->
     {CbModule, ConsumerOpts1} = maps:take(cb_module, ConsumerOpts),
     {CbInitArg, ConsumerOpts2} = maps:take(cb_init_args, ConsumerOpts1),
     {ok, CbState} = CbModule:init(PartitionTopic, CbInitArg),
@@ -73,17 +71,16 @@ init([PartitionTopic, BrokerServiceUrl, ConsumerOpts]) ->
                    cb_module = CbModule,
                    cb_state = CbState,
                    opts = ConsumerOpts2,
-                   broker_service_url = BrokerServiceUrl,
+                   broker_service = Server,
                    flow = maps:get(flow, ConsumerOpts, 1000)},
-    self() ! connecting,
+    self() ! {connecting, ProxyToBrokerUrl},
     {ok, idle, State}.
 
-idle(_, connecting, State = #state{broker_service_url = BrokerServiceUrl}) ->
-    {Host, Port} = format_url(BrokerServiceUrl),
+idle(_, {connecting, ProxyToBrokerUrl}, State = #state{broker_service = {Host, Port}}) ->
     case gen_tcp:connect(Host, Port, ?TCPOPTIONS, ?TIMEOUT) of
         {ok, Sock} ->
             gen_tcp:controlling_process(Sock, self()),
-            connect(Sock),
+            pulsar_socket:send_connect(Sock, ProxyToBrokerUrl),
             {next_state, connecting, State#state{sock = Sock}};
         Error ->
             {stop, {shutdown, Error}, State}
@@ -104,7 +101,7 @@ connected(_EventType, {tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
     parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
 
 connected(_EventType, ping, State = #state{sock = Sock}) ->
-    ping(Sock),
+    pulsar_socket:ping(Sock),
     {keep_state, State};
 
 connected(_EventType, EventContent, State) ->
@@ -140,7 +137,7 @@ handle_response({pong, #{}}, State) ->
     start_keepalive(),
     {keep_state, State};
 handle_response({ping, #{}}, State = #state{sock = Sock}) ->
-    pong(Sock),
+    pulsar_socket:pong(Sock),
     {keep_state, State};
 handle_response({subscribe_success, #{}}, State = #state{sock = Sock,
                                                          consumer_id = ConsumerId,
@@ -170,17 +167,8 @@ handle_response(Msg, State) ->
     log_error("Consumer Receive unknown message:~p~n", [Msg]),
     {keep_state, State}.
 
-connect(Sock) ->
-    gen_tcp:send(Sock, pulsar_protocol_frame:connect()).
-
 start_keepalive() ->
     erlang:send_after(30*1000, self(), ping).
-
-ping(Sock) ->
-    gen_tcp:send(Sock, pulsar_protocol_frame:ping()).
-
-pong(Sock) ->
-    gen_tcp:send(Sock, pulsar_protocol_frame:pong()).
 
 subscribe(Sock, Topic, RequestId, ConsumerId, Opts) ->
     SubType = maps:get(sub_type, Opts, 'Shared'),
@@ -221,12 +209,6 @@ ack(Sock, ConsumerId, AckType, Msg) ->
         message_id => [maps:get(message_id, Msg)]
     },
     gen_tcp:send(Sock, pulsar_protocol_frame:ack(Ack)).
-
-format_url("pulsar://" ++ Url) ->
-    [Host, Port] = string:tokens(Url, ":"),
-    {Host, list_to_integer(Port)};
-format_url(_) ->
-    {"127.0.0.1", 6650}.
 
 next_request_id(State = #state{request_id = ?MAX_QUE_ID}) ->
     State#state{request_id = 1};

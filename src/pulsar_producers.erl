@@ -222,8 +222,8 @@ do_start_producer(#state{
                 {ok, Peername} = pulsar_client:get_server(Pid),
                 {Peername, BrokerServiceUrl}
         end,
-    {ok, Producer} = pulsar_producer:start_link(PartitionTopic, format_url(PeerServer),
-        ProxyToBrokerUrl, ProducerOpts#{producer_id => NextID}),
+    {ok, Producer} = pulsar_producer:start_link(PartitionTopic,
+        PeerServer, ProxyToBrokerUrl, ProducerOpts#{producer_id => NextID}),
     ets:insert(Workers, {Partition, Producer}),
     State#state{
         producers = maps:put(Producer, {Partition, PartitionTopic}, Producers),
@@ -234,12 +234,3 @@ next_producer_id(?MAX_PRODUCER_ID) -> 0;
 next_producer_id(ProducerID) ->
     ProducerID + 1.
 
-format_url({Host, Port}) ->
-    {Host, Port};
-format_url(Url) when is_binary(Url) ->
-    format_url(binary_to_list(Url));
-format_url("pulsar://" ++ Url) ->
-    [Host, Port] = string:tokens(Url, ":"),
-    {Host, list_to_integer(Port)};
-format_url(_) ->
-    {"127.0.0.1", 6650}.

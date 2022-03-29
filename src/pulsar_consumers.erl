@@ -134,8 +134,8 @@ start_consumer(Pid, PartitionTopic, #state{consumer_opts = ConsumerOpts} = State
                         {Peername, BrokerServiceUrl}
                 end,
                 {ok, Consumer} =
-                    pulsar_consumer:start_link(PartitionTopic, PeerServer, ProxyToBrokerUrl,
-                        ConsumerOptsWithConsumerID),
+                    pulsar_consumer:start_link(PartitionTopic, PeerServer,
+                        ProxyToBrokerUrl, ConsumerOptsWithConsumerID),
                 NewState = next_consumer_id(CurrentState),
                 NewState#state{consumers = maps:put(Consumer, PartitionTopic, Consumers)}
             end,

@@ -15,6 +15,6 @@
       {load_module,pulsar_consumers,brutal_purge,soft_purge,[]},
       {load_module,pulsar_consumer,brutal_purge,soft_purge,[]},
       {load_module,pulsar_client,brutal_purge,soft_purge,[]},
-      {load_module,pulsar_api,brutal_purge,soft_purge,[]}]},
-      {delete_module,pulsar_socket}]
+      {load_module,pulsar_api,brutal_purge,soft_purge,[]},
+      {delete_module,pulsar_socket}]}]
 }.

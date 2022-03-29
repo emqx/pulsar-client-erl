@@ -21,7 +21,7 @@
         , send_sync/3
         ]).
 
--export([ start_link/3
+-export([ start_link/4
         , idle/3
         , connecting/3
         , connected/3
@@ -50,7 +50,7 @@ callback_mode() -> [state_functions].
     {send_timeout, ?TIMEOUT}]).
 
 -record(state, {partitiontopic,
-                broker_service_url,
+                broker_service,
                 sock,
                 request_id = 1,
                 producer_id = 1,
@@ -62,8 +62,8 @@ callback_mode() -> [state_functions].
                 requests = #{},
                 last_bin = <<>>}).
 
-start_link(PartitionTopic, BrokerServiceUrl, ProducerOpts) ->
-    gen_statem:start_link(?MODULE, [PartitionTopic, BrokerServiceUrl, ProducerOpts], []).
+start_link(PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts) ->
+    gen_statem:start_link(?MODULE, [PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts], []).
 
 
 send(Pid, Message) ->
@@ -79,9 +79,7 @@ send_sync(Pid, Message, Timeout) ->
 %%--------------------------------------------------------------------
 %% gen_server callback
 %%--------------------------------------------------------------------
-init([PartitionTopic, BrokerServiceUrl, ProducerOpts]) when is_binary(BrokerServiceUrl)->
-    init([PartitionTopic, binary_to_list(BrokerServiceUrl), ProducerOpts]);
-init([PartitionTopic, BrokerServiceUrl, ProducerOpts]) ->
+init([PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts]) ->
     Compression = maps:get(compression, ProducerOpts, no_compression),
     erlang:put(compression, Compression),
     State = #state{partitiontopic = PartitionTopic,
@@ -89,18 +87,18 @@ init([PartitionTopic, BrokerServiceUrl, ProducerOpts]) ->
                    producer_name = maps:get(producer_name, ProducerOpts, pulsar_producer),
                    callback = maps:get(callback, ProducerOpts, undefined),
                    batch_size = maps:get(batch_size, ProducerOpts, 0),
-                   broker_service_url = BrokerServiceUrl,
+                   broker_service = Server,
                    opts = maps:get(tcp_opts, ProducerOpts, [])},
-    self() ! connecting,
+    self() ! {connecting, ProxyToBrokerUrl},
     {ok, idle, State}.
 
-idle(_, connecting, State = #state{opts = Opts, broker_service_url = BrokerServiceUrl}) ->
-    {Host, Port} = format_url(BrokerServiceUrl),
+idle(_, {connecting, ProxyToBrokerUrl}, State = #state{opts = Opts,
+        broker_service = {Host, Port}}) ->
     case gen_tcp:connect(Host, Port, merge_opts(Opts, ?TCPOPTIONS), ?TIMEOUT) of
         {ok, Sock} ->
             tune_buffer(Sock),
             gen_tcp:controlling_process(Sock, self()),
-            connect(Sock),
+            pulsar_socket:send_connect(Sock, ProxyToBrokerUrl),
             {next_state, connecting, State#state{sock = Sock}};
         Error ->
             log_error("connect error: ~p, server: ~p~n", [Error, {Host, Port}]),
@@ -126,7 +124,7 @@ connected(_EventType, {tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
     parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
 
 connected(_EventType, ping, State = #state{sock = Sock}) ->
-    ping(Sock),
+    pulsar_socket:ping(Sock),
     {keep_state, State};
 
 connected({call, From}, {send, Message}, State = #state{sequence_id = SequenceId, requests = Reqs}) ->
@@ -173,7 +171,7 @@ handle_response({pong, #{}}, State) ->
     start_keepalive(),
     {keep_state, State};
 handle_response({ping, #{}}, State = #state{sock = Sock}) ->
-    pong(Sock),
+    pulsar_socket:pong(Sock),
     {keep_state, State};
 handle_response({close_producer, #{}}, State = #state{partitiontopic = Topic}) ->
     log_error("Close producer: ~p~n", [Topic]),
@@ -232,9 +230,6 @@ handle_response(Msg, State) ->
     log_error("Receive unknown message:~p~n", [Msg]),
     {keep_state, State}.
 
-connect(Sock) ->
-    gen_tcp:send(Sock, pulsar_protocol_frame:connect()).
-
 send_batch_payload(Messages, #state{
                                     partitiontopic = PartitionTopic,
                                     sequence_id = SequenceId,
@@ -261,12 +256,6 @@ send_batch_payload(Messages, #state{
 
 start_keepalive() ->
     erlang:send_after(30*1000, self(), ping).
-
-ping(Sock) ->
-    gen_tcp:send(Sock, pulsar_protocol_frame:ping()).
-
-pong(Sock) ->
-    gen_tcp:send(Sock, pulsar_protocol_frame:pong()).
 
 create_producer(Sock, Topic, RequestId, ProducerId) ->
     Producer = #{
@@ -331,12 +320,6 @@ merge_opts(Defaults, Options) ->
                     false -> [Opt | Acc]
                 end
         end, Defaults, Options).
-
-format_url("pulsar://" ++ Url) ->
-    [Host, Port] = string:tokens(Url, ":"),
-    {Host, list_to_integer(Port)};
-format_url(_) ->
-    {"127.0.0.1", 6650}.
 
 next_request_id(State = #state{request_id = ?MAX_QUE_ID}) ->
     State#state{request_id = 1};

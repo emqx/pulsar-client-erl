@@ -189,27 +189,57 @@ get_name(ProducerOpts) -> maps:get(name, ProducerOpts, ?MODULE).
 
 log_error(Fmt, Args) -> logger:error("[pulsar_producers] " ++ Fmt, Args).
 
-start_producer(Pid, Partition, PartitionTopic,
-    #state{
+start_producer(Pid, Partition, PartitionTopic, State) ->
+    try
+        case pulsar_client:lookup_topic(Pid, PartitionTopic) of
+            {ok, #{ brokerServiceUrl := BrokerServiceUrl
+                  , proxy_through_service_url := IsProxy
+                  }} ->
+                do_start_producer(State, Pid, Partition, PartitionTopic,
+                    BrokerServiceUrl, IsProxy);
+            {error, Reason0} ->
+                log_error("Lookup topic failed: ~p", [Reason0]),
+                restart_producer_later(Partition, PartitionTopic),
+                State
+        end
+    catch
+        Error : Reason : Stacktrace ->
+            log_error("Start producer error: ~p, ~p", [Error, {Reason, Stacktrace}]),
+            restart_producer_later(Partition, PartitionTopic),
+            State
+    end.
+
+do_start_producer(#state{
         producers = Producers,
         workers = Workers,
         producer_opts = ProducerOpts,
-        producer_id = ProducerID} = State) ->
-    try
-        NewProducerOpts = maps:put(producer_id, ProducerID, ProducerOpts),
-        {ok, BrokerServiceUrl} = pulsar_client:lookup_topic(Pid, PartitionTopic),
-        {ok, Producer} = pulsar_producer:start_link(PartitionTopic, BrokerServiceUrl, NewProducerOpts),
-        ets:insert(Workers, {Partition, Producer}),
-        NewState = next_producer_id(State),
-        NewState#state{producers = maps:put(Producer, {Partition, PartitionTopic}, Producers)}
-    catch
-        Error : Reason : Stacktrace ->
-            log_error("Start producer: ~p, ~p", [Error, {Reason, Stacktrace}]),
-            restart_producer_later(Partition, PartitionTopic),
-            next_producer_id(State)
-    end.
+        producer_id = ProducerID} = State, Pid, Partition, PartitionTopic, BrokerServiceUrl, IsProxy) ->
+    NextID = next_producer_id(ProducerID),
+    {PeerServer, ProxyToBrokerUrl} = case IsProxy of
+            false ->
+                {BrokerServiceUrl, undefined};
+            true ->
+                {ok, Peername} = pulsar_client:get_server(Pid),
+                {Peername, BrokerServiceUrl}
+        end,
+    {ok, Producer} = pulsar_producer:start_link(PartitionTopic, format_url(PeerServer),
+        ProxyToBrokerUrl, ProducerOpts#{producer_id => NextID}),
+    ets:insert(Workers, {Partition, Producer}),
+    State#state{
+        producers = maps:put(Producer, {Partition, PartitionTopic}, Producers),
+        producer_id = NextID
+    }.
 
-next_producer_id(#state{producer_id = ?MAX_PRODUCER_ID} = State) ->
-    State#state{producer_id = 0};
-next_producer_id(#state{producer_id = ProducerID} = State) ->
-    State#state{producer_id = ProducerID + 1}.
+next_producer_id(?MAX_PRODUCER_ID) -> 0;
+next_producer_id(ProducerID) ->
+    ProducerID + 1.
+
+format_url({Host, Port}) ->
+    {Host, Port};
+format_url(Url) when is_binary(Url) ->
+    format_url(binary_to_list(Url));
+format_url("pulsar://" ++ Url) ->
+    [Host, Port] = string:tokens(Url, ":"),
+    {Host, list_to_integer(Port)};
+format_url(_) ->
+    {"127.0.0.1", 6650}.

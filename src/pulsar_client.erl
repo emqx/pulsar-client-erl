@@ -28,10 +28,12 @@
         ]).
 
 -export([ get_topic_metadata/2
-         , lookup_topic/2
+        , lookup_topic/2
         ]).
 
--export([get_status/1]).
+-export([ get_status/1
+        , get_server/1
+        ]).
 
 -record(state, {sock, servers, opts, producers = #{}, request_id = 0, requests = #{}, from, last_bin = <<>>}).
 
@@ -61,6 +63,10 @@ lookup_topic(Pid, PartitionTopic) ->
 
 get_status(Pid) ->
     gen_server:call(Pid, get_status, 5000).
+
+get_server(Pid) ->
+    gen_server:call(Pid, get_server, 5000).
+
 %%--------------------------------------------------------------------
 %% gen_server callback
 %%--------------------------------------------------------------------
@@ -114,6 +120,13 @@ handle_call(get_status, From, State = #state{sock = undefined, servers = Servers
     end;
 handle_call(get_status, _From, State) ->
     {reply, not is_pong_longtime_no_received(), State};
+
+handle_call(get_server, From, State = #state{sock = Sock, servers = Servers}) ->
+    case get_sock(Servers, Sock) of
+        {error, _Reason} -> {reply, {error, no_servers_avaliable}, State};
+        {ok, Sock1} ->
+            {reply, inet:peername(Sock1), State#state{from = From, sock = Sock1}}
+    end;
 
 handle_call(_Req, _From, State) ->
     {reply, ok, State, hibernate}.
@@ -203,11 +216,14 @@ handle_response({lookupTopicResponse, #{error := Reason, message := Msg,
     end;
 
 handle_response({lookupTopicResponse, #{brokerServiceUrl := BrokerServiceUrl,
-                                        request_id := RequestId}},
+                                        request_id := RequestId} = Response},
                 State = #state{requests = Reqs}) ->
     case maps:get(RequestId, Reqs, undefined) of
         {From, #{}} ->
-            gen_server:reply(From, {ok, BrokerServiceUrl}),
+            gen_server:reply(From, {ok,
+                #{ brokerServiceUrl => BrokerServiceUrl
+                 , proxy_through_service_url => maps:get(proxy_through_service_url, Response, false)
+                 }}),
             {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
         undefined ->
             {noreply, State, hibernate}
@@ -247,14 +263,11 @@ try_connect([{Host, Port} | Servers], Res) ->
         {ok, Sock} ->
             tune_buffer(Sock),
             gen_tcp:controlling_process(Sock, self()),
-            connect(Sock),
+            pulsar_socket:send_connect(Sock, undefined),
             {ok, Sock};
         {error, Reason} ->
             try_connect(Servers, Res#{{Host, Port} => Reason})
     end.
-
-connect(Sock) ->
-    gen_tcp:send(Sock, pulsar_protocol_frame:connect()).
 
 topic_metadata(Topic, RequestId) ->
     #{

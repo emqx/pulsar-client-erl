@@ -43,7 +43,7 @@ callback_mode() -> [state_functions].
     {send_timeout, ?TIMEOUT}]).
 
 -record(state, {partitiontopic,
-                broker_service,
+                broker_server,
                 sock,
                 request_id = 1,
                 consumer_id = 1,
@@ -65,23 +65,19 @@ init([PartitionTopic, Server, ProxyToBrokerUrl, ConsumerOpts]) ->
     {CbModule, ConsumerOpts1} = maps:take(cb_module, ConsumerOpts),
     {CbInitArg, ConsumerOpts2} = maps:take(cb_init_args, ConsumerOpts1),
     {ok, CbState} = CbModule:init(PartitionTopic, CbInitArg),
-    State = #state{
-                   consumer_id = maps:get(consumer_id, ConsumerOpts),
+    State = #state{consumer_id = maps:get(consumer_id, ConsumerOpts),
                    partitiontopic = PartitionTopic,
                    cb_module = CbModule,
                    cb_state = CbState,
                    opts = ConsumerOpts2,
-                   broker_service = Server,
+                   broker_server = pulsar_protocol_frame:uri_to_host_port(Server),
                    flow = maps:get(flow, ConsumerOpts, 1000)},
     %% use process dict to avoid the trouble of relup
     erlang:put(proxy_to_broker_url, ProxyToBrokerUrl),
     {ok, idle, State, [{next_event, internal, do_connect}]}.
 
 idle(_, do_connect, State) ->
-    do_connect(State);
-
-idle(_EventType, EventContent, State) ->
-    handle_response(EventContent, State).
+    do_connect(State).
 
 connecting(_, do_connect, State) ->
     do_connect(State);
@@ -108,7 +104,7 @@ connected(_EventType, ping, State = #state{sock = Sock}) ->
 connected(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
 
-do_connect(State = #state{broker_service = {Host, Port}}) ->
+do_connect(State = #state{broker_server = {Host, Port}}) ->
     case gen_tcp:connect(Host, Port, ?TCPOPTIONS, ?TIMEOUT) of
         {ok, Sock} ->
             gen_tcp:controlling_process(Sock, self()),

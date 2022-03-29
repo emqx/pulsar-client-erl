@@ -50,7 +50,7 @@ callback_mode() -> [state_functions].
     {send_timeout, ?TIMEOUT}]).
 
 -record(state, {partitiontopic,
-                broker_service,
+                broker_server,
                 sock,
                 request_id = 1,
                 producer_id = 1,
@@ -87,23 +87,17 @@ init([PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts]) ->
                    producer_name = maps:get(producer_name, ProducerOpts, pulsar_producer),
                    callback = maps:get(callback, ProducerOpts, undefined),
                    batch_size = maps:get(batch_size, ProducerOpts, 0),
-                   broker_service = Server,
+                   broker_server = pulsar_protocol_frame:uri_to_host_port(Server),
                    opts = maps:get(tcp_opts, ProducerOpts, [])},
-    self() ! {connecting, ProxyToBrokerUrl},
-    {ok, idle, State}.
+    %% use process dict to avoid the trouble of relup
+    erlang:put(proxy_to_broker_url, ProxyToBrokerUrl),
+    {ok, idle, State, [{next_event, internal, do_connect}]}.
 
-idle(_, {connecting, ProxyToBrokerUrl}, State = #state{opts = Opts,
-        broker_service = {Host, Port}}) ->
-    case gen_tcp:connect(Host, Port, merge_opts(Opts, ?TCPOPTIONS), ?TIMEOUT) of
-        {ok, Sock} ->
-            tune_buffer(Sock),
-            gen_tcp:controlling_process(Sock, self()),
-            pulsar_socket:send_connect(Sock, ProxyToBrokerUrl),
-            {next_state, connecting, State#state{sock = Sock}};
-        Error ->
-            log_error("connect error: ~p, server: ~p~n", [Error, {Host, Port}]),
-            {stop, {shutdown, Error}, State}
-    end.
+idle(_, do_connect, State) ->
+    do_connect(State).
+
+connecting(_, do_connect, State) ->
+    do_connect(State);
 
 connecting(_EventType, {tcp, _, Bin}, State) ->
     {Cmd, _} = pulsar_protocol_frame:parse(Bin),
@@ -115,9 +109,12 @@ connecting({call, From}, _, State) ->
 connecting(cast, {send, _Message}, _State) ->
     keep_state_and_data.
 
+connected(_, do_connect, _State) ->
+    keep_state_and_data;
+
 connected(_EventType, {tcp_closed, Sock}, State = #state{sock = Sock, partitiontopic = Topic}) ->
     log_error("connection closed by peer, topic: ~p~n", [Topic]),
-    erlang:send_after(5000, self(), connecting),
+    erlang:send_after(5000, self(), do_connect),
     {next_state, idle, State#state{sock = undefined}};
 
 connected(_EventType, {tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
@@ -138,6 +135,18 @@ connected(cast, {send, Message}, State = #state{batch_size = BatchSize, sequence
 
 connected(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
+
+do_connect(State = #state{opts = Opts, broker_server = {Host, Port}}) ->
+    case gen_tcp:connect(Host, Port, merge_opts(Opts, ?TCPOPTIONS), ?TIMEOUT) of
+        {ok, Sock} ->
+            tune_buffer(Sock),
+            gen_tcp:controlling_process(Sock, self()),
+            pulsar_socket:send_connect(Sock, erlang:get(proxy_to_broker_url)),
+            {next_state, connecting, State#state{sock = Sock}};
+        Error ->
+            log_error("connect error: ~p, server: ~p~n", [Error, {Host, Port}]),
+            {stop, {shutdown, Error}, State}
+    end.
 
 code_change(_Vsn, State, Data, _Extra) ->
     {ok, State, Data}.

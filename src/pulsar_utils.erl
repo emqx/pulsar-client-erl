@@ -18,6 +18,15 @@
         ]).
 
 merge_opts([Opts1, Opts2]) ->
-    (Opts1 -- Opts2) ++ Opts2;
+    proplist_diff(Opts1, Opts2) ++ Opts2;
 merge_opts([Opts1 | RemOpts]) ->
     merge_opts([Opts1, merge_opts(RemOpts)]).
+
+proplist_diff(Opts1, Opts2) ->
+    lists:foldl(fun(Opt, Opts1Acc) ->
+            Key = case Opt of
+                {K, _} -> K;
+                K when is_atom(K) -> K
+            end,
+            proplists:delete(Key, Opts1Acc)
+        end, Opts1, Opts2).

@@ -48,7 +48,7 @@ callback_mode() -> [state_functions].
                 request_id = 1,
                 consumer_id = 1,
                 consumer_name,
-                opts = [],
+                opts = #{},
                 cb_module,
                 cb_state,
                 last_bin = <<>>,
@@ -108,7 +108,7 @@ do_connect(State = #state{broker_server = {Host, Port}}) ->
     case gen_tcp:connect(Host, Port, ?TCPOPTIONS, ?TIMEOUT) of
         {ok, Sock} ->
             gen_tcp:controlling_process(Sock, self()),
-            pulsar_socket:send_connect(Sock, erlang:get(proxy_to_broker_url)),
+            pulsar_socket:send_connect_packet(Sock, erlang:get(proxy_to_broker_url)),
             {next_state, connecting, State#state{sock = Sock}};
         Error ->
             {stop, {shutdown, Error}, State}

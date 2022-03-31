@@ -56,7 +56,7 @@ callback_mode() -> [state_functions].
                 producer_id = 1,
                 sequence_id = 1,
                 producer_name,
-                opts = [],
+                opts = #{},
                 callback,
                 batch_size = 0,
                 requests = #{},
@@ -141,7 +141,7 @@ do_connect(State = #state{opts = Opts, broker_server = {Host, Port}}) ->
         {ok, Sock} ->
             tune_buffer(Sock),
             gen_tcp:controlling_process(Sock, self()),
-            pulsar_socket:send_connect(Sock, erlang:get(proxy_to_broker_url)),
+            pulsar_socket:send_connect_packet(Sock, erlang:get(proxy_to_broker_url)),
             {next_state, connecting, State#state{sock = Sock}};
         Error ->
             log_error("connect error: ~p, server: ~p~n", [Error, {Host, Port}]),

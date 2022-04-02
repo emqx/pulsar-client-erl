@@ -83,14 +83,15 @@ handle_call({get_topic_metadata, Topic, Call}, From,
             log_error("get_topic_metadata from pulsar servers failed: ~p", [Reason]),
             {noreply, State};
         {ok, Sock1} ->
-            Metadata = topic_metadata(Topic, RequestId),
-            gen_tcp:send(Sock1, pulsar_protocol_frame:topic_metadata(Metadata)),
-            {noreply, next_request_id(State#state{requests = maps:put(RequestId, {From, Metadata}, Reqs),
-                                                  producers = maps:put(Topic, Call, Producers),
-                                                  sock = Sock1})}
+            pulsar_socket:send_topic_metadata_packet(Sock1, Topic, RequestId, Opts),
+            {noreply, next_request_id(State#state{
+                requests = maps:put(RequestId, {From, Topic}, Reqs),
+                producers = maps:put(Topic, Call, Producers),
+                sock = Sock1
+            })}
     end;
 
-handle_call({lookup_topic, PartitionTopic}, From,
+handle_call({lookup_topic, Topic}, From,
         State = #state{
             sock = Sock,
             opts = Opts,
@@ -103,10 +104,9 @@ handle_call({lookup_topic, PartitionTopic}, From,
             log_error("lookup_topic from pulsar failed: ~p down", [Reason]),
             {noreply, State};
         {ok, Sock1} ->
-            LookupTopic = lookup_topic_cmd(PartitionTopic, RequestId),
-            gen_tcp:send(Sock, pulsar_protocol_frame:lookup_topic(LookupTopic)),
+            pulsar_socket:send_lookup_topic_packet(Sock1, Topic, RequestId, Opts),
             {noreply, next_request_id(State#state{
-                requests = maps:put(RequestId, {From, LookupTopic}, Reqs),
+                requests = maps:put(RequestId, {From, Topic}, Reqs),
                 sock = Sock1
             })}
     end;
@@ -184,7 +184,7 @@ handle_response({partitionMetadataResponse, #{error := Reason, message := Msg,
                                         request_id := RequestId, response := 'Failed'}},
                 State = #state{requests = Reqs}) ->
     case maps:get(RequestId, Reqs, undefined) of
-        {From, #{}} ->
+        {From, _} ->
             gen_server:reply(From, {error, #{error => Reason, message => Msg}}),
             {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
         undefined ->
@@ -195,7 +195,7 @@ handle_response({partitionMetadataResponse, #{partitions := Partitions,
                                               request_id := RequestId}},
                 State = #state{requests = Reqs}) ->
     case maps:get(RequestId, Reqs, undefined) of
-        {From, #{topic := Topic}} ->
+        {From, Topic} ->
             gen_server:reply(From, {ok, {Topic, Partitions}}),
             {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
         undefined ->
@@ -206,7 +206,7 @@ handle_response({lookupTopicResponse, #{error := Reason, message := Msg,
                                         request_id := RequestId, response := 'Failed'}},
                 State = #state{requests = Reqs}) ->
     case maps:get(RequestId, Reqs, undefined) of
-        {From, #{}} ->
+        {From, _} ->
             gen_server:reply(From, {error, #{error => Reason, message => Msg}}),
             {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
         undefined ->
@@ -217,7 +217,7 @@ handle_response({lookupTopicResponse, #{brokerServiceUrl := BrokerServiceUrl,
                                         request_id := RequestId} = Response},
                 State = #state{requests = Reqs}) ->
     case maps:get(RequestId, Reqs, undefined) of
-        {From, #{}} ->
+        {From, _} ->
             gen_server:reply(From, {ok,
                 #{ brokerServiceUrl => BrokerServiceUrl
                  , proxy_through_service_url => maps:get(proxy_through_service_url, Response, false)
@@ -258,18 +258,6 @@ try_connect([{Host, Port} | Servers], Opts, Res) ->
         {error, Reason} ->
             try_connect(Servers, Res#{{Host, Port} => Reason})
     end.
-
-topic_metadata(Topic, RequestId) ->
-    #{
-        topic => Topic,
-        request_id => RequestId
-    }.
-
-lookup_topic_cmd(Topic, RequestId) ->
-    #{
-        topic => Topic,
-        request_id => RequestId
-    }.
 
 next_request_id(State = #state{request_id = 65535}) ->
     State#state{request_id = 1};

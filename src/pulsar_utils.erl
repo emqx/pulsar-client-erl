@@ -15,12 +15,29 @@
 -module(pulsar_utils).
 
 -export([ merge_opts/1
+        , collect_send_calls/1
         ]).
 
 merge_opts([Opts1, Opts2]) ->
     proplist_diff(Opts1, Opts2) ++ Opts2;
 merge_opts([Opts1 | RemOpts]) ->
     merge_opts([Opts1, merge_opts(RemOpts)]).
+
+collect_send_calls(0) ->
+    [];
+collect_send_calls(Cnt) when Cnt > 0 ->
+    collect_send_calls(Cnt, []).
+
+collect_send_calls(0, Acc) ->
+    lists:reverse(Acc);
+
+collect_send_calls(Cnt, Acc) ->
+    receive
+        {'$gen_cast', {send, Messages}} ->
+            collect_send_calls(Cnt - 1, Messages ++ Acc)
+    after 0 ->
+          lists:reverse(Acc)
+    end.
 
 proplist_diff(Opts1, Opts2) ->
     lists:foldl(fun(Opt, Opts1Acc) ->

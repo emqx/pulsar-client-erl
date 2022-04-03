@@ -134,10 +134,18 @@ handle_call(_Req, _From, State) ->
 handle_cast(_Req, State) ->
     {noreply, State, hibernate}.
 
-handle_info({tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
+handle_info({Transport, _, Bin}, State = #state{last_bin = LastBin})
+        when Transport == tcp; Transport == ssl ->
     parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
 
-handle_info({tcp_closed, Sock}, State = #state{sock = Sock}) ->
+handle_info({Error, Sock, Reason}, State = #state{sock = Sock})
+        when Error == ssl_error; Error == tcp_error ->
+    log_error("transport layer error: ~p", [Reason]),
+    {noreply, State#state{sock = undefined}, hibernate};
+
+handle_info({Closed, Sock}, State = #state{sock = Sock})
+        when Closed == tcp_closed; Closed == ssl_closed ->
+    log_error("connection closed by peer", []),
     {noreply, State#state{sock = undefined}, hibernate};
 
 handle_info(ping, State = #state{sock = undefined, opts = Opts, servers = Servers}) ->
@@ -252,9 +260,10 @@ try_connect(Servers, Opts) ->
 
 do_try_connect([], _Opts, Res) ->
     {error, Res};
-do_try_connect([URI | Servers], Opts, Res) ->
+do_try_connect([URI | Servers], Opts0, Res) ->
     {Type, {Host, Port}} = pulsar_utils:parse_uri(URI),
-    case pulsar_socket:connect(Host, Port, pulsar_utils:maybe_enable_ssl_opts(Type, Opts)) of
+    Opts = pulsar_utils:maybe_enable_ssl_opts(Type, Opts0),
+    case pulsar_socket:connect(Host, Port, Opts) of
         {ok, Sock} ->
             pulsar_socket:send_connect_packet(Sock, undefined, Opts),
             {ok, Sock};

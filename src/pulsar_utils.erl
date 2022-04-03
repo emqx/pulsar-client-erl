@@ -15,13 +15,33 @@
 -module(pulsar_utils).
 
 -export([ merge_opts/1
-        , collect_send_calls/1
+        , parse_uri/1
+        , maybe_enable_ssl_opts/2
         ]).
+
+-export([collect_send_calls/1]).
 
 merge_opts([Opts1, Opts2]) ->
     proplist_diff(Opts1, Opts2) ++ Opts2;
 merge_opts([Opts1 | RemOpts]) ->
     merge_opts([Opts1, merge_opts(RemOpts)]).
+
+parse_uri(URI) ->
+    case string:split(URI, "://") of
+        ["pulsar+ssl", URL] -> {ssl, parse_url(URL)};
+        ["pulsar", URL] -> {tcp, parse_url(URL)};
+        [Scheme, _] -> error({invalid_scheme, Scheme});
+        [URI] -> {tcp, parse_url(URI)}
+    end.
+
+parse_url(URL) ->
+    case string:lexemes(URL, ": ") of
+        [Host, Port] -> {Host, list_to_integer(Port)};
+        [Host] -> {Host, 6650}
+    end.
+
+maybe_enable_ssl_opts(tcp, Opts) -> Opts#{enable_ssl => false};
+maybe_enable_ssl_opts(ssl, Opts) -> Opts#{enable_ssl => true}.
 
 collect_send_calls(0) ->
     [];

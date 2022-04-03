@@ -250,8 +250,9 @@ try_connect(Servers, Opts) ->
 
 try_connect([], _Opts, Res) ->
     {error, Res};
-try_connect([{Host, Port} | Servers], Opts, Res) ->
-    case pulsar_socket:connect(Host, Port, Opts) of
+try_connect([URI | Servers], Opts, Res) ->
+    {Type, {Host, Port}} = pulsar_utils:parse_uri(URI),
+    case pulsar_socket:connect(Host, Port, pulsar_utils:maybe_enable_ssl_opts(Type, Opts)) of
         {ok, Sock} ->
             pulsar_socket:send_connect_packet(Sock, undefined, Opts),
             {ok, Sock};

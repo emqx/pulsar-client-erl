@@ -204,15 +204,15 @@ peername(Sock, Opts) ->
     Mod:peername(Sock).
 
 tcp_module(Opts) ->
-    case maps:find(ssl_opts, Opts) of
-        error -> gen_tcp;
-        {ok, _} -> ssl
+    case maps:get(enable_ssl, Opts, false) of
+        false -> gen_tcp;
+        true -> ssl
     end.
 
 inet_module(Opts) ->
-    case maps:find(ssl_opts, Opts) of
-        error -> inet;
-        {ok, _} -> ssl
+    case maps:get(enable_ssl, Opts, false) of
+        false -> inet;
+        true -> ssl
     end.
 
 tune_buffer(InetM, Sock) ->

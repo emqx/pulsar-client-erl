@@ -78,13 +78,16 @@ send_sync(Pid, Message, Timeout) ->
 %% gen_server callback
 %%--------------------------------------------------------------------
 init([PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts]) ->
-    State = #state{partitiontopic = PartitionTopic,
-                   producer_id = maps:get(producer_id, ProducerOpts),
-                   producer_name = maps:get(producer_name, ProducerOpts, pulsar_producer),
-                   callback = maps:get(callback, ProducerOpts, undefined),
-                   batch_size = maps:get(batch_size, ProducerOpts, 0),
-                   broker_server = pulsar_protocol_frame:uri_to_host_port(Server),
-                   opts = ProducerOpts},
+    {Transport, BrokerServer} = pulsar_utils:parse_uri(Server),
+    State = #state{
+        partitiontopic = PartitionTopic,
+        producer_id = maps:get(producer_id, ProducerOpts),
+        producer_name = maps:get(producer_name, ProducerOpts, pulsar_producer),
+        callback = maps:get(callback, ProducerOpts, undefined),
+        batch_size = maps:get(batch_size, ProducerOpts, 0),
+        broker_server = pulsar_utils:parse_uri(BrokerServer),
+        opts = pulsar_utils:maybe_enable_ssl_opts(Transport, ProducerOpts)
+    },
     %% use process dict to avoid the trouble of relup
     erlang:put(proxy_to_broker_url, ProxyToBrokerUrl),
     {ok, idle, State, [{next_event, internal, do_connect}]}.

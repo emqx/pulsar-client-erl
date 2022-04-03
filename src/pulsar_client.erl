@@ -113,7 +113,9 @@ handle_call({lookup_topic, Topic}, From,
 
 handle_call(get_status, From, State = #state{sock = undefined, opts = Opts, servers = Servers}) ->
     case get_sock(Servers, undefined, Opts) of
-        {error, _Reason} -> {reply, false, State};
+        {error, Reason} ->
+            log_error("get_status from pulsar failed: ~p", [Reason]),
+            {reply, false, State};
         {ok, Sock} -> {noreply, State#state{from = From, sock = Sock}}
     end;
 handle_call(get_status, _From, State) ->
@@ -246,18 +248,18 @@ get_sock(_Servers, Sock, _Opts) ->
     {ok, Sock}.
 
 try_connect(Servers, Opts) ->
-    try_connect(Servers, Opts, #{}).
+    do_try_connect(Servers, Opts, #{}).
 
-try_connect([], _Opts, Res) ->
+do_try_connect([], _Opts, Res) ->
     {error, Res};
-try_connect([URI | Servers], Opts, Res) ->
+do_try_connect([URI | Servers], Opts, Res) ->
     {Type, {Host, Port}} = pulsar_utils:parse_uri(URI),
     case pulsar_socket:connect(Host, Port, pulsar_utils:maybe_enable_ssl_opts(Type, Opts)) of
         {ok, Sock} ->
             pulsar_socket:send_connect_packet(Sock, undefined, Opts),
             {ok, Sock};
         {error, Reason} ->
-            try_connect(Servers, Res#{{Host, Port} => Reason})
+            do_try_connect(Servers, Opts, Res#{{Host, Port} => Reason})
     end.
 
 next_request_id(State = #state{request_id = 65535}) ->

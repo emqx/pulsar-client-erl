@@ -216,8 +216,9 @@ inet_module(Opts) ->
     end.
 
 tune_buffer(InetM, Sock) ->
-    {ok, [{recbuf, RecBuf}, {sndbuf, SndBuf}]}
-        = InetM:getopts(Sock, [recbuf, sndbuf]),
+    {ok, Opts} = InetM:getopts(Sock, [recbuf, sndbuf]),
+    RecBuf = proplists:get_value(recbuf, Opts),
+    SndBuf = proplists:get_value(sndbuf, Opts),
     InetM:setopts(Sock, [{buffer, max(RecBuf, SndBuf)}]).
 
 uri_to_url(URI) ->

@@ -56,7 +56,7 @@ callback_mode() -> [state_functions].
                 producer_id = 1,
                 sequence_id = 1,
                 producer_name,
-                opts = [],
+                opts = #{},
                 callback,
                 batch_size = 0,
                 requests = #{},
@@ -64,7 +64,6 @@ callback_mode() -> [state_functions].
 
 start_link(PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts) ->
     gen_statem:start_link(?MODULE, [PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts], []).
-
 
 send(Pid, Message) ->
     gen_statem:cast(Pid, {send, Message}).
@@ -75,20 +74,20 @@ send_sync(Pid, Message) ->
 send_sync(Pid, Message, Timeout) ->
     gen_statem:call(Pid, {send, Message}, Timeout).
 
-
 %%--------------------------------------------------------------------
 %% gen_server callback
 %%--------------------------------------------------------------------
 init([PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts]) ->
-    Compression = maps:get(compression, ProducerOpts, no_compression),
-    erlang:put(compression, Compression),
-    State = #state{partitiontopic = PartitionTopic,
-                   producer_id = maps:get(producer_id, ProducerOpts),
-                   producer_name = maps:get(producer_name, ProducerOpts, pulsar_producer),
-                   callback = maps:get(callback, ProducerOpts, undefined),
-                   batch_size = maps:get(batch_size, ProducerOpts, 0),
-                   broker_server = pulsar_protocol_frame:uri_to_host_port(Server),
-                   opts = maps:get(tcp_opts, ProducerOpts, [])},
+    {Transport, BrokerServer} = pulsar_utils:parse_url(Server),
+    State = #state{
+        partitiontopic = PartitionTopic,
+        producer_id = maps:get(producer_id, ProducerOpts),
+        producer_name = maps:get(producer_name, ProducerOpts, pulsar_producer),
+        callback = maps:get(callback, ProducerOpts, undefined),
+        batch_size = maps:get(batch_size, ProducerOpts, 0),
+        broker_server = BrokerServer,
+        opts = pulsar_utils:maybe_enable_ssl_opts(Transport, ProducerOpts)
+    },
     %% use process dict to avoid the trouble of relup
     erlang:put(proxy_to_broker_url, ProxyToBrokerUrl),
     {ok, idle, State, [{next_event, internal, do_connect}]}.
@@ -120,8 +119,8 @@ connected(_EventType, {tcp_closed, Sock}, State = #state{sock = Sock, partitiont
 connected(_EventType, {tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
     parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
 
-connected(_EventType, ping, State = #state{sock = Sock}) ->
-    pulsar_socket:ping(Sock),
+connected(_EventType, ping, State = #state{sock = Sock, opts = Opts}) ->
+    pulsar_socket:ping(Sock, Opts),
     {keep_state, State};
 
 connected({call, From}, {send, Message}, State = #state{sequence_id = SequenceId, requests = Reqs}) ->
@@ -129,7 +128,7 @@ connected({call, From}, {send, Message}, State = #state{sequence_id = SequenceId
     {keep_state, next_sequence_id(State#state{requests = maps:put(SequenceId, From, Reqs)})};
 
 connected(cast, {send, Message}, State = #state{batch_size = BatchSize, sequence_id = SequenceId, requests = Reqs}) ->
-    BatchMessage = Message ++ collect_send_calls(BatchSize),
+    BatchMessage = Message ++ pulsar_utils:collect_send_calls(BatchSize),
     send_batch_payload(BatchMessage, State),
     {keep_state, next_sequence_id(State#state{requests = maps:put(SequenceId, {SequenceId, length(BatchMessage)}, Reqs)})};
 
@@ -137,15 +136,12 @@ connected(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
 
 do_connect(State = #state{opts = Opts, broker_server = {Host, Port}}) ->
-    case gen_tcp:connect(Host, Port, merge_opts(Opts, ?TCPOPTIONS), ?TIMEOUT) of
+    case pulsar_socket:connect(Host, Port, Opts) of
         {ok, Sock} ->
-            tune_buffer(Sock),
-            gen_tcp:controlling_process(Sock, self()),
-            pulsar_socket:send_connect(Sock, erlang:get(proxy_to_broker_url)),
+            pulsar_socket:send_connect_packet(Sock, erlang:get(proxy_to_broker_url), Opts),
             {next_state, connecting, State#state{sock = Sock}};
-        Error ->
-            log_error("connect error: ~p, server: ~p~n", [Error, {Host, Port}]),
-            {stop, {shutdown, Error}, State}
+        {error, _Reason} = Error ->
+             {stop, {shutdown, Error}, State}
     end.
 
 code_change(_Vsn, State, Data, _Extra) ->
@@ -165,12 +161,15 @@ parse({Cmd, LastBin}, State) ->
     end,
     parse(pulsar_protocol_frame:parse(LastBin), State2).
 
-handle_response({connected, _ConnectedData}, State = #state{sock = Sock,
-                                                            request_id = RequestId,
-                                                            producer_id = ProId,
-                                                            partitiontopic = Topic}) ->
+handle_response({connected, _ConnectedData}, State = #state{
+        sock = Sock,
+        opts = Opts,
+        request_id = RequestId,
+        producer_id = ProducerId,
+        partitiontopic = Topic
+    }) ->
     start_keepalive(),
-    create_producer(Sock, Topic, RequestId, ProId),
+    pulsar_socket:send_create_producer_packet(Sock, Topic, RequestId, ProducerId, Opts),
     {keep_state, next_request_id(State)};
 
 handle_response({producer_success, #{producer_name := ProName}}, State) ->
@@ -179,8 +178,8 @@ handle_response({producer_success, #{producer_name := ProName}}, State) ->
 handle_response({pong, #{}}, State) ->
     start_keepalive(),
     {keep_state, State};
-handle_response({ping, #{}}, State = #state{sock = Sock}) ->
-    pulsar_socket:pong(Sock),
+handle_response({ping, #{}}, State = #state{sock = Sock, opts = Opts}) ->
+    pulsar_socket:pong(Sock, Opts),
     {keep_state, State};
 handle_response({close_producer, #{}}, State = #state{partitiontopic = Topic}) ->
     log_error("Close producer: ~p~n", [Topic]),
@@ -240,95 +239,18 @@ handle_response(Msg, State) ->
     {keep_state, State}.
 
 send_batch_payload(Messages, #state{
-                                    partitiontopic = PartitionTopic,
-                                    sequence_id = SequenceId,
-                                    producer_id = ProducerId,
-                                    producer_name = ProducerName,
-                                    sock = Sock}) ->
-    Len = length(Messages),
-    Send = case Len > 1 of
-        true ->
-            #{producer_id => ProducerId,
-              sequence_id => SequenceId,
-              num_messages => Len};
-        false ->
-            #{producer_id => ProducerId,
-              sequence_id => SequenceId}
-    end,
-    Metadata = #{producer_name => ProducerName,
-                 sequence_id => SequenceId,
-                 publish_time => erlang:system_time(millisecond),
-                 compression => 'NONE'},
-    {Metadata1, BatchMessage} = batch_message(Metadata, Len, Messages),
-    gen_tcp:send(Sock, pulsar_protocol_frame:send(Send, Metadata1, BatchMessage)),
-    pulsar_metrics:send(PartitionTopic, Len).
+            partitiontopic = Topic,
+            sequence_id = SequenceId,
+            producer_id = ProducerId,
+            producer_name = ProducerName,
+            sock = Sock,
+            opts = Opts
+        }) ->
+    pulsar_socket:send_batch_message_packet(Sock, Topic, Messages, SequenceId, ProducerId,
+        ProducerName, Opts).
 
 start_keepalive() ->
     erlang:send_after(30*1000, self(), ping).
-
-create_producer(Sock, Topic, RequestId, ProducerId) ->
-    Producer = #{
-        topic => Topic,
-        producer_id => ProducerId,
-        request_id => RequestId
-    },
-    gen_tcp:send(Sock, pulsar_protocol_frame:create_producer(Producer)).
-
-batch_message(Metadata, Len, Messages) ->
-    Metadata1 = Metadata#{num_messages_in_batch => Len},
-    Compression = case erlang:get(compression) of
-        snappy -> 'SNAPPY';
-        zlib -> 'ZLIB';
-        _ -> 'NONE'
-    end,
-    BatchMessage = lists:foldl(fun(#{key := Key, value := Message}, Acc) ->
-        Message1 = maybe_compression(Message, Compression),
-        SMetadata = case Key =:= undefined of
-            true  -> #{payload_size => size(Message1), compression => Compression};
-            false -> #{payload_size => size(Message1), partition_key => Key, compression => Compression}
-        end,
-        SMetadataBin = pulsar_api:encode_msg(SMetadata, 'SingleMessageMetadata'),
-        SMetadataBinSize = size(SMetadataBin),
-        <<Acc/binary, SMetadataBinSize:32, SMetadataBin/binary, Message1/binary>>
-    end, <<>>, Messages),
-    {Metadata1, BatchMessage}.
-
-
-collect_send_calls(0) ->
-    [];
-collect_send_calls(Cnt) when Cnt > 0 ->
-    collect_send_calls(Cnt, []).
-
-collect_send_calls(0, Acc) ->
-    lists:reverse(Acc);
-
-collect_send_calls(Cnt, Acc) ->
-    receive
-        {'$gen_cast', {send, Messages}} ->
-            collect_send_calls(Cnt - 1, Messages ++ Acc)
-    after 0 ->
-          lists:reverse(Acc)
-    end.
-
-tune_buffer(Sock) ->
-    {ok, [{recbuf, RecBuf}, {sndbuf, SndBuf}]} = inet:getopts(Sock, [recbuf, sndbuf]),
-    inet:setopts(Sock, [{buffer, max(RecBuf, SndBuf)}]).
-
-merge_opts(Defaults, Options) ->
-    lists:foldl(
-        fun({Opt, Val}, Acc) ->
-                case lists:keymember(Opt, 1, Acc) of
-                    true ->
-                        lists:keyreplace(Opt, 1, Acc, {Opt, Val});
-                    false ->
-                        [{Opt, Val}|Acc]
-                end;
-            (Opt, Acc) ->
-                case lists:member(Opt, Acc) of
-                    true -> Acc;
-                    false -> [Opt | Acc]
-                end
-        end, Defaults, Options).
 
 next_request_id(State = #state{request_id = ?MAX_QUE_ID}) ->
     State#state{request_id = 1};
@@ -341,13 +263,3 @@ next_sequence_id(State = #state{sequence_id = SequenceId}) ->
     State#state{sequence_id = SequenceId+1}.
 
 log_error(Fmt, Args) -> logger:error("[pulsar-producer] " ++ Fmt, Args).
-
-maybe_compression(Bin, 'SNAPPY') ->
-    {ok, Compressed} = snappyer:compress(Bin),
-    Compressed;
-
-maybe_compression(Bin, 'ZLIB') ->
-    zlib:compress(Bin);
-
-maybe_compression(Bin, _) ->
-    iolist_to_binary(Bin).

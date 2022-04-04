@@ -29,18 +29,7 @@
 
 callback_mode() -> [state_functions].
 
--define(TIMEOUT, 60000).
-
 -define(MAX_QUE_ID, 4294836225).
-
--define(TCPOPTIONS, [
-    binary,
-    {packet,    raw},
-    {reuseaddr, true},
-    {nodelay,   true},
-    {active,    true},
-    {reuseaddr, true},
-    {send_timeout, ?TIMEOUT}]).
 
 -record(state, {partitiontopic,
                 broker_server,
@@ -48,7 +37,7 @@ callback_mode() -> [state_functions].
                 request_id = 1,
                 consumer_id = 1,
                 consumer_name,
-                opts = [],
+                opts = #{},
                 cb_module,
                 cb_state,
                 last_bin = <<>>,
@@ -65,12 +54,13 @@ init([PartitionTopic, Server, ProxyToBrokerUrl, ConsumerOpts]) ->
     {CbModule, ConsumerOpts1} = maps:take(cb_module, ConsumerOpts),
     {CbInitArg, ConsumerOpts2} = maps:take(cb_init_args, ConsumerOpts1),
     {ok, CbState} = CbModule:init(PartitionTopic, CbInitArg),
+    {Transport, BrokerServer} = pulsar_utils:parse_url(Server),
     State = #state{consumer_id = maps:get(consumer_id, ConsumerOpts),
                    partitiontopic = PartitionTopic,
                    cb_module = CbModule,
                    cb_state = CbState,
-                   opts = ConsumerOpts2,
-                   broker_server = pulsar_protocol_frame:uri_to_host_port(Server),
+                   opts = pulsar_utils:maybe_enable_ssl_opts(Transport, ConsumerOpts2),
+                   broker_server = BrokerServer,
                    flow = maps:get(flow, ConsumerOpts, 1000)},
     %% use process dict to avoid the trouble of relup
     erlang:put(proxy_to_broker_url, ProxyToBrokerUrl),
@@ -97,21 +87,20 @@ connected(_EventType, {tcp_closed, Sock}, State = #state{sock = Sock, partitiont
 connected(_EventType, {tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
     parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
 
-connected(_EventType, ping, State = #state{sock = Sock}) ->
-    pulsar_socket:ping(Sock),
+connected(_EventType, ping, State = #state{sock = Sock, opts = Opts}) ->
+    pulsar_socket:ping(Sock, Opts),
     {keep_state, State};
 
 connected(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
 
-do_connect(State = #state{broker_server = {Host, Port}}) ->
-    case gen_tcp:connect(Host, Port, ?TCPOPTIONS, ?TIMEOUT) of
+do_connect(State = #state{broker_server = {Host, Port}, opts = Opts}) ->
+    case pulsar_socket:connect(Host, Port, Opts) of
         {ok, Sock} ->
-            gen_tcp:controlling_process(Sock, self()),
-            pulsar_socket:send_connect(Sock, erlang:get(proxy_to_broker_url)),
+            pulsar_socket:send_connect_packet(Sock, erlang:get(proxy_to_broker_url), Opts),
             {next_state, connecting, State#state{sock = Sock}};
-        Error ->
-            {stop, {shutdown, Error}, State}
+        {error, _Reason} = Error ->
+             {stop, {shutdown, Error}, State}
     end.
 
 code_change(_Vsn, State, Data, _Extra) ->
@@ -143,24 +132,28 @@ handle_response({connected, _ConnectedData}, State = #state{sock = Sock,
 handle_response({pong, #{}}, State) ->
     start_keepalive(),
     {keep_state, State};
-handle_response({ping, #{}}, State = #state{sock = Sock}) ->
-    pulsar_socket:pong(Sock),
+handle_response({ping, #{}}, State = #state{sock = Sock, opts = Opts}) ->
+    pulsar_socket:pong(Sock, Opts),
     {keep_state, State};
-handle_response({subscribe_success, #{}}, State = #state{sock = Sock,
-                                                         consumer_id = ConsumerId,
-                                                         flow = Flow}) ->
-    set_flow(Sock, ConsumerId, Flow),
+handle_response({subscribe_success, #{}}, State = #state{
+        sock = Sock, opts = Opts,
+        consumer_id = ConsumerId,
+        flow = Flow}) ->
+    pulsar_socket:send_set_flow_packet(Sock, ConsumerId, Flow, Opts),
     {keep_state, State};
 handle_response({message, Msg, Payloads}, State = #state{
-                                                         partitiontopic = PartitionTopic,
-                                                         sock = Sock,
-                                                         consumer_id = ConsumerId,
-                                                         cb_module = CbModule,
-                                                         cb_state = CbState}) ->
+            partitiontopic = PartitionTopic,
+            sock = Sock,
+            consumer_id = ConsumerId,
+            cb_module = CbModule,
+            cb_state = CbState,
+            opts = Opts
+        }) ->
     pulsar_metrics:recv(PartitionTopic, length(Payloads)),
     case CbModule:handle_message(Msg, Payloads, CbState) of
         {ok, AckType, NCbState} ->
-            ack(Sock, ConsumerId, AckType, Msg),
+            pulsar_socket:send_ack_packet(Sock, ConsumerId, AckType,
+                [maps:get(message_id, Msg)], Opts),
             NState = maybe_set_flow(length(Payloads), State),
             {keep_state, NState#state{cb_state = NCbState}};
         _ ->
@@ -180,14 +173,8 @@ start_keepalive() ->
 subscribe(Sock, Topic, RequestId, ConsumerId, Opts) ->
     SubType = maps:get(sub_type, Opts, 'Shared'),
     Subscription = maps:get(subscription, Opts, "my-subscription-name"),
-    SubInfo = #{
-        topic => Topic,
-        subscription => Subscription,
-        subType => SubType,
-        consumer_id => ConsumerId,
-        request_id => RequestId
-    },
-    gen_tcp:send(Sock, pulsar_protocol_frame:create_subscribe(SubInfo)).
+    pulsar_socket:send_subscribe_packet(Sock, Topic, RequestId, ConsumerId, Subscription,
+        SubType, Opts).
 
 maybe_set_flow(Len, State = #state{sock = Sock,
                                    consumer_id = ConsumerId,
@@ -196,26 +183,11 @@ maybe_set_flow(Len, State = #state{sock = Sock,
     InitFlow = maps:get(flow, Opts, 1000),
     case (InitFlow div 2) > Flow of
         true ->
-            set_flow(Sock, ConsumerId, InitFlow - (Flow - Len)),
+            pulsar_socket:send_set_flow_packet(Sock, ConsumerId, InitFlow - (Flow-Len), Opts),
             State#state{flow = InitFlow};
         false ->
             State#state{flow = Flow - Len}
     end.
-
-set_flow(Sock, ConsumerId, FlowSize) ->
-    FlowInfo = #{
-        consumer_id => ConsumerId,
-        messagePermits => FlowSize
-    },
-    gen_tcp:send(Sock, pulsar_protocol_frame:set_flow(FlowInfo)).
-
-ack(Sock, ConsumerId, AckType, Msg) ->
-    Ack = #{
-        consumer_id => ConsumerId,
-        ack_type => AckType,
-        message_id => [maps:get(message_id, Msg)]
-    },
-    gen_tcp:send(Sock, pulsar_protocol_frame:ack(Ack)).
 
 next_request_id(State = #state{request_id = ?MAX_QUE_ID}) ->
     State#state{request_id = 1};

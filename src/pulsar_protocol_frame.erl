@@ -57,9 +57,6 @@
          , send/3
          ]).
 
--export([ uri_to_host_port/1
-        ]).
-
 connect() ->
     connect(#{}).
 
@@ -127,16 +124,6 @@ default_connect_fields() ->
     #{ client_version => ?CLIENT_VSN
      , protocol_version => ?PROTO_VSN
      }.
-
-uri_to_host_port({Host, Port}) ->
-    {Host, Port};
-uri_to_host_port(Url) when is_binary(Url) ->
-    uri_to_host_port(binary_to_list(Url));
-uri_to_host_port("pulsar://" ++ Url) ->
-    [Host, Port] = string:tokens(Url, ":"),
-    {Host, list_to_integer(Port)};
-uri_to_host_port(_) ->
-    {"127.0.0.1", 6650}.
 
 parse(<<TotalSize:32, CmdBin:TotalSize/binary, Rest/binary>>) ->
     <<CommandSize:32, Command:CommandSize/binary, CmdRest/binary>> = CmdBin,

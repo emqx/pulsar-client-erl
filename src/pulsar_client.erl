@@ -62,11 +62,11 @@ get_server(Pid) ->
 %%--------------------------------------------------------------------
 init([Servers, Opts]) ->
     State = #state{servers = Servers, opts = Opts},
-    case get_sock(Servers, undefined, Opts) of
+    case get_alive_sock_opts(Servers, undefined, Opts) of
         {error, Reason} ->
             {stop, Reason};
-        {ok, Sock} ->
-            {ok, State#state{sock = Sock}}
+        {ok, {Sock, Opts1}} ->
+            {ok, State#state{sock = Sock, opts = Opts1}}
     end.
 
 handle_call({get_topic_metadata, Topic, Call}, From,
@@ -78,16 +78,17 @@ handle_call({get_topic_metadata, Topic, Call}, From,
             producers = Producers,
             servers = Servers
         }) ->
-    case get_sock(Servers, Sock, Opts) of
+    case get_alive_sock_opts(Servers, Sock, Opts) of
         {error, Reason} ->
             log_error("get_topic_metadata from pulsar servers failed: ~p", [Reason]),
             {noreply, State};
-        {ok, Sock1} ->
-            pulsar_socket:send_topic_metadata_packet(Sock1, Topic, RequestId, Opts),
+        {ok, {Sock1, Opts1}} ->
+            pulsar_socket:send_topic_metadata_packet(Sock1, Topic, RequestId, Opts1),
             {noreply, next_request_id(State#state{
                 requests = maps:put(RequestId, {From, Topic}, Reqs),
                 producers = maps:put(Topic, Call, Producers),
-                sock = Sock1
+                sock = Sock1,
+                opts = Opts1
             })}
     end;
 
@@ -99,33 +100,36 @@ handle_call({lookup_topic, Topic}, From,
             requests = Reqs,
             servers = Servers
         }) ->
-    case get_sock(Servers, Sock, Opts) of
+    case get_alive_sock_opts(Servers, Sock, Opts) of
         {error, Reason} ->
             log_error("lookup_topic from pulsar failed: ~p down", [Reason]),
             {noreply, State};
-        {ok, Sock1} ->
-            pulsar_socket:send_lookup_topic_packet(Sock1, Topic, RequestId, Opts),
+        {ok, {Sock1, Opts1}} ->
+            pulsar_socket:send_lookup_topic_packet(Sock1, Topic, RequestId, Opts1),
             {noreply, next_request_id(State#state{
                 requests = maps:put(RequestId, {From, Topic}, Reqs),
-                sock = Sock1
+                sock = Sock1,
+                opts = Opts1
             })}
     end;
 
 handle_call(get_status, From, State = #state{sock = undefined, opts = Opts, servers = Servers}) ->
-    case get_sock(Servers, undefined, Opts) of
+    case get_alive_sock_opts(Servers, undefined, Opts) of
         {error, Reason} ->
             log_error("get_status from pulsar failed: ~p", [Reason]),
             {reply, false, State};
-        {ok, Sock} -> {noreply, State#state{from = From, sock = Sock}}
+        {ok, {Sock, Opts1}} ->
+            {noreply, State#state{from = From, sock = Sock, opts = Opts1}}
     end;
 handle_call(get_status, _From, State) ->
     {reply, not is_pong_longtime_no_received(), State};
 
 handle_call(get_server, From, State = #state{sock = Sock, opts = Opts, servers = Servers}) ->
-    case get_sock(Servers, Sock, Opts) of
+    case get_alive_sock_opts(Servers, Sock, Opts) of
         {error, _Reason} -> {reply, {error, no_servers_avaliable}, State};
-        {ok, Sock1} ->
-            {reply, pulsar_socket:peername(Sock1, Opts), State#state{from = From, sock = Sock1}}
+        {ok, {Sock1, Opts1}} ->
+            {reply, pulsar_socket:peername(Sock1, Opts),
+                State#state{from = From, sock = Sock1, opts = Opts1}}
     end;
 
 handle_call(_Req, _From, State) ->
@@ -149,13 +153,13 @@ handle_info({Closed, Sock}, State = #state{sock = Sock})
     {noreply, State#state{sock = undefined}, hibernate};
 
 handle_info(ping, State = #state{sock = undefined, opts = Opts, servers = Servers}) ->
-    case get_sock(Servers, undefined, Opts) of
+    case get_alive_sock_opts(Servers, undefined, Opts) of
         {error, Reason} ->
             log_error("ping to pulsar servers failed: ~p", [Reason]),
             {noreply, State, hibernate};
-        {ok, Sock} ->
-            pulsar_socket:ping(Sock, Opts),
-            {noreply, State#state{sock = Sock}, hibernate}
+        {ok, {Sock, Opts1}} ->
+            pulsar_socket:ping(Sock, Opts1),
+            {noreply, State#state{sock = Sock, opts = Opts1}, hibernate}
     end;
 handle_info(ping, State = #state{sock = Sock, opts = Opts}) ->
     pulsar_socket:ping(Sock, Opts),
@@ -250,10 +254,13 @@ handle_response(_Info, State) ->
     log_error("Client handle_response unknown message:~p~n", [_Info]),
     {noreply, State, hibernate}.
 
-get_sock(Servers, undefined, Opts) ->
+get_alive_sock_opts(Servers, undefined, Opts) ->
     try_connect(Servers, Opts);
-get_sock(_Servers, Sock, _Opts) ->
-    {ok, Sock}.
+get_alive_sock_opts(Servers, Sock, Opts) ->
+    case inet:getstat(Sock) of
+        {ok, _} -> {ok, {Sock, Opts}};
+        {error, _} -> try_connect(Servers, Opts)
+    end.
 
 try_connect(Servers, Opts) ->
     do_try_connect(Servers, Opts, #{}).
@@ -266,7 +273,7 @@ do_try_connect([URI | Servers], Opts0, Res) ->
     case pulsar_socket:connect(Host, Port, Opts) of
         {ok, Sock} ->
             pulsar_socket:send_connect_packet(Sock, undefined, Opts),
-            {ok, Sock};
+            {ok, {Sock, Opts}};
         {error, Reason} ->
             do_try_connect(Servers, Opts, Res#{{Host, Port} => Reason})
     end.

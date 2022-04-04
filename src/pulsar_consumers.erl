@@ -115,7 +115,7 @@ log_error(Fmt, Args) -> logger:error(Fmt, Args).
 
 start_consumer(Pid, PartitionTopic, #state{consumer_opts = ConsumerOpts} = State) ->
     try
-        {ok, #{ brokerServiceUrl := BrokerServiceUrl
+        {ok, #{ brokerServiceUrl := BrokerServiceURL
               , proxy_through_service_url := IsProxy
               }} =
             pulsar_client:lookup_topic(Pid, PartitionTopic),
@@ -126,16 +126,16 @@ start_consumer(Pid, PartitionTopic, #state{consumer_opts = ConsumerOpts} = State
         lists:foldl(
             fun(_, #state{consumer_id = CurrentID, consumers = Consumers} = CurrentState) ->
                 ConsumerOptsWithConsumerID = maps:put(consumer_id, CurrentID, ConsumerOpts1),
-                {PeerServer, ProxyToBrokerUrl} = case IsProxy of
+                {AlivePulsarURL, ProxyToBrokerURL} = case IsProxy of
                     false ->
-                        {BrokerServiceUrl, undefined};
+                        {BrokerServiceURL, undefined};
                     true ->
-                        {ok, Peername} = pulsar_client:get_server(Pid),
-                        {Peername, BrokerServiceUrl}
+                        {ok, URL} = pulsar_client:get_alive_pulsar_url(Pid),
+                        {URL, BrokerServiceURL}
                 end,
                 {ok, Consumer} =
-                    pulsar_consumer:start_link(PartitionTopic, PeerServer,
-                        ProxyToBrokerUrl, ConsumerOptsWithConsumerID),
+                    pulsar_consumer:start_link(PartitionTopic, AlivePulsarURL,
+                        ProxyToBrokerURL, ConsumerOptsWithConsumerID),
                 NewState = next_consumer_id(CurrentState),
                 NewState#state{consumers = maps:put(Consumer, PartitionTopic, Consumers)}
             end,

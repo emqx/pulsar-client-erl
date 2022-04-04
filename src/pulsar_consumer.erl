@@ -54,7 +54,7 @@ init([PartitionTopic, Server, ProxyToBrokerUrl, ConsumerOpts]) ->
     {CbModule, ConsumerOpts1} = maps:take(cb_module, ConsumerOpts),
     {CbInitArg, ConsumerOpts2} = maps:take(cb_init_args, ConsumerOpts1),
     {ok, CbState} = CbModule:init(PartitionTopic, CbInitArg),
-    {Transport, BrokerServer} = pulsar_utils:parse_uri(Server),
+    {Transport, BrokerServer} = pulsar_utils:parse_url(Server),
     State = #state{consumer_id = maps:get(consumer_id, ConsumerOpts),
                    partitiontopic = PartitionTopic,
                    cb_module = CbModule,

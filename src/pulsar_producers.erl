@@ -192,11 +192,11 @@ log_error(Fmt, Args) -> logger:error("[pulsar_producers] " ++ Fmt, Args).
 start_producer(Pid, Partition, PartitionTopic, State) ->
     try
         case pulsar_client:lookup_topic(Pid, PartitionTopic) of
-            {ok, #{ brokerServiceUrl := BrokerServiceUrl
+            {ok, #{ brokerServiceUrl := BrokerServiceURL
                   , proxy_through_service_url := IsProxy
                   }} ->
                 do_start_producer(State, Pid, Partition, PartitionTopic,
-                    BrokerServiceUrl, IsProxy);
+                    BrokerServiceURL, IsProxy);
             {error, Reason0} ->
                 log_error("Lookup topic failed: ~p", [Reason0]),
                 restart_producer_later(Partition, PartitionTopic),
@@ -213,17 +213,16 @@ do_start_producer(#state{
         producers = Producers,
         workers = Workers,
         producer_opts = ProducerOpts,
-        producer_id = ProducerID} = State, Pid, Partition, PartitionTopic, BrokerServiceUrl, IsProxy) ->
+        producer_id = ProducerID} = State, Pid, Partition, PartitionTopic, BrokerServiceURL, IsProxy) ->
     NextID = next_producer_id(ProducerID),
-    {PeerServer, ProxyToBrokerUrl} = case IsProxy of
-            false ->
-                {BrokerServiceUrl, undefined};
+    {AlivePulsarURL, ProxyToBrokerURL} = case IsProxy of
+            false -> {BrokerServiceURL, undefined};
             true ->
-                {ok, Peername} = pulsar_client:get_server(Pid),
-                {Peername, BrokerServiceUrl}
+                {ok, URL} = pulsar_client:get_alive_pulsar_url(Pid),
+                {URL, BrokerServiceURL}
         end,
     {ok, Producer} = pulsar_producer:start_link(PartitionTopic,
-        PeerServer, ProxyToBrokerUrl, ProducerOpts#{producer_id => NextID}),
+        AlivePulsarURL, ProxyToBrokerURL, ProducerOpts#{producer_id => NextID}),
     ets:insert(Workers, {Partition, Producer}),
     State#state{
         producers = maps:put(Producer, {Partition, PartitionTopic}, Producers),

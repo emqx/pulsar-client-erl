@@ -15,7 +15,6 @@
 -module(pulsar_socket).
 
 -export([ peername/2
-        , tune_buffer/2
         , connect/3
         ]).
 
@@ -30,6 +29,7 @@
         , ping/2
         , pong/2
         , getstat/2
+        , get_pulsar_uri/2
         ]).
 
 -define(SEND_TIMEOUT, 60000).
@@ -124,6 +124,10 @@ getstat(Sock, Opts) ->
     InetM = inet_module(Opts),
     InetM:getstat(Sock).
 
+peername(Sock, Opts) ->
+    Mod = inet_module(Opts),
+    Mod:peername(Sock).
+
 connect(Host, Port, Opts) ->
     TcpMod = tcp_module(Opts),
     {ConnOpts, Timeout} = connect_opts(Opts),
@@ -132,6 +136,14 @@ connect(Host, Port, Opts) ->
             tune_buffer(inet_module(Opts), Sock),
             TcpMod:controlling_process(Sock, self()),
             {ok, Sock};
+        {error, _} = Error ->
+            Error
+    end.
+
+get_pulsar_uri(Sock, Opts) ->
+    case peername(Sock, Opts) of
+        {ok, {IP, Port}} ->
+            {ok, pulsar_scheme(Opts) ++ "://" ++ inet:ntoa(IP) ++ ":" ++ integer_to_list(Port)};
         {error, _} = Error ->
             Error
     end.
@@ -204,9 +216,11 @@ maybe_compression(Bin, _) ->
 %% Helpers
 %% =======================================================================================
 
-peername(Sock, Opts) ->
-    Mod = inet_module(Opts),
-    Mod:peername(Sock).
+pulsar_scheme(Opts) ->
+    case maps:get(enable_ssl, Opts, false) of
+        false -> "pulsar";
+        true -> "pulsar+ssl"
+    end.
 
 tcp_module(Opts) ->
     case maps:get(enable_ssl, Opts, false) of

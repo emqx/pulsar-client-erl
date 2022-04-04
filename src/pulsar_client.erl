@@ -32,7 +32,7 @@
         ]).
 
 -export([ get_status/1
-        , get_server/1
+        , get_alive_pulsar_url/1
         ]).
 
 -record(state, {sock, servers, opts, producers = #{}, request_id = 0, requests = #{}, from, last_bin = <<>>}).
@@ -54,8 +54,8 @@ lookup_topic(Pid, PartitionTopic) ->
 get_status(Pid) ->
     gen_server:call(Pid, get_status, 5000).
 
-get_server(Pid) ->
-    gen_server:call(Pid, get_server, 5000).
+get_alive_pulsar_url(Pid) ->
+    gen_server:call(Pid, get_alive_pulsar_url, 5000).
 
 %%--------------------------------------------------------------------
 %% gen_server callback
@@ -124,11 +124,11 @@ handle_call(get_status, From, State = #state{sock = undefined, opts = Opts, serv
 handle_call(get_status, _From, State) ->
     {reply, not is_pong_longtime_no_received(), State};
 
-handle_call(get_server, From, State = #state{sock = Sock, opts = Opts, servers = Servers}) ->
+handle_call(get_alive_pulsar_url, From, State = #state{sock = Sock, opts = Opts, servers = Servers}) ->
     case get_alive_sock_opts(Servers, Sock, Opts) of
         {error, _Reason} -> {reply, {error, no_servers_avaliable}, State};
         {ok, {Sock1, Opts1}} ->
-            {reply, pulsar_socket:peername(Sock1, Opts),
+            {reply, pulsar_socket:get_pulsar_uri(Sock1, Opts),
                 State#state{from = From, sock = Sock1, opts = Opts1}}
     end;
 
@@ -268,7 +268,7 @@ try_connect(Servers, Opts) ->
 do_try_connect([], _Opts, Res) ->
     {error, Res};
 do_try_connect([URI | Servers], Opts0, Res) ->
-    {Type, {Host, Port}} = pulsar_utils:parse_uri(URI),
+    {Type, {Host, Port}} = pulsar_utils:parse_url(URI),
     Opts = pulsar_utils:maybe_enable_ssl_opts(Type, Opts0),
     case pulsar_socket:connect(Host, Port, Opts) of
         {ok, Sock} ->

@@ -41,8 +41,8 @@ start() ->
     application:start(crc32cer),
     application:start(pulsar).
 
-ensure_supervised_client(ClientId, Hosts, Opts) ->
-    pulsar_client_sup:ensure_present(ClientId, Hosts, Opts).
+ensure_supervised_client(ClientId, ServerURLs, Opts) ->
+    pulsar_client_sup:ensure_present(ClientId, ServerURLs, Opts).
 
 stop_and_delete_supervised_client(ClientId) ->
     pulsar_client_sup:ensure_absence(ClientId).

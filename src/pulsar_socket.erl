@@ -152,8 +152,11 @@ connect_opts(Opts) ->
     TcpOpts = maps:get(tcp_opts, Opts, []),
     SslOpts = maps:get(ssl_opts, Opts, []),
     ConnTimeout = maps:get(connect_timeout, Opts, ?CONN_TIMEOUT),
-    {pulsar_utils:merge_opts([?DEF_TCP_OPTS, TcpOpts, SslOpts, ?INTERNAL_TCP_OPTS]),
-     ConnTimeout}.
+    ConnOpts = case maps:get(enable_ssl, Opts, false) of
+        true -> pulsar_utils:merge_opts([?DEF_TCP_OPTS, TcpOpts, SslOpts, ?INTERNAL_TCP_OPTS]);
+        false -> pulsar_utils:merge_opts([?DEF_TCP_OPTS, TcpOpts, ?INTERNAL_TCP_OPTS])
+    end,
+    {ConnOpts, ConnTimeout}.
 
 topic_metadata_cmd(Topic, RequestId) ->
     #{

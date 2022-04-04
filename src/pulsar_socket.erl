@@ -29,6 +29,7 @@
         , send_create_producer_packet/5
         , ping/2
         , pong/2
+        , getstat/2
         ]).
 
 -define(SEND_TIMEOUT, 60000).
@@ -118,6 +119,10 @@ ping(Sock, Opts) ->
 pong(Sock, Opts) ->
     Mod = tcp_module(Opts),
     Mod:send(Sock, pulsar_protocol_frame:pong()).
+
+getstat(Sock, Opts) ->
+    InetM = inet_module(Opts),
+    InetM:getstat(Sock).
 
 connect(Host, Port, Opts) ->
     TcpMod = tcp_module(Opts),

@@ -257,7 +257,7 @@ handle_response(_Info, State) ->
 get_alive_sock_opts(Servers, undefined, Opts) ->
     try_connect(Servers, Opts);
 get_alive_sock_opts(Servers, Sock, Opts) ->
-    case inet:getstat(Sock) of
+    case pulsar_socket:getstat(Sock, Opts) of
         {ok, _} -> {ok, {Sock, Opts}};
         {error, _} -> try_connect(Servers, Opts)
     end.

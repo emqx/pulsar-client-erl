@@ -72,19 +72,27 @@ idle(_, do_connect, State) ->
 connecting(_, do_connect, State) ->
     do_connect(State);
 
-connecting(_EventType, {tcp, _, Bin}, State) ->
+connecting(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
     {Cmd, _} = pulsar_protocol_frame:parse(Bin),
     handle_response(Cmd, State).
 
 connected(_, do_connect, _State) ->
     keep_state_and_data;
 
-connected(_EventType, {tcp_closed, Sock}, State = #state{sock = Sock, partitiontopic = Topic}) ->
-    log_error("TcpClosed consumer: ~p~n", [Topic]),
+connected(_EventType, {InetClose, Sock}, State = #state{sock = Sock, partitiontopic = Topic})
+        when InetClose == tcp_closed; InetClose == ssl_closed ->
+    log_error("tcp closed on topic: ~p~n", [Topic]),
     erlang:send_after(5000, self(), do_connect),
     {next_state, idle, State#state{sock = undefined}};
 
-connected(_EventType, {tcp, _, Bin}, State = #state{last_bin = LastBin}) ->
+connected(_EventType, {InetError, _Sock, Reason}, State = #state{partitiontopic = Topic})
+        when InetError == tcp_error; InetError == ssl_error ->
+    log_error("tcp error on topic: ~p, error: ~p~n", [Topic, Reason]),
+    erlang:send_after(5000, self(), do_connect),
+    {next_state, idle, State#state{sock = undefined}};
+
+connected(_EventType, {Inet, _, Bin}, State = #state{last_bin = LastBin})
+        when Inet == tcp; Inet == ssl ->
     parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
 
 connected(_EventType, ping, State = #state{sock = Sock, opts = Opts}) ->
@@ -194,4 +202,4 @@ next_request_id(State = #state{request_id = ?MAX_QUE_ID}) ->
 next_request_id(State = #state{request_id = RequestId}) ->
     State#state{request_id = RequestId+1}.
 
-log_error(Fmt, Args) -> logger:error(Fmt, Args).
+log_error(Fmt, Args) -> logger:error("[pulsar-consumer] " ++ Fmt, Args).

@@ -50,11 +50,13 @@
 
 send_connect_packet(Sock, undefined, Opts) ->
     Mod = tcp_module(Opts),
-    Mod:send(Sock, pulsar_protocol_frame:connect());
+    ConnOpts = maps:get(conn_opts, Opts, #{}),
+    Mod:send(Sock, pulsar_protocol_frame:connect(ConnOpts));
 send_connect_packet(Sock, ProxyToBrokerUrl, Opts) ->
     Mod = tcp_module(Opts),
-    Fields = #{proxy_to_broker_url => uri_to_url(ProxyToBrokerUrl)},
-    Mod:send(Sock, pulsar_protocol_frame:connect(Fields)).
+    ConnOpts0 = maps:get(conn_opts, Opts, #{}),
+    ConnOpts = ConnOpts0#{proxy_to_broker_url => uri_to_url(ProxyToBrokerUrl)},
+    Mod:send(Sock, pulsar_protocol_frame:connect(ConnOpts)).
 
 send_topic_metadata_packet(Sock, Topic, RequestId, Opts) ->
     Mod = tcp_module(Opts),

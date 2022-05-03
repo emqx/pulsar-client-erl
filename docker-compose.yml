@@ -22,3 +22,25 @@ services:
     command:
       - bin/pulsar
       - standalone
+
+  pulsar-basic-auth:
+    container_name: pulsar-basic-auth
+    image: apachepulsar/pulsar:2.10.0
+    volumes:
+      - ./test/test_SUITE_data/basic_auth:/pulsar/conf/basic_auth:ro
+    environment:
+      - authenticationEnabled=true
+      - authenticationProviders=org.apache.pulsar.broker.authentication.AuthenticationProviderBasic
+      - superUserRoles=super
+      - brokerClientAuthenticationPlugin=org.apache.pulsar.client.impl.auth.AuthenticationBasic
+      - PULSAR_EXTRA_OPTS=-Dpulsar.auth.basic.conf=/pulsar/conf/basic_auth
+      - brokerClientAuthenticationParameters={"userId":"super","password":"secretpass"}
+    ports:
+      - 6651:6650
+      - 8081:8080
+    restart: always
+    # Apparently, function worker seems to interact badly with the
+    # authentication config, so we disable it for the tests.
+    # https://github.com/apache/pulsar/issues/6309#issuecomment-585498354
+    command: >-
+      bin/pulsar standalone -nfw -nss

@@ -21,6 +21,7 @@
 -define(TEST_SUIT_CLIENT, client_erl_suit).
 -define(BATCH_SIZE , 100).
 -define(PULSAR_HOST, "pulsar://pulsar:6650").
+-define(PULSAR_BASIC_AUTH_HOST, "pulsar://pulsar-basic-auth:6650").
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
@@ -31,6 +32,7 @@
 
 all() ->
     [ t_pulsar_client
+    , t_pulsar_basic_auth
     , t_pulsar
     ].
 
@@ -40,16 +42,20 @@ init_per_suite(Cfg) ->
 end_per_suite(_Args) ->
     ok.
 
-set_special_configs(_Args) ->
+init_per_testcase(_TestCase, Config) ->
+    {ok, _} = application:ensure_all_started(pulsar),
+    Config.
+
+end_per_testcase(_TestCase, _Config) ->
+    application:stop(pulsar),
     ok.
+
+
 %%--------------------------------------------------------------------
 %% Test cases
 %%--------------------------------------------------------------------
 
 t_pulsar_client(_Args) ->
-%%    pulsar:start(),
-    {ok, _} = application:ensure_all_started(pulsar),
-
     {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
 
     timer:sleep(1000),
@@ -73,7 +79,53 @@ t_pulsar_client(_Args) ->
     timer:sleep(50),
 
     ?assertEqual(false, is_process_alive(ClientPid)),
-    application:stop(pulsar).
+    ok.
+
+t_pulsar_basic_auth(_Config) ->
+    ConnOpts = #{ auth_data => <<"super:secretpass">>
+                , auth_method_name => <<"basic">>
+                },
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(
+                         ?TEST_SUIT_CLIENT,
+                         [?PULSAR_BASIC_AUTH_HOST],
+                         #{conn_opts => ConnOpts}),
+
+    ConsumerOpts = #{ cb_init_args => #{send_to => self()}
+                    , cb_module => pulsar_echo_consumer
+                    , sub_type => 'Shared'
+                    , subscription => "my-subscription"
+                    , max_consumer_num => 1
+                    , name => my_test
+                    , consumer_id => 1
+                    , conn_opts => ConnOpts
+                    },
+    {ok, _Consumer} = pulsar:ensure_supervised_consumers( ?TEST_SUIT_CLIENT
+                                                        , <<"my-topic">>
+                                                        , ConsumerOpts
+                                                        ),
+    timer:sleep(2000),
+    ProducerOpts = #{ batch_size => ?BATCH_SIZE
+                    , strategy => random
+                    , callback => {?MODULE, producer_callback, []}
+                    , conn_opts => ConnOpts
+                    },
+    {ok, Producers} = pulsar:ensure_supervised_producers( ?TEST_SUIT_CLIENT
+                                                        , <<"my-topic">>
+                                                        , ProducerOpts
+                                                        ),
+    timer:sleep(1000),
+    Data = #{key => <<"pulsar">>, value => <<"hello world">>},
+    PubRes = pulsar:send_sync(Producers, [Data]),
+    ?assertNotMatch({error, _}, PubRes),
+    receive
+        {pulsar_message, _Topic, _Message, Payloads} ->
+            ?assertEqual([<<"hello world">>], Payloads),
+            ok
+    after
+        2000 ->
+            error("message not received!")
+    end,
+    ok.
 
 t_pulsar(_) ->
     t_pulsar_(random),

@@ -161,9 +161,8 @@ parse(<<TotalSize:32, CmdBin:TotalSize/binary, Rest/binary>>) ->
             unknown
     end,
     {Resp, Rest};
-
 parse(Bin) ->
-    {undefined, Bin}.
+    {incomplete, Bin}.
 
 serialized_simple_command(BaseCommand) ->
     BaseCommandBin = pulsar_api:encode_msg(BaseCommand, 'BaseCommand'),

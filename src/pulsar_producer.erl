@@ -158,7 +158,7 @@ code_change(_Vsn, State, Data, _Extra) ->
 terminate(_Reason, _StateName, _State) ->
     ok.
 
-parse({undefined, Bin}, State) ->
+parse({incomplete, Bin}, State) ->
     {keep_state, State#state{last_bin = Bin}};
 parse({Cmd, <<>>}, State) ->
     handle_response(Cmd, State#state{last_bin = <<>>});

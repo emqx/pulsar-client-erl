@@ -119,7 +119,8 @@ handle_call(get_status, From, State = #state{sock = undefined, opts = Opts, serv
             log_error("get_status from pulsar failed: ~p", [Reason]),
             {reply, false, State};
         {ok, {Sock, Opts1}} ->
-            {noreply, State#state{from = From, sock = Sock, opts = Opts1}}
+            {reply, not is_pong_longtime_no_received(),
+                State#state{from = From, sock = Sock, opts = Opts1}}
     end;
 handle_call(get_status, _From, State) ->
     {reply, not is_pong_longtime_no_received(), State};
@@ -140,7 +141,7 @@ handle_cast(_Req, State) ->
 
 handle_info({Transport, _, Bin}, State = #state{last_bin = LastBin})
         when Transport == tcp; Transport == ssl ->
-    parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
+    {noreply, parse_packet(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State)};
 
 handle_info({Error, Sock, Reason}, State = #state{sock = Sock})
         when Error == ssl_error; Error == tcp_error ->
@@ -164,7 +165,6 @@ handle_info(ping, State = #state{sock = undefined, opts = Opts, servers = Server
 handle_info(ping, State = #state{sock = Sock, opts = Opts}) ->
     pulsar_socket:ping(Sock, Opts),
     {noreply, State, hibernate};
-
 handle_info(_Info, State) ->
     log_error("Pulsar_client Receive unknown message:~p", [_Info]),
     {noreply, State, hibernate}.
@@ -175,24 +175,22 @@ terminate(_Reason, #state{}) ->
 code_change(_, State, _) ->
     {ok, State}.
 
-parse({undefined, Bin}, State) ->
-    {noreply, State#state{last_bin = Bin}};
-parse({Cmd, <<>>}, State) ->
+parse_packet({incomplete, Bin}, State) ->
+    State#state{last_bin = Bin};
+parse_packet({Cmd, <<>>}, State) ->
     handle_response(Cmd, State#state{last_bin = <<>>});
-parse({Cmd, LastBin}, State) ->
-    State2 = case handle_response(Cmd, State) of
-        {_, State1, _} -> State1
-    end,
-    parse(pulsar_protocol_frame:parse(LastBin), State2).
+parse_packet({Cmd, LastBin}, State) ->
+    State2 = handle_response(Cmd, State),
+    parse_packet(pulsar_protocol_frame:parse(LastBin), State2).
 
 handle_response({connected, _ConnectedData}, State = #state{from = undefined}) ->
     start_keepalive(),
-    {noreply, State, hibernate};
+    State;
 
 handle_response({connected, _ConnectedData}, State = #state{from = From}) ->
     start_keepalive(),
     gen_server:reply(From, true),
-    {noreply, State#state{from = undefined}, hibernate};
+    State#state{from = undefined};
 
 handle_response({partitionMetadataResponse, #{error := Reason, message := Msg,
                                         request_id := RequestId, response := 'Failed'}},
@@ -200,9 +198,9 @@ handle_response({partitionMetadataResponse, #{error := Reason, message := Msg,
     case maps:get(RequestId, Reqs, undefined) of
         {From, _} ->
             gen_server:reply(From, {error, #{error => Reason, message => Msg}}),
-            {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
+            State#state{requests = maps:remove(RequestId, Reqs)};
         undefined ->
-            {noreply, State, hibernate}
+            State
     end;
 
 handle_response({partitionMetadataResponse, #{partitions := Partitions,
@@ -211,9 +209,9 @@ handle_response({partitionMetadataResponse, #{partitions := Partitions,
     case maps:get(RequestId, Reqs, undefined) of
         {From, Topic} ->
             gen_server:reply(From, {ok, {Topic, Partitions}}),
-            {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
+            State#state{requests = maps:remove(RequestId, Reqs)};
         undefined ->
-            {noreply, State, hibernate}
+            State
     end;
 
 handle_response({lookupTopicResponse, #{error := Reason, message := Msg,
@@ -222,9 +220,9 @@ handle_response({lookupTopicResponse, #{error := Reason, message := Msg,
     case maps:get(RequestId, Reqs, undefined) of
         {From, _} ->
             gen_server:reply(From, {error, #{error => Reason, message => Msg}}),
-            {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
+            State#state{requests = maps:remove(RequestId, Reqs)};
         undefined ->
-            {noreply, State, hibernate}
+            State
     end;
 
 handle_response({lookupTopicResponse, #{brokerServiceUrl := BrokerServiceUrl,
@@ -236,23 +234,23 @@ handle_response({lookupTopicResponse, #{brokerServiceUrl := BrokerServiceUrl,
                 #{ brokerServiceUrl => BrokerServiceUrl
                  , proxy_through_service_url => maps:get(proxy_through_service_url, Response, false)
                  }}),
-            {noreply, State#state{requests = maps:remove(RequestId, Reqs)}, hibernate};
+            State#state{requests = maps:remove(RequestId, Reqs)};
         undefined ->
-            {noreply, State, hibernate}
+            State
     end;
 
 handle_response({ping, #{}}, State = #state{sock = Sock, opts = Opts}) ->
     pulsar_socket:pong(Sock, Opts),
-    {noreply, State, hibernate};
+    State;
 
 handle_response({pong, #{}}, State) ->
     pong_received(),
     start_keepalive(),
-    {noreply, State, hibernate};
+    State;
 
 handle_response(_Info, State) ->
     log_error("Client handle_response unknown message:~p~n", [_Info]),
-    {noreply, State, hibernate}.
+    State.
 
 get_alive_sock_opts(Servers, undefined, Opts) ->
     try_connect(Servers, Opts);
@@ -273,7 +271,19 @@ do_try_connect([URI | Servers], Opts0, Res) ->
     case pulsar_socket:connect(Host, Port, Opts) of
         {ok, Sock} ->
             pulsar_socket:send_connect_packet(Sock, undefined, Opts),
-            {ok, {Sock, Opts}};
+            receive
+                {Transport, _, Bin} when Transport == tcp; Transport == ssl ->
+                    case pulsar_protocol_frame:parse(Bin) of
+                        {{connected, _CommandConnected}, <<>>} ->
+                            {ok, {Sock, Opts}};
+                        {{error, CommandError}, <<>>} ->
+                            do_try_connect(Servers, Opts, Res#{{Host, Port} => CommandError})
+                    end;
+                OtherMsg ->
+                    do_try_connect(Servers, Opts, Res#{{Host, Port} => {unexpected_msg, OtherMsg}})
+            after 15000 ->
+                do_try_connect(Servers, Opts, Res#{{Host, Port} => wait_connect_response_timeout})
+            end;
         {error, Reason} ->
             do_try_connect(Servers, Opts, Res#{{Host, Port} => Reason})
     end.

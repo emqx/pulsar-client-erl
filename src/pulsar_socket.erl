@@ -18,7 +18,7 @@
         , connect/3
         ]).
 
--export([ send_connect_packet/3
+-export([ send_connect_packet/2
         , send_lookup_topic_packet/4
         , send_topic_metadata_packet/4
         , send_subscribe_packet/7
@@ -48,15 +48,9 @@
     , {send_timeout, ?SEND_TIMEOUT}
     ]).
 
-send_connect_packet(Sock, undefined, Opts) ->
+send_connect_packet(Sock, Opts) ->
     Mod = tcp_module(Opts),
-    ConnOpts = maps:get(conn_opts, Opts, #{}),
-    Mod:send(Sock, pulsar_protocol_frame:connect(ConnOpts));
-send_connect_packet(Sock, ProxyToBrokerUrl, Opts) ->
-    Mod = tcp_module(Opts),
-    ConnOpts0 = maps:get(conn_opts, Opts, #{}),
-    ConnOpts = ConnOpts0#{proxy_to_broker_url => uri_to_url(ProxyToBrokerUrl)},
-    Mod:send(Sock, pulsar_protocol_frame:connect(ConnOpts)).
+    Mod:send(Sock, pulsar_protocol_frame:connect(maps:get(conn_opts, Opts, #{}))).
 
 send_topic_metadata_packet(Sock, Topic, RequestId, Opts) ->
     Mod = tcp_module(Opts),
@@ -245,8 +239,3 @@ tune_buffer(InetM, Sock) ->
     SndBuf = proplists:get_value(sndbuf, Opts),
     InetM:setopts(Sock, [{buffer, max(RecBuf, SndBuf)}]).
 
-uri_to_url(URI) ->
-    case string:split(URI, "://", leading) of
-        [URI] -> URI;
-        [_Scheme, URL] -> URL
-    end.

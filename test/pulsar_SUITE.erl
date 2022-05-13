@@ -21,7 +21,7 @@
 -define(TEST_SUIT_CLIENT, client_erl_suit).
 -define(BATCH_SIZE , 100).
 -define(PULSAR_HOST, "pulsar://pulsar:6650").
--define(PULSAR_BASIC_AUTH_HOST, "pulsar://pulsar-basic-auth:6650").
+-define(PULSAR_BASIC_AUTH_HOST, "pulsar://pulsar-basic-auth:6651").
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").

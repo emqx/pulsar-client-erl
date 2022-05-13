@@ -270,7 +270,7 @@ do_try_connect([URI | Servers], Opts0, Res) ->
     Opts = pulsar_utils:maybe_enable_ssl_opts(Type, Opts0),
     case pulsar_socket:connect(Host, Port, Opts) of
         {ok, Sock} ->
-            pulsar_socket:send_connect_packet(Sock, undefined, Opts),
+            pulsar_socket:send_connect_packet(Sock, Opts),
             receive
                 {Transport, _, Bin} when Transport == tcp; Transport == ssl ->
                     case pulsar_protocol_frame:parse(Bin) of

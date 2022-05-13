@@ -105,7 +105,9 @@ connected(_EventType, EventContent, State) ->
 do_connect(State = #state{broker_server = {Host, Port}, opts = Opts}) ->
     case pulsar_socket:connect(Host, Port, Opts) of
         {ok, Sock} ->
-            pulsar_socket:send_connect_packet(Sock, erlang:get(proxy_to_broker_url), Opts),
+            pulsar_socket:send_connect_packet(Sock,
+                pulsar_utils:maybe_add_proxy_to_broker_url_opts(Opts,
+                    erlang:get(proxy_to_broker_url))),
             {next_state, connecting, State#state{sock = Sock}};
         {error, _Reason} = Error ->
              {stop, {shutdown, Error}, State}

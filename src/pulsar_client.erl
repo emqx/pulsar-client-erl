@@ -227,11 +227,17 @@ handle_response({lookupTopicResponse, #{error := Reason, message := Msg,
 
 handle_response({lookupTopicResponse, #{brokerServiceUrl := BrokerServiceUrl,
                                         request_id := RequestId} = Response},
-                State = #state{requests = Reqs}) ->
+                State = #state{requests = Reqs, opts = Opts}) ->
     case maps:get(RequestId, Reqs, undefined) of
         {From, _} ->
+            ServiceURL = case {Opts, Response} of
+                             {#{enable_ssl := true}, #{brokerServiceUrlTls := BrokerServiceUrlTls}} ->
+                                 BrokerServiceUrlTls;
+                             _ ->
+                                 BrokerServiceUrl
+                         end,
             gen_server:reply(From, {ok,
-                #{ brokerServiceUrl => BrokerServiceUrl
+                #{ brokerServiceUrl => ServiceURL
                  , proxy_through_service_url => maps:get(proxy_through_service_url, Response, false)
                  }}),
             State#state{requests = maps:remove(RequestId, Reqs)};

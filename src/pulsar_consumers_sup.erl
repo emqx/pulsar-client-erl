@@ -48,7 +48,11 @@ ensure_present(ClientId, Topic, ConsumerOpts) ->
 ensure_absence(ClientId, Name) ->
     ID = ?WORKER_ID(ClientId, Name),
     case supervisor:terminate_child(?SUPERVISOR, ID) of
-        ok -> ok = supervisor:delete_child(?SUPERVISOR, ID);
+        ok ->
+            case supervisor:delete_child(?SUPERVISOR, ID) of
+                ok -> ok;
+                {error, not_found} -> ok
+            end;
         {error, not_found} -> ok
     end.
 

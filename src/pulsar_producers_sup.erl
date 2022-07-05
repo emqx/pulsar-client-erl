@@ -48,7 +48,11 @@ ensure_present(ClientId, Topic, ProducerOpts) ->
 ensure_absence(ClientId, Name) ->
     Id = ?WORKER_ID(ClientId, Name),
     case supervisor:terminate_child(?SUPERVISOR, Id) of
-        ok -> ok = supervisor:delete_child(?SUPERVISOR, Id);
+        ok ->
+            case supervisor:delete_child(?SUPERVISOR, Id) of
+                ok -> ok;
+                {error, not_found} -> ok
+            end;
         {error, not_found} -> ok
     end.
 

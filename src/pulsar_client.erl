@@ -166,7 +166,7 @@ handle_info(ping, State = #state{sock = Sock, opts = Opts}) ->
     pulsar_socket:ping(Sock, Opts),
     {noreply, State, hibernate};
 handle_info(_Info, State) ->
-    log_error("Pulsar_client Receive unknown message:~p", [_Info]),
+    log_error("receive unknown message: ~p", [_Info]),
     {noreply, State, hibernate}.
 
 terminate(_Reason, #state{}) ->
@@ -225,17 +225,22 @@ handle_response({lookupTopicResponse, #{error := Reason, message := Msg,
             State
     end;
 
-handle_response({lookupTopicResponse, #{brokerServiceUrl := BrokerServiceUrl,
-                                        request_id := RequestId} = Response},
+handle_response({lookupTopicResponse, #{request_id := RequestId} = Response},
                 State = #state{requests = Reqs, opts = Opts}) ->
     case maps:get(RequestId, Reqs, undefined) of
         {From, _} ->
-            ServiceURL = case {Opts, Response} of
-                             {#{enable_ssl := true}, #{brokerServiceUrlTls := BrokerServiceUrlTls}} ->
-                                 BrokerServiceUrlTls;
-                             _ ->
-                                 BrokerServiceUrl
-                         end,
+            ServiceURL =
+                case {Opts, Response} of
+                    {#{enable_ssl := true}, #{brokerServiceUrlTls := BrokerServiceUrlTls}} ->
+                        BrokerServiceUrlTls;
+                    {#{enable_ssl := true}, #{brokerServiceUrl := BrokerServiceUrl}} ->
+                        log_error("SSL enabed but brokerServiceUrlTls is not provided by the puslar"
+                                  " server, fallback to use brokerServiceUrl: ~p", [BrokerServiceUrl]),
+                        BrokerServiceUrl;
+                    {_, #{brokerServiceUrl := BrokerServiceUrl}} ->
+                        %% the 'brokerServiceUrl' is a mandatory field in case the SSL is disabled
+                        BrokerServiceUrl
+                end,
             gen_server:reply(From, {ok,
                 #{ brokerServiceUrl => ServiceURL
                  , proxy_through_service_url => maps:get(proxy_through_service_url, Response, false)
@@ -255,7 +260,7 @@ handle_response({pong, #{}}, State) ->
     State;
 
 handle_response(_Info, State) ->
-    log_error("Client handle_response unknown message:~p~n", [_Info]),
+    log_error("handle unknown response: ~p", [_Info]),
     State.
 
 get_alive_sock_opts(Servers, undefined, Opts) ->

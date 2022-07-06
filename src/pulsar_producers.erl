@@ -132,15 +132,20 @@ handle_cast(_Cast, State) ->
 handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
     case pulsar_client_sup:find_client(ClientId) of
         {ok, Pid} ->
-            {ok, {_, Partitions}} = pulsar_client:get_topic_metadata(Pid, Topic),
-            PartitionTopics = create_partition_topic(Topic, Partitions),
-            NewState = lists:foldl(
-                fun({PartitionTopic, Partition}, CurrentState) ->
-                    start_producer(Pid, Partition, PartitionTopic, CurrentState)
-                end,
-                State,
-                PartitionTopics),
-            {noreply, NewState#state{partitions = length(PartitionTopics)}};
+            case pulsar_client:get_topic_metadata(Pid, Topic) of
+                {ok, {_, Partitions}} ->
+                    PartitionTopics = create_partition_topic(Topic, Partitions),
+                    NewState = lists:foldl(
+                        fun({PartitionTopic, Partition}, CurrentState) ->
+                            start_producer(Pid, Partition, PartitionTopic, CurrentState)
+                        end,
+                        State,
+                        PartitionTopics),
+                    {noreply, NewState#state{partitions = length(PartitionTopics)}};
+                {error, Reason} ->
+                    log_error("get topic metatdata failed: ~p", [Reason]),
+                    {stop, {shutdown, Reason}, State}
+            end;
         {error, Reason} ->
             {stop, {shutdown, Reason}, State}
     end;

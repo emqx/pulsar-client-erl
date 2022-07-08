@@ -93,7 +93,13 @@ init([PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts]) ->
     {ok, idle, State, [{next_event, internal, do_connect}]}.
 
 idle(_, do_connect, State) ->
-    do_connect(State).
+    do_connect(State);
+idle({call, _From}, _Event, _State) ->
+    keep_state_and_data;
+idle(cast, _Event, _State) ->
+    keep_state_and_data;
+idle(_EventType, _Event, _State) ->
+    keep_state_and_data.
 
 connecting(_, do_connect, State) ->
     do_connect(State);

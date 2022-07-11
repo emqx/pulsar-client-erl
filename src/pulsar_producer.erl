@@ -97,7 +97,7 @@ idle(_, do_connect, State) ->
 idle({call, _From}, _Event, _State) ->
     keep_state_and_data;
 idle(cast, _Event, _State) ->
-    keep_state_and_data;
+    {keep_state_and_data, [postpone]};
 idle(_EventType, _Event, _State) ->
     keep_state_and_data.
 

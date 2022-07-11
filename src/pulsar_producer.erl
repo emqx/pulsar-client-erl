@@ -112,7 +112,7 @@ connecting({call, From}, _, State) ->
     {keep_state, State, [{reply, From ,{fail, producer_connecting}}]};
 
 connecting(cast, {send, _Message}, _State) ->
-    keep_state_and_data.
+    {keep_state_and_data, [postpone]}.
 
 connected(_, do_connect, _State) ->
     keep_state_and_data;

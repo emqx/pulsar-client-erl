@@ -93,7 +93,13 @@ init([PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts]) ->
     {ok, idle, State, [{next_event, internal, do_connect}]}.
 
 idle(_, do_connect, State) ->
-    do_connect(State).
+    do_connect(State);
+idle({call, _From}, _Event, _State) ->
+    keep_state_and_data;
+idle(cast, _Event, _State) ->
+    {keep_state_and_data, [postpone]};
+idle(_EventType, _Event, _State) ->
+    keep_state_and_data.
 
 connecting(_, do_connect, State) ->
     do_connect(State);
@@ -106,7 +112,7 @@ connecting({call, From}, _, State) ->
     {keep_state, State, [{reply, From ,{fail, producer_connecting}}]};
 
 connecting(cast, {send, _Message}, _State) ->
-    keep_state_and_data.
+    {keep_state_and_data, [postpone]}.
 
 connected(_, do_connect, _State) ->
     keep_state_and_data;

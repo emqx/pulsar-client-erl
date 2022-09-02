@@ -37,8 +37,11 @@
         , send_sync/3
         ]).
 
+-type message() :: #{key := binary(), value := binary()}.
+-export_type([message/0]).
+
 start() ->
-    application:start(crc32cer),
+    _ = application:start(crc32cer),
     application:start(pulsar).
 
 ensure_supervised_client(ClientId, ServerURLs, Opts) ->
@@ -59,7 +62,7 @@ ensure_supervised_consumers(ClientId, Topic, Opts) ->
 stop_and_delete_supervised_consumers(Consumers) ->
     pulsar_consumers:stop_supervised(Consumers).
 
-
+-spec send(pulsar_producers:producers(), [message()]) -> ok | {error, term()}.
 send(Producers, Batch) ->
     case pulsar_producers:pick_producer(Producers, Batch) of
         {error, Reason} -> {error, Reason};
@@ -67,16 +70,15 @@ send(Producers, Batch) ->
             pulsar_producer:send(ProducerPid, Batch)
     end.
 
+-spec send_sync(pulsar_producers:producers(), [message()]) -> {ok, _Response} | {error, term()}.
+send_sync(Producers, Batch) ->
+    Timeout = 5_000,
+    send_sync(Producers, Batch, Timeout).
+
+-spec send_sync(pulsar_producers:producers(), [message()], timeout()) -> {ok, _Response} | {error, term()}.
 send_sync(Producers, Batch, Timeout) ->
     case pulsar_producers:pick_producer(Producers, Batch) of
         {error, Reason} -> {error, Reason};
         {_Partition, ProducerPid} ->
             pulsar_producer:send_sync(ProducerPid, Batch, Timeout)
-    end.
-
-send_sync(Producers, Batch) ->
-    case pulsar_producers:pick_producer(Producers, Batch) of
-        {error, Reason} -> {error, Reason};
-        {_Partition, ProducerPid} ->
-            pulsar_producer:send_sync(ProducerPid, Batch)
     end.

@@ -38,9 +38,22 @@
                 producer_id = 0,
                 producers = #{}}).
 
+-type clientid() :: binary().
+-type topic() :: string().
+-type produce_strategy() :: roundrobin | random.
+-type producers() :: #{ client := clientid()
+                      , topic := topic()
+                      , workers := _Workers
+                      , partitions := _Partitions
+                      , strategy := produce_strategy()
+                      }.
+
+-export_type([producers/0]).
+
 -define(T_RETRY_START, 5000).
 
 %% @doc Start supervised producers.
+-spec start_supervised(clientid(), topic(), map()) -> {ok, producers()}.
 start_supervised(ClientId, Topic, ProducerOpts) ->
   {ok, Pid} = pulsar_producers_sup:ensure_present(ClientId, Topic, ProducerOpts),
   {Partitions, Workers} = gen_server:call(Pid, get_workers, infinity),
@@ -51,6 +64,7 @@ start_supervised(ClientId, Topic, ProducerOpts) ->
          strategy => maps:get(strategy, ProducerOpts, random)
         }}.
 
+-spec stop_supervised(producers()) -> ok.
 stop_supervised(#{client := ClientId, workers := Workers}) ->
   pulsar_producers_sup:ensure_absence(ClientId, Workers).
 
@@ -237,4 +251,3 @@ do_start_producer(#state{
 next_producer_id(?MAX_PRODUCER_ID) -> 0;
 next_producer_id(ProducerID) ->
     ProducerID + 1.
-

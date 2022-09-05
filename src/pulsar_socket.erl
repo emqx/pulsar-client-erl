@@ -16,6 +16,7 @@
 
 -export([ peername/2
         , connect/3
+        , close/2
         ]).
 
 -export([ send_connect_packet/2
@@ -136,6 +137,10 @@ connect(Host, Port, Opts) ->
             Error
     end.
 
+close(Sock, Opts) ->
+    TcpMod = tcp_module(Opts),
+    TcpMod:close(Sock).
+
 get_pulsar_uri(Sock, Opts) ->
     case peername(Sock, Opts) of
         {ok, {IP, Port}} ->
@@ -238,4 +243,3 @@ tune_buffer(InetM, Sock) ->
     RecBuf = proplists:get_value(recbuf, Opts),
     SndBuf = proplists:get_value(sndbuf, Opts),
     InetM:setopts(Sock, [{buffer, max(RecBuf, SndBuf)}]).
-

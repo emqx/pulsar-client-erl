@@ -67,7 +67,6 @@ collect_send_calls(Cnt) when Cnt > 0 ->
 
 collect_send_calls(0, Acc) ->
     lists:reverse(Acc);
-
 collect_send_calls(Cnt, Acc) ->
     receive
         {'$gen_cast', {send, Messages}} ->

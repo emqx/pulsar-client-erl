@@ -36,6 +36,7 @@ all() ->
     , t_pulsar_basic_auth
     , t_pulsar_token_auth
     , t_pulsar
+    , t_pulsar_replayq
     ].
 
 init_per_suite(Cfg) ->
@@ -44,9 +45,21 @@ init_per_suite(Cfg) ->
 end_per_suite(_Args) ->
     ok.
 
-init_per_testcase(_TestCase, Config) ->
+init_per_testcase(t_pulsar_basic_auth, Config) ->
+    PulsarHost = os:getenv("PULSAR_BASIC_AUTH_HOST", ?PULSAR_BASIC_AUTH_HOST),
     {ok, _} = application:ensure_all_started(pulsar),
-    Config.
+    [ {pulsar_host, PulsarHost}
+    | Config];
+init_per_testcase(t_pulsar_token_auth, Config) ->
+    PulsarHost = os:getenv("PULSAR_TOKEN_AUTH_HOST", ?PULSAR_TOKEN_AUTH_HOST),
+    {ok, _} = application:ensure_all_started(pulsar),
+    [ {pulsar_host, PulsarHost}
+    | Config];
+init_per_testcase(_TestCase, Config) ->
+    PulsarHost = os:getenv("PULSAR_HOST", ?PULSAR_HOST),
+    {ok, _} = application:ensure_all_started(pulsar),
+    [ {pulsar_host, PulsarHost}
+    | Config].
 
 end_per_testcase(_TestCase, _Config) ->
     application:stop(pulsar),
@@ -57,12 +70,13 @@ end_per_testcase(_TestCase, _Config) ->
 %% Test cases
 %%--------------------------------------------------------------------
 
-t_pulsar_client(_Args) ->
-    {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
+t_pulsar_client(Config) ->
+    PulsarHost = ?config(pulsar_host, Config),
+    {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
 
     timer:sleep(1000),
     %% for coverage
-    {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
+    {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
 
     ?assertMatch({ok,{<<"test">>, PNum}} when is_integer(PNum),
         pulsar_client:get_topic_metadata(ClientPid, <<"test">>)),
@@ -83,13 +97,14 @@ t_pulsar_client(_Args) ->
     ?assertEqual(false, is_process_alive(ClientPid)),
     ok.
 
-t_pulsar_basic_auth(_Config) ->
+t_pulsar_basic_auth(Config) ->
+    PulsarHost = ?config(pulsar_host, Config),
     ConnOpts = #{ auth_data => <<"super:secretpass">>
                 , auth_method_name => <<"basic">>
                 },
     {ok, _ClientPid} = pulsar:ensure_supervised_client(
                          ?TEST_SUIT_CLIENT,
-                         [?PULSAR_BASIC_AUTH_HOST],
+                         [PulsarHost],
                          #{conn_opts => ConnOpts}),
 
     ConsumerOpts = #{ cb_init_args => #{send_to => self()}
@@ -117,7 +132,7 @@ t_pulsar_basic_auth(_Config) ->
                                                         ),
     timer:sleep(1000),
     Data = #{key => <<"pulsar">>, value => <<"hello world">>},
-    PubRes = pulsar:send_sync(Producers, [Data]),
+    {ok, PubRes} = pulsar:send_sync(Producers, [Data]),
     ?assertNotMatch({error, _}, PubRes),
     receive
         {pulsar_message, _Topic, _Message, Payloads} ->
@@ -129,13 +144,14 @@ t_pulsar_basic_auth(_Config) ->
     end,
     ok.
 
-t_pulsar_token_auth(_Config) ->
+t_pulsar_token_auth(Config) ->
+    PulsarHost = ?config(pulsar_host, Config),
     ConnOpts = #{ auth_data => <<"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0LXVzZXIifQ.RVPrnEzgEG-iKfpUWKryC39JgWdFXs7MJMUWnHA4ZSg">>
                 , auth_method_name => <<"token">>
                 },
     {ok, _ClientPid} = pulsar:ensure_supervised_client(
                          ?TEST_SUIT_CLIENT,
-                         [?PULSAR_TOKEN_AUTH_HOST],
+                         [PulsarHost],
                          #{conn_opts => ConnOpts}),
 
     ConsumerOpts = #{ cb_init_args => #{send_to => self()}
@@ -163,7 +179,7 @@ t_pulsar_token_auth(_Config) ->
                                                         ),
     timer:sleep(1000),
     Data = #{key => <<"pulsar">>, value => <<"hello world">>},
-    PubRes = pulsar:send_sync(Producers, [Data]),
+    {ok, PubRes} = pulsar:send_sync(Producers, [Data]),
     ?assertNotMatch({error, _}, PubRes),
     receive
         {pulsar_message, _Topic, _Message, Payloads} ->
@@ -175,12 +191,13 @@ t_pulsar_token_auth(_Config) ->
     end,
     ok.
 
-t_pulsar(_) ->
-    t_pulsar_(random),
-    t_pulsar_(roundrobin).
-t_pulsar_(Strategy) ->
+t_pulsar(Config) ->
+    t_pulsar_(random, Config),
+    t_pulsar_(roundrobin, Config).
+t_pulsar_(Strategy, Config) ->
+    PulsarHost = ?config(pulsar_host, Config),
     {ok, _} = application:ensure_all_started(pulsar),
-    {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [?PULSAR_HOST], #{}),
+    {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ConsumerOpts = #{
         cb_init_args => [],
         cb_module => ?MODULE,
@@ -206,10 +223,10 @@ t_pulsar_(Strategy) ->
     {ok, Producers} = pulsar:ensure_supervised_producers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ProducerOpts),
 
 
-    ?assertMatch(#{sequence_id := _}, pulsar:send_sync(Producers, [Data], 300)),
+    ?assertMatch({ok, #{sequence_id := _}}, pulsar:send_sync(Producers, [Data], 300)),
     %% keepalive test
     timer:sleep(30*1000 + 5*1000),
-    ?assertMatch(#{sequence_id := _}, pulsar:send_sync(Producers, [Data])),
+    ?assertMatch({ok, #{sequence_id := _}}, pulsar:send_sync(Producers, [Data])),
     timer:sleep(500),
 
     %% restart test

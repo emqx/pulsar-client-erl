@@ -8,14 +8,17 @@ compile:
 
 clean: distclean
 
-ct: compile
-	$(REBAR) as test ct -v
+ct:
+	$(REBAR) ct -v
 
 eunit: compile
 	$(REBAR) as test eunit
 
 xref:
 	$(REBAR) xref
+
+dialyzer:
+	$(REBAR) dialyzer
 
 distclean:
 	@rm -rf _build

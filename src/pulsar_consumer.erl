@@ -77,34 +77,36 @@ idle(_EventType, _Event, _State) ->
 
 connecting(_, do_connect, State) ->
     do_connect(State);
-
 connecting(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
     {Cmd, _} = pulsar_protocol_frame:parse(Bin),
-    handle_response(Cmd, State).
+    handle_response(Cmd, State);
+connecting(info, {InetClose, _Sock}, State = #state{partitiontopic = Topic})
+        when InetClose == tcp_closed; InetClose == ssl_closed ->
+    log_error("tcp closed on topic: ~p~n", [Topic]),
+    {next_state, idle, State#state{sock = undefined},
+     [{state_timeout, 5_000, do_connect}]};
+connecting(info, Msg, _State) ->
+    logger:info("[pulsar-consumer][connecting] unknown message received ~p", [Msg]),
+    keep_state_and_data.
 
 connected(_, do_connect, _State) ->
     keep_state_and_data;
-
 connected(_EventType, {InetClose, Sock}, State = #state{sock = Sock, partitiontopic = Topic})
         when InetClose == tcp_closed; InetClose == ssl_closed ->
     log_error("tcp closed on topic: ~p~n", [Topic]),
     erlang:send_after(5000, self(), do_connect),
     {next_state, idle, State#state{sock = undefined}};
-
 connected(_EventType, {InetError, _Sock, Reason}, State = #state{partitiontopic = Topic})
         when InetError == tcp_error; InetError == ssl_error ->
     log_error("tcp error on topic: ~p, error: ~p~n", [Topic, Reason]),
     erlang:send_after(5000, self(), do_connect),
     {next_state, idle, State#state{sock = undefined}};
-
 connected(_EventType, {Inet, _, Bin}, State = #state{last_bin = LastBin})
         when Inet == tcp; Inet == ssl ->
     parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
-
 connected(_EventType, ping, State = #state{sock = Sock, opts = Opts}) ->
     pulsar_socket:ping(Sock, Opts),
     {keep_state, State};
-
 connected(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
 

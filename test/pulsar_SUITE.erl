@@ -55,12 +55,41 @@ init_per_testcase(t_pulsar_token_auth, Config) ->
     {ok, _} = application:ensure_all_started(pulsar),
     [ {pulsar_host, PulsarHost}
     | Config];
+init_per_testcase(t_pulsar_replayq, Config) ->
+    PulsarHost = os:getenv("PULSAR_HOST", ?PULSAR_HOST),
+    ProxyHost = os:getenv("PROXY_HOST", "proxy"),
+    ProxyPort = list_to_integer(os:getenv("PROXY_PORT", "8474")),
+    UpstreamHost = os:getenv("PROXY_PULSAR_HOST", PulsarHost),
+    %% when testing locally; externally exposed port for container
+    FakePulsarPort = list_to_integer(os:getenv("PROXY_PULSAR_PORT", "6650")),
+    FakePulsarHost = populate_proxy(ProxyHost, ProxyPort, FakePulsarPort, UpstreamHost),
+    %% since the broker reports a proxy URL to itself, we need to
+    %% patch that so we always use toxiproxy.
+    ok = meck:new(pulsar_client, [non_strict, passthrough, no_history]),
+    ok = meck:expect(
+           pulsar_client, lookup_topic,
+           fun(Pid, PartitionTopic) ->
+             case meck:passthrough([Pid, PartitionTopic]) of
+               {ok, Resp} -> {ok, Resp#{brokerServiceUrl => FakePulsarHost}};
+               Error -> Error
+             end
+           end),
+    {ok, _} = application:ensure_all_started(pulsar),
+    [ {pulsar_host, PulsarHost}
+    , {proxy_host, ProxyHost}
+    , {proxy_port, ProxyPort}
+    , {fake_pulsar_host, FakePulsarHost}
+    | Config];
 init_per_testcase(_TestCase, Config) ->
     PulsarHost = os:getenv("PULSAR_HOST", ?PULSAR_HOST),
     {ok, _} = application:ensure_all_started(pulsar),
     [ {pulsar_host, PulsarHost}
     | Config].
 
+end_per_testcase(t_pulsar_replayq, _Config) ->
+    application:stop(pulsar),
+    meck:unload([pulsar_client]),
+    ok;
 end_per_testcase(_TestCase, _Config) ->
     application:stop(pulsar),
     ok.
@@ -277,6 +306,146 @@ count_test([{{producer, _}, Data}| Tail], PCountNow, CCountNow) ->
     count_test(Tail, PCountNow + Data, CCountNow);
 count_test([{{consumer, _}, Data}| Tail], PCountNow, CCountNow) ->
     count_test(Tail, PCountNow, CCountNow + Data).
+
+t_pulsar_replayq(Config) ->
+    PulsarHost = ?config(fake_pulsar_host, Config),
+    ProxyHost = ?config(proxy_host, Config),
+    ProxyPort = ?config(proxy_port, Config),
+    StabilizationPeriod = timer:seconds(15),
+    {ok, _} = application:ensure_all_started(pulsar),
+
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    ct:pal("started client"),
+    Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
+    ConsumerOpts = #{
+        cb_init_args => #{send_to => self()},
+        cb_module => pulsar_echo_consumer,
+        sub_type => 'Shared',
+        subscription => "pulsar_test_replayq",
+        max_consumer_num => 1,
+        name => pulsar_test_replayq
+    },
+    {ok, _Consumers} = pulsar:ensure_supervised_consumers(
+                        ?TEST_SUIT_CLIENT,
+                        Topic,
+                        ConsumerOpts),
+    ct:pal("started consumer"),
+    ProducerOpts = #{
+        batch_size => ?BATCH_SIZE,
+        strategy => random,
+        callback => {?MODULE, producer_callback, []}
+    },
+    {ok, Producers} = pulsar:ensure_supervised_producers(
+                        ?TEST_SUIT_CLIENT,
+                        Topic,
+                        ProducerOpts),
+    ct:pal("started producer"),
+    ct:sleep(2_000),
+
+    TestPid = self(),
+    ProduceInterval = 100,
+    StartSequentialProducer =
+        fun Go (SeqNo0) ->
+          receive
+            stop -> TestPid ! {done, SeqNo0}
+          after
+            0 ->
+              SeqNo = SeqNo0 + 1,
+              pulsar:send(Producers, [#{key => <<"k">>, value => integer_to_binary(SeqNo)}]),
+              SeqNo rem 10 =:= 0 andalso (TestPid ! {sent, SeqNo}),
+              timer:sleep(ProduceInterval),
+              Go(SeqNo)
+          end
+        end,
+
+    SequentialProducer = spawn(fun() -> StartSequentialProducer(0) end),
+    ct:pal("started sequential producer"),
+
+    %% produce some messages in the connected state.
+    wait_until_produced(100, 100 * ProduceInterval + 100),
+    ct:pal("produced 100 messages"),
+
+    %% cut the connection and produce more messages
+    ct:pal("cutting connection with pulsar..."),
+    switch_proxy(off, ProxyHost, ProxyPort),
+    ct:pal("connection cut"),
+
+    timer:sleep(StabilizationPeriod),
+    wait_until_produced(500, 400 * ProduceInterval + 100),
+    ct:pal("produced 500 messages"),
+
+    %% reestablish connection and produce some more
+    ct:pal("reestablishing connection with pulsar..."),
+    switch_proxy(on, ProxyHost, ProxyPort),
+    ct:pal("connection reestablished"),
+    timer:sleep(StabilizationPeriod),
+    wait_until_produced(600, 100 * ProduceInterval + 100),
+    ct:pal("produced 600 messages"),
+
+    %% stop producer and check we received all msgs
+    SequentialProducer ! stop,
+    TotalProduced =
+        receive
+            {done, Total} -> Total
+        after
+            10_000 ->
+                error(producer_didnt_stop)
+        end,
+
+    ct:pal("produced ~b messages in total", [TotalProduced]),
+
+    ExpectedPayloads = sets:from_list([integer_to_binary(N) || N <- lists:seq(1, TotalProduced)],
+                                      [{version, 2}]),
+    wait_until_consumed(ExpectedPayloads, timer:seconds(30)),
+
+    ct:pal("all ~b expected messages were received", [TotalProduced]),
+
+    ok.
+
+populate_proxy(ProxyHost, ProxyPort, FakePulsarPort, PulsarUrl) ->
+    {_, {PulsarHost, PulsarPort}} = pulsar_utils:parse_url(PulsarUrl),
+    PulsarHostPort = PulsarHost ++ ":" ++ integer_to_list(PulsarPort),
+    Url = "http://" ++ ProxyHost ++ ":" ++ integer_to_list(ProxyPort) ++ "/populate",
+
+    Body = iolist_to_binary(io_lib:format(<<"[{\"name\":\"pulsar\",\"listen\":\"0.0.0.0:~b\","
+                                            "\"upstream\":~p,\"enabled\":true}]">>,
+                                          [PulsarPort, PulsarHostPort])),
+    {ok, {{_, 201, _}, _, _}} = httpc:request(post, {Url, [], "application/json", Body}, [],
+                                              [{body_format, binary}]),
+    "pulsar://" ++ ProxyHost ++ ":" ++ integer_to_list(FakePulsarPort).
+
+switch_proxy(Switch, ProxyHost, ProxyPort) ->
+    Url = "http://" ++ ProxyHost ++ ":" ++ integer_to_list(ProxyPort) ++ "/proxies/pulsar",
+    Body = case Switch of
+               off -> <<"{\"enabled\":false}">>;
+               on  -> <<"{\"enabled\":true}">>
+           end,
+    {ok, {{_, 200, _}, _, _}} = httpc:request(post, {Url, [], "application/json", Body}, [],
+                                              [{body_format, binary}]).
+
+wait_until_produced(ExpectedSeqNo, Timeout) ->
+    receive
+        {sent, ExpectedSeqNo} ->
+            ok
+    after
+        Timeout ->
+            error({timeout, ExpectedSeqNo})
+    end.
+
+wait_until_consumed(ExpectedPayloads0, Timeout) ->
+    case sets:is_empty(ExpectedPayloads0) of
+        true -> ok;
+        false ->
+            receive
+                {pulsar_message, _Topic, _Message, Payloads} ->
+                    PayloadsSet = sets:from_list(Payloads, [{version, 2}]),
+                    ExpectedPayloads = sets:subtract(ExpectedPayloads0, PayloadsSet),
+                    wait_until_consumed(ExpectedPayloads, Timeout)
+            after
+                Timeout ->
+                    error({missing_messages, sets:to_list(ExpectedPayloads0)})
+            end
+    end.
 
 %%----------------------
 %% pulsar callback

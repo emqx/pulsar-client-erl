@@ -241,9 +241,9 @@ connected(_EventType, {InetClose, _Sock}, State = #state{partitiontopic = Topic}
 connected(_EventType, {InetError, _Sock, Reason}, State = #state{partitiontopic = Topic})
         when InetError == tcp_error; InetError == ssl_error ->
     log_error("connection error on topic: ~p, error: ~p~n", [Topic, Reason]),
-    erlang:send_after(5000, self(), do_connect),
     try_close_socket(State),
-    {next_state, idle, State#state{sock = undefined}};
+    {next_state, idle, State#state{sock = undefined},
+     [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]};
 connected(_EventType, {Inet, _, Bin}, State = #state{last_bin = LastBin})
         when Inet == tcp; Inet == ssl ->
     parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);

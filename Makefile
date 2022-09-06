@@ -11,7 +11,7 @@ clean: distclean
 ct:
 	$(REBAR) ct -v
 
-eunit: compile
+eunit:
 	$(REBAR) as test eunit
 
 xref:

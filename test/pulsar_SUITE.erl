@@ -37,6 +37,7 @@ all() ->
     , t_pulsar_token_auth
     , t_pulsar
     , t_pulsar_replayq
+    , t_pulsar_drop_expired_batch
     ].
 
 init_per_suite(Cfg) ->
@@ -55,7 +56,9 @@ init_per_testcase(t_pulsar_token_auth, Config) ->
     {ok, _} = application:ensure_all_started(pulsar),
     [ {pulsar_host, PulsarHost}
     | Config];
-init_per_testcase(t_pulsar_replayq, Config) ->
+init_per_testcase(TestCase, Config)
+  when TestCase =:= t_pulsar_replayq;
+       TestCase =:= t_pulsar_drop_expired_batch ->
     PulsarHost = os:getenv("PULSAR_HOST", ?PULSAR_HOST),
     ProxyHost = os:getenv("PROXY_HOST", "proxy"),
     ProxyPort = list_to_integer(os:getenv("PROXY_PORT", "8474")),
@@ -86,14 +89,15 @@ init_per_testcase(_TestCase, Config) ->
     [ {pulsar_host, PulsarHost}
     | Config].
 
-end_per_testcase(t_pulsar_replayq, _Config) ->
+end_per_testcase(TestCase, _Config)
+  when TestCase =:= t_pulsar_replayq;
+       TestCase =:= t_pulsar_drop_expired_batch ->
     application:stop(pulsar),
     meck:unload([pulsar_client]),
     ok;
 end_per_testcase(_TestCase, _Config) ->
     application:stop(pulsar),
     ok.
-
 
 %%--------------------------------------------------------------------
 %% Test cases
@@ -307,6 +311,77 @@ count_test([{{producer, _}, Data}| Tail], PCountNow, CCountNow) ->
 count_test([{{consumer, _}, Data}| Tail], PCountNow, CCountNow) ->
     count_test(Tail, PCountNow, CCountNow + Data).
 
+t_pulsar_drop_expired_batch(Config) ->
+    PulsarHost = ?config(fake_pulsar_host, Config),
+    ProxyHost = ?config(proxy_host, Config),
+    ProxyPort = ?config(proxy_port, Config),
+    StabilizationPeriod = timer:seconds(15),
+    {ok, _} = application:ensure_all_started(pulsar),
+
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    ct:pal("started client"),
+    ConsumerOpts = #{
+        cb_init_args => #{send_to => self()},
+        cb_module => pulsar_echo_consumer,
+        sub_type => 'Shared',
+        subscription => "pulsar_test_expired",
+        max_consumer_num => 1,
+        name => pulsar_test_expired
+    },
+    Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
+    {ok, _Consumers} = pulsar:ensure_supervised_consumers(
+                        ?TEST_SUIT_CLIENT,
+                        Topic,
+                        ConsumerOpts),
+    ct:pal("started consumer"),
+    RetentionPeriodMS = 1_000,
+    ProducerOpts = #{
+        batch_size => ?BATCH_SIZE,
+        strategy => random,
+        callback => {?MODULE, producer_callback, []},
+        retention_period => RetentionPeriodMS
+    },
+    {ok, Producers} = pulsar:ensure_supervised_producers(
+                        ?TEST_SUIT_CLIENT,
+                        Topic,
+                        ProducerOpts),
+    ct:pal("started producer"),
+
+    ct:pal("cutting connection with pulsar..."),
+    switch_proxy(off, ProxyHost, ProxyPort),
+    ct:pal("connection cut"),
+    ct:sleep(StabilizationPeriod),
+
+    %% Produce messages that'll expire
+    pulsar:send(Producers,
+                [#{key => <<"k">>, value => integer_to_binary(SeqNo)}
+                 || SeqNo <- lists:seq(1, 150)]),
+
+    ct:pal("reestablishing connection with pulsar..."),
+    switch_proxy(on, ProxyHost, ProxyPort),
+    ct:pal("connection reestablished"),
+    ct:sleep(StabilizationPeriod + timer:seconds(15)),
+
+    receive
+        {pulsar_message, _Topic, _Receipt, Payloads} ->
+            error({should_have_expired, Payloads})
+    after
+        1_000 ->
+            ok
+    end,
+
+    pulsar:send(Producers, [#{key => <<"k">>, value => <<"should receive">>}]),
+
+    receive
+        {pulsar_message, _Topic1, _Receipt1, [<<"should receive">>]} ->
+            ok
+    after
+        5_000 ->
+            error(timeout)
+    end,
+
+    ok.
+
 t_pulsar_replayq(Config) ->
     PulsarHost = ?config(fake_pulsar_host, Config),
     ProxyHost = ?config(proxy_host, Config),
@@ -437,7 +512,7 @@ wait_until_consumed(ExpectedPayloads0, Timeout) ->
         true -> ok;
         false ->
             receive
-                {pulsar_message, _Topic, _Message, Payloads} ->
+                {pulsar_message, _Topic, _Receipt, Payloads} ->
                     PayloadsSet = sets:from_list(Payloads, [{version, 2}]),
                     ExpectedPayloads = sets:subtract(ExpectedPayloads0, PayloadsSet),
                     wait_until_consumed(ExpectedPayloads, Timeout)

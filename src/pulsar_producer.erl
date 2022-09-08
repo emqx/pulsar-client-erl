@@ -280,7 +280,11 @@ do_connect(State = #state{opts = Opts, broker_server = {Host, Port}}) ->
              [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]}
     end.
 
-code_change(_Vsn, State, Data, _Extra) ->
+code_change({down, _Vsn}, State, Data0, _Extra) ->
+    Data = ensure_replayq_absent(Data0),
+    {ok, State, Data};
+code_change(_Vsn, State, Data0, _Extra) ->
+    Data = ensure_replayq_present(Data0),
     {ok, State, Data}.
 
 terminate(_Reason, _StateName, _State) ->
@@ -483,3 +487,27 @@ is_batch_expired(_Timestamp, infinity = _RetentionPeriod, _Now) ->
     false;
 is_batch_expired(Timestamp, RetentionPeriod, Now) ->
     Timestamp =< Now - RetentionPeriod.
+
+ensure_replayq_present(Data = #state{opts = ProducerOpts0}) ->
+    RetentionPeriod = maps:get(retention_period, ProducerOpts0, infinity),
+    MaxTotalBytes = maps:get(replayq_max_total_bytes, ProducerOpts0, ?DEFAULT_REPLAYQ_LIMIT),
+    ReplayqCfg = #{ mem_only => true
+                  , sizer => fun ?MODULE:queue_item_sizer/1
+                  , marshaller => fun ?MODULE:queue_item_marshaller/1
+                  , max_total_bytes => MaxTotalBytes
+                  },
+    Q = replayq:open(ReplayqCfg),
+    ProducerOpts = ProducerOpts0#{ replayq => Q
+                                 , retention_period => RetentionPeriod
+                                 },
+    Data#state{opts = ProducerOpts}.
+
+ensure_replayq_absent(Data = #state{opts = ProducerOpts0}) ->
+    ProducerOpts = case maps:take(replayq, ProducerOpts0) of
+        {Q, ProducerOpts1} ->
+            _ = replayq:close(Q),
+            maps:without([retention_period], ProducerOpts1);
+        error ->
+            ProducerOpts0
+    end,
+    Data#state{opts = ProducerOpts}.

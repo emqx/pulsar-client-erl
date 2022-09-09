@@ -40,12 +40,14 @@
         ]).
 
 -type statem() :: idle | connecting | connected.
--type send_receipt() :: #{ sequence_id := integer()
+-type sequence_id() :: integer().
+-type send_receipt() :: #{ sequence_id := sequence_id()
                          , producer_id := integer()
-                         , highest_sequence_id := integer()
+                         , highest_sequence_id := sequence_id()
                          , message_id := map()
                          , any() => term()
                          }.
+-type timestamp() :: integer().
 -type config() :: #{ replayq_dir := string()
                    , replayq_max_total_bytes => pos_integer()
                    , replayq_seg_bytes => pos_integer()
@@ -90,6 +92,22 @@
                 batch_size = 0,
                 requests = #{},
                 last_bin = <<>>}).
+-type state() :: #state{
+                    partitiontopic :: binary(),
+                    broker_server :: binary(),
+                    sock :: undefined | port(),
+                    request_id :: integer(),
+                    producer_id :: integer(),
+                    sequence_id :: sequence_id(),
+                    producer_name :: atom(),
+                    opts :: map(),
+                    callback :: undefined | mfa() | fun((map()) -> ok),
+                    batch_size :: non_neg_integer(),
+                    requests :: #{sequence_id() => [{replayq:ack_ref(),
+                                                     [gen_statem:from()],
+                                                     [{timestamp(), [pulsar:message()]}]}]},
+                    last_bin :: binary()
+                   }.
 
 callback_mode() -> [state_functions, state_enter].
 
@@ -177,7 +195,7 @@ init([PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0]) ->
     {ok, idle, State, [{next_event, internal, do_connect}]}.
 
 %% idle state
--spec idle(gen_statem:event_type(), _EventContent, #state{}) ->
+-spec idle(gen_statem:event_type(), _EventContent, state()) ->
           gen_statem:event_handler_result(statem()).
 idle(enter, _OldState, _State) ->
     keep_state_and_data;
@@ -194,7 +212,7 @@ idle(_EventType, _Event, _State) ->
     keep_state_and_data.
 
 %% connecting state
--spec connecting(gen_statem:event_type(), _EventContent, #state{}) ->
+-spec connecting(gen_statem:event_type(), _EventContent, state()) ->
           gen_statem:event_handler_result(statem()).
 connecting(enter, _OldState, _State) ->
     keep_state_and_data;
@@ -219,11 +237,11 @@ connecting(cast, {send, _Message}, _State) ->
     {keep_state_and_data, [postpone]}.
 
 %% connected state
--spec connected(gen_statem:event_type(), _EventContent, #state{}) ->
+-spec connected(gen_statem:event_type(), _EventContent, state()) ->
           gen_statem:event_handler_result(statem()).
 connected(enter, _OldState, State0) ->
-    resend_sent_requests(State0),
-    State = maybe_send_to_pulsar(State0),
+    State1 = resend_sent_requests(State0),
+    State = maybe_send_to_pulsar(State1),
     {keep_state, State};
 connected(_, do_connect, _State) ->
     keep_state_and_data;
@@ -302,7 +320,7 @@ parse({Cmd, LastBin}, State) ->
     end,
     parse(pulsar_protocol_frame:parse(LastBin), State2).
 
--spec handle_response(_EventContent, #state{}) ->
+-spec handle_response(_EventContent, state()) ->
           gen_statem:event_handler_result(statem()).
 handle_response({connected, _ConnectedData}, State = #state{
         sock = Sock,
@@ -357,6 +375,7 @@ handle_response(Msg, _State) ->
     log_error("Receive unknown message:~p~n", [Msg]),
     keep_state_and_data.
 
+-spec send_batch_payload([{timestamp(), [pulsar:message()]}], sequence_id(), state()) -> ok.
 send_batch_payload(Messages, SequenceId, #state{
             partitiontopic = Topic,
             producer_id = ProducerId,
@@ -432,6 +451,7 @@ maybe_send_to_pulsar(State0) ->
             State0;
         false ->
             {NewQ, QAckRef, Items} = replayq:pop(Q, #{count_limit => BatchSize}),
+            State1 = State0#state{opts = ProducerOpts0#{replayq := NewQ}},
             RetentionPeriod = maps:get(retention_period, ProducerOpts0, infinity),
             Now = now_ts(),
             {Froms, Messages} =
@@ -439,19 +459,25 @@ maybe_send_to_pulsar(State0) ->
                   fun(?Q_ITEM(From, Timestamp, Msgs), {Froms, AccMsgs}) ->
                     case {From, is_batch_expired(Timestamp, RetentionPeriod, Now)} of
                       {_, true} -> {Froms, AccMsgs};
-                      {undefined, false} -> {Froms, Msgs ++ AccMsgs};
-                      {From, false} -> {[From | Froms], Msgs ++ AccMsgs}
+                      {undefined, false} -> {Froms, [{Timestamp, Msgs} | AccMsgs]};
+                      {From, false} -> {[From | Froms], [{Timestamp, Msgs} | AccMsgs]}
                     end
                   end,
                   {[], []},
                   Items),
-            send_batch_payload(Messages, State0#state.sequence_id, State0),
-            Requests = Requests0#{SequenceId => {QAckRef, Froms, Messages}},
-            State1 = State0#state{ opts = ProducerOpts0#{replayq := NewQ}
-                                 , requests = Requests
-                                 },
-            State = next_sequence_id(State1),
-            maybe_send_to_pulsar(State)
+            case Messages of
+                [] ->
+                    %% all expired, immediately ack replayq batch and continue
+                    ok = replayq:ack(Q, QAckRef),
+                    maybe_send_to_pulsar(State1);
+                [_ | _] ->
+                    send_batch_payload([Msg || {_Timestamp, Msgs} <- Messages, Msg <- Msgs],
+                                       State1#state.sequence_id, State0),
+                    Requests = Requests0#{SequenceId => {QAckRef, Froms, Messages}},
+                    State2 = State1#state{requests = Requests},
+                    State = next_sequence_id(State2),
+                    maybe_send_to_pulsar(State)
+            end
     end.
 
 collect_send_requests(Acc, Limit) ->
@@ -475,13 +501,33 @@ try_close_socket(#state{sock = Sock, opts = Opts}) ->
     catch pulsar_socket:close(Sock, Opts),
     ok.
 
-resend_sent_requests(State = #state{requests = Requests}) ->
-    lists:foreach(
-      fun({SequenceId, {_QAckRef, _Froms, Messages}}) ->
-        send_batch_payload(Messages, SequenceId, State)
-      end,
-      maps:to_list(Requests)),
-    ok.
+resend_sent_requests(State) ->
+    #state{ requests = Requests0
+          , opts = ProducerOpts = #{replayq := Q}
+          } = State,
+    Now = now_ts(),
+    RetentionPeriod = maps:get(retention_period, ProducerOpts, infinity),
+    Requests =
+        maps:fold(
+          fun(SequenceId, {QAckRef, Froms, Messages0}, Acc) ->
+            Messages = lists:filter(
+                         fun({Ts, _Msgs}) ->
+                                 not is_batch_expired(Ts, RetentionPeriod, Now)
+                         end,
+                         Messages0),
+            case Messages of
+                [] ->
+                    ok = replayq:ack(Q, QAckRef),
+                    Acc;
+                [_ | _] ->
+                    send_batch_payload([Msg || {_Ts, Msgs} <- Messages, Msg <- Msgs],
+                                       SequenceId, State),
+                    Acc#{SequenceId => {QAckRef, Froms, Messages}}
+            end
+          end,
+          #{},
+          Requests0),
+    State#state{requests = Requests}.
 
 is_batch_expired(_Timestamp, infinity = _RetentionPeriod, _Now) ->
     false;

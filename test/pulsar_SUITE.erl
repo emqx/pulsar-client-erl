@@ -336,6 +336,9 @@ t_pulsar_drop_expired_batch(Config) ->
     ct:pal("started consumer"),
     RetentionPeriodMS = 1_000,
     ProducerOpts = #{
+        %% to speed up the test a bit
+        send_timeout => 5_000,
+        connnect_timeout => 5_000,
         batch_size => ?BATCH_SIZE,
         strategy => random,
         callback => {?MODULE, producer_callback, []},
@@ -356,11 +359,18 @@ t_pulsar_drop_expired_batch(Config) ->
     pulsar:send(Producers,
                 [#{key => <<"k">>, value => integer_to_binary(SeqNo)}
                  || SeqNo <- lists:seq(1, 150)]),
+    ct:sleep(RetentionPeriodMS * 2),
 
     ct:pal("reestablishing connection with pulsar..."),
     switch_proxy(on, ProxyHost, ProxyPort),
     ct:pal("connection reestablished"),
-    ct:sleep(StabilizationPeriod + timer:seconds(15)),
+    ct:sleep(StabilizationPeriod * 2),
+
+    ct:pal("waiting for producer to be connected again"),
+    {_, ProducerPid} = pulsar_producers:pick_producer(Producers,
+                                                      [#{key => <<"k">>, value => <<>>}]),
+    wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
+    ct:pal("producer connected"),
 
     receive
         {pulsar_message, _Topic, _Receipt, Payloads} ->
@@ -370,13 +380,14 @@ t_pulsar_drop_expired_batch(Config) ->
             ok
     end,
 
+    ct:pal("producing message that should be received now"),
     pulsar:send(Producers, [#{key => <<"k">>, value => <<"should receive">>}]),
 
     receive
         {pulsar_message, _Topic1, _Receipt1, [<<"should receive">>]} ->
             ok
     after
-        5_000 ->
+        15_000 ->
             error(timeout)
     end,
 
@@ -520,6 +531,25 @@ wait_until_consumed(ExpectedPayloads0, Timeout) ->
                 Timeout ->
                     error({missing_messages, sets:to_list(ExpectedPayloads0)})
             end
+    end.
+
+wait_for_state(_Pid, DesiredState, Retries, _Sleep) when Retries =< 0 ->
+    error({didnt_reach_desired_state, DesiredState});
+wait_for_state(Pid, DesiredState, Retries, Sleep) ->
+    %% the producer may hang for ~ 60 s on the `pulsar_socket:send'
+    %% call, which has a `send_timeout' on the socket of 60 s by
+    %% default.  we set it to 10 s in the test to make it quicker.
+    Timeout = timer:seconds(11),
+    try sys:get_state(Pid, Timeout) of
+        {DesiredState, _} ->
+            ok;
+        _ ->
+            ct:sleep(Sleep),
+            wait_for_state(Pid, DesiredState, Retries - 1, Sleep)
+    catch
+        exit:{timeout, _} ->
+            ct:sleep(Sleep),
+            wait_for_state(Pid, DesiredState, Retries - 1, Sleep)
     end.
 
 %%----------------------

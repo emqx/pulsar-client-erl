@@ -36,15 +36,46 @@ all() ->
     , t_pulsar_basic_auth
     , t_pulsar_token_auth
     , t_pulsar
-    , t_pulsar_replayq
+    , {group, resilience}
+    ].
+
+resilience_tests() ->
+    [ t_pulsar_replayq
     , t_pulsar_replayq_producer_restart
     , t_pulsar_drop_expired_batch
+    ].
+
+groups() ->
+    [ {resilience, [ {group, timeout}
+                   , {group, down}
+                   ]}
+    , {timeout, resilience_tests()}
+    , {down, resilience_tests()}
     ].
 
 init_per_suite(Cfg) ->
     Cfg.
 
 end_per_suite(_Args) ->
+    ok.
+
+init_per_group(timeout, Config) ->
+    [ {failure_type, timeout}
+    | Config];
+init_per_group(down, Config) ->
+    [ {failure_type, down}
+    | Config];
+init_per_group(_Group, Config) ->
+    Config.
+
+end_per_group(_Group, Config) ->
+    ProxyHost = ?config(proxy_host, Config),
+    ProxyPort = ?config(proxy_port, Config),
+    FailureType = ?config(failure_type, Config),
+    case FailureType of
+        undefined -> ok;
+        FailureType -> catch heal_failure(FailureType, ProxyHost, ProxyPort)
+    end,
     ok.
 
 init_per_testcase(t_pulsar_basic_auth, Config) ->
@@ -318,6 +349,7 @@ t_pulsar_drop_expired_batch(Config) ->
     PulsarHost = ?config(fake_pulsar_host, Config),
     ProxyHost = ?config(proxy_host, Config),
     ProxyPort = ?config(proxy_port, Config),
+    FailureType = ?config(failure_type, Config),
     StabilizationPeriod = timer:seconds(15),
     {ok, _} = application:ensure_all_started(pulsar),
 
@@ -354,7 +386,7 @@ t_pulsar_drop_expired_batch(Config) ->
     ct:pal("started producer"),
 
     ct:pal("cutting connection with pulsar..."),
-    switch_proxy(off, ProxyHost, ProxyPort),
+    enable_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection cut"),
     ct:sleep(StabilizationPeriod),
 
@@ -365,7 +397,7 @@ t_pulsar_drop_expired_batch(Config) ->
     ct:sleep(RetentionPeriodMS * 2),
 
     ct:pal("reestablishing connection with pulsar..."),
-    switch_proxy(on, ProxyHost, ProxyPort),
+    heal_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection reestablished"),
     ct:sleep(StabilizationPeriod * 2),
 
@@ -400,6 +432,7 @@ t_pulsar_replayq(Config) ->
     PulsarHost = ?config(fake_pulsar_host, Config),
     ProxyHost = ?config(proxy_host, Config),
     ProxyPort = ?config(proxy_port, Config),
+    FailureType = ?config(failure_type, Config),
     StabilizationPeriod = timer:seconds(15),
     {ok, _} = application:ensure_all_started(pulsar),
 
@@ -456,7 +489,7 @@ t_pulsar_replayq(Config) ->
 
     %% cut the connection and produce more messages
     ct:pal("cutting connection with pulsar..."),
-    switch_proxy(off, ProxyHost, ProxyPort),
+    enable_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection cut"),
 
     timer:sleep(StabilizationPeriod),
@@ -465,7 +498,7 @@ t_pulsar_replayq(Config) ->
 
     %% reestablish connection and produce some more
     ct:pal("reestablishing connection with pulsar..."),
-    switch_proxy(on, ProxyHost, ProxyPort),
+    heal_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection reestablished"),
     timer:sleep(StabilizationPeriod),
     wait_until_produced(600, 100 * ProduceInterval + 100),
@@ -495,6 +528,7 @@ t_pulsar_replayq_producer_restart(Config) ->
     PulsarHost = ?config(fake_pulsar_host, Config),
     ProxyHost = ?config(proxy_host, Config),
     ProxyPort = ?config(proxy_port, Config),
+    FailureType = ?config(failure_type, Config),
     StabilizationPeriod = timer:seconds(15),
     {ok, _} = application:ensure_all_started(pulsar),
 
@@ -559,7 +593,7 @@ t_pulsar_replayq_producer_restart(Config) ->
 
     %% cut the connection and produce more messages
     ct:pal("cutting connection with pulsar..."),
-    switch_proxy(off, ProxyHost, ProxyPort),
+    enable_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection cut"),
 
     timer:sleep(StabilizationPeriod),
@@ -591,7 +625,7 @@ t_pulsar_replayq_producer_restart(Config) ->
 
     %% reestablish connection and wait until producer catches up
     ct:pal("reestablishing connection with pulsar..."),
-    switch_proxy(on, ProxyHost, ProxyPort),
+    heal_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection reestablished"),
     timer:sleep(StabilizationPeriod),
 
@@ -615,6 +649,18 @@ populate_proxy(ProxyHost, ProxyPort, FakePulsarPort, PulsarUrl) ->
                                               [{body_format, binary}]),
     "pulsar://" ++ ProxyHost ++ ":" ++ integer_to_list(FakePulsarPort).
 
+enable_failure(FailureType, ProxyHost, ProxyPort) ->
+    case FailureType of
+        down -> switch_proxy(off, ProxyHost, ProxyPort);
+        timeout -> timeout_proxy(on, ProxyHost, ProxyPort)
+    end.
+
+heal_failure(FailureType, ProxyHost, ProxyPort) ->
+    case FailureType of
+        down -> switch_proxy(on, ProxyHost, ProxyPort);
+        timeout -> timeout_proxy(off, ProxyHost, ProxyPort)
+    end.
+
 switch_proxy(Switch, ProxyHost, ProxyPort) ->
     Url = "http://" ++ ProxyHost ++ ":" ++ integer_to_list(ProxyPort) ++ "/proxies/pulsar",
     Body = case Switch of
@@ -622,6 +668,19 @@ switch_proxy(Switch, ProxyHost, ProxyPort) ->
                on  -> <<"{\"enabled\":true}">>
            end,
     {ok, {{_, 200, _}, _, _}} = httpc:request(post, {Url, [], "application/json", Body}, [],
+                                              [{body_format, binary}]).
+
+timeout_proxy(on, ProxyHost, ProxyPort) ->
+    Url = "http://" ++ ProxyHost ++ ":" ++ integer_to_list(ProxyPort) ++ "/proxies/pulsar/toxics",
+    Body = <<"{\"name\":\"timeout\",\"type\":\"timeout\","
+             "\"stream\":\"upstream\",\"toxicity\":1.0,"
+             "\"attributes\":{\"timeout\":0}}">>,
+    {ok, {{_, 200, _}, _, _}} = httpc:request(post, {Url, [], "application/json", Body}, [],
+                                              [{body_format, binary}]);
+timeout_proxy(off, ProxyHost, ProxyPort) ->
+    Url = "http://" ++ ProxyHost ++ ":" ++ integer_to_list(ProxyPort) ++ "/proxies/pulsar/toxics/timeout",
+    Body = <<>>,
+    {ok, {{_, 204, _}, _, _}} = httpc:request(delete, {Url, [], "application/json", Body}, [],
                                               [{body_format, binary}]).
 
 wait_until_produced(ExpectedSeqNo, Timeout) ->

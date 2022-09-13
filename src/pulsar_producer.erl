@@ -269,11 +269,11 @@ connected(_EventType, ping, State = #state{sock = Sock, opts = Opts}) ->
     pulsar_socket:ping(Sock, Opts),
     {keep_state, State};
 connected({call, From}, {send, Message}, State = #state{sequence_id = SequenceId, requests = Reqs}) ->
-    send_batch_payload(Message, State#state.sequence_id, State),
+    send_batch_payload(Message, SequenceId, State),
     {keep_state, next_sequence_id(State#state{requests = maps:put(SequenceId, From, Reqs)})};
 connected(cast, {send, Message}, State = #state{batch_size = BatchSize, sequence_id = SequenceId, requests = Reqs}) ->
     BatchMessage = Message ++ pulsar_utils:collect_send_calls(BatchSize),
-    send_batch_payload(BatchMessage, State#state.sequence_id, State),
+    send_batch_payload(BatchMessage, SequenceId, State),
     {keep_state, next_sequence_id(State#state{requests = maps:put(SequenceId, {SequenceId, length(BatchMessage)}, Reqs)})};
 connected(_EventType, EventContent, State) ->
     handle_response(EventContent, State).

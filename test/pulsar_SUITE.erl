@@ -74,7 +74,7 @@ end_per_group(_Group, Config) ->
     FailureType = ?config(failure_type, Config),
     case FailureType of
         undefined -> ok;
-        FailureType -> catch heal_failure(FailureType, ProxyHost, ProxyPort)
+        FailureType -> catch pulsar_test_utils:heal_failure(FailureType, ProxyHost, ProxyPort)
     end,
     ok.
 
@@ -98,7 +98,7 @@ init_per_testcase(TestCase, Config)
     UpstreamHost = os:getenv("PROXY_PULSAR_HOST", PulsarHost),
     %% when testing locally; externally exposed port for container
     FakePulsarPort = list_to_integer(os:getenv("PROXY_PULSAR_PORT", "6650")),
-    FakePulsarHost = populate_proxy(ProxyHost, ProxyPort, FakePulsarPort, UpstreamHost),
+    FakePulsarHost = pulsar_test_utils:populate_proxy(ProxyHost, ProxyPort, FakePulsarPort, UpstreamHost),
     %% since the broker reports a proxy URL to itself, we need to
     %% patch that so we always use toxiproxy.
     ok = meck:new(pulsar_client, [non_strict, passthrough, no_history]),
@@ -386,7 +386,7 @@ t_pulsar_drop_expired_batch(Config) ->
     ct:pal("started producer"),
 
     ct:pal("cutting connection with pulsar..."),
-    enable_failure(FailureType, ProxyHost, ProxyPort),
+    pulsar_test_utils:enable_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection cut"),
     ct:sleep(StabilizationPeriod),
 
@@ -397,14 +397,14 @@ t_pulsar_drop_expired_batch(Config) ->
     ct:sleep(RetentionPeriodMS * 2),
 
     ct:pal("reestablishing connection with pulsar..."),
-    heal_failure(FailureType, ProxyHost, ProxyPort),
+    pulsar_test_utils:heal_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection reestablished"),
     ct:sleep(StabilizationPeriod * 2),
 
     ct:pal("waiting for producer to be connected again"),
     {_, ProducerPid} = pulsar_producers:pick_producer(Producers,
                                                       [#{key => <<"k">>, value => <<>>}]),
-    wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
+    pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
     ct:pal("producer connected"),
 
     receive
@@ -489,7 +489,7 @@ t_pulsar_replayq(Config) ->
 
     %% cut the connection and produce more messages
     ct:pal("cutting connection with pulsar..."),
-    enable_failure(FailureType, ProxyHost, ProxyPort),
+    pulsar_test_utils:enable_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection cut"),
 
     timer:sleep(StabilizationPeriod),
@@ -498,7 +498,7 @@ t_pulsar_replayq(Config) ->
 
     %% reestablish connection and produce some more
     ct:pal("reestablishing connection with pulsar..."),
-    heal_failure(FailureType, ProxyHost, ProxyPort),
+    pulsar_test_utils:heal_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection reestablished"),
     timer:sleep(StabilizationPeriod),
     wait_until_produced(600, 100 * ProduceInterval + 100),
@@ -565,7 +565,7 @@ t_pulsar_replayq_producer_restart(Config) ->
     ct:pal("started producer"),
     {_, ProducerPid} = pulsar_producers:pick_producer(Producers,
                                                       [#{key => <<"k">>, value => <<"v">>}]),
-    wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
+    pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
     ct:pal("producer connected"),
 
     TestPid = self(),
@@ -593,7 +593,7 @@ t_pulsar_replayq_producer_restart(Config) ->
 
     %% cut the connection and produce more messages
     ct:pal("cutting connection with pulsar..."),
-    enable_failure(FailureType, ProxyHost, ProxyPort),
+    pulsar_test_utils:enable_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection cut"),
 
     timer:sleep(StabilizationPeriod),
@@ -625,7 +625,7 @@ t_pulsar_replayq_producer_restart(Config) ->
 
     %% reestablish connection and wait until producer catches up
     ct:pal("reestablishing connection with pulsar..."),
-    heal_failure(FailureType, ProxyHost, ProxyPort),
+    pulsar_test_utils:heal_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection reestablished"),
     timer:sleep(StabilizationPeriod),
 
@@ -636,52 +636,6 @@ t_pulsar_replayq_producer_restart(Config) ->
     ct:pal("all ~b expected messages were received", [TotalProduced]),
 
     ok.
-
-populate_proxy(ProxyHost, ProxyPort, FakePulsarPort, PulsarUrl) ->
-    {_, {PulsarHost, PulsarPort}} = pulsar_utils:parse_url(PulsarUrl),
-    PulsarHostPort = PulsarHost ++ ":" ++ integer_to_list(PulsarPort),
-    Url = "http://" ++ ProxyHost ++ ":" ++ integer_to_list(ProxyPort) ++ "/populate",
-
-    Body = iolist_to_binary(io_lib:format(<<"[{\"name\":\"pulsar\",\"listen\":\"0.0.0.0:~b\","
-                                            "\"upstream\":~p,\"enabled\":true}]">>,
-                                          [PulsarPort, PulsarHostPort])),
-    {ok, {{_, 201, _}, _, _}} = httpc:request(post, {Url, [], "application/json", Body}, [],
-                                              [{body_format, binary}]),
-    "pulsar://" ++ ProxyHost ++ ":" ++ integer_to_list(FakePulsarPort).
-
-enable_failure(FailureType, ProxyHost, ProxyPort) ->
-    case FailureType of
-        down -> switch_proxy(off, ProxyHost, ProxyPort);
-        timeout -> timeout_proxy(on, ProxyHost, ProxyPort)
-    end.
-
-heal_failure(FailureType, ProxyHost, ProxyPort) ->
-    case FailureType of
-        down -> switch_proxy(on, ProxyHost, ProxyPort);
-        timeout -> timeout_proxy(off, ProxyHost, ProxyPort)
-    end.
-
-switch_proxy(Switch, ProxyHost, ProxyPort) ->
-    Url = "http://" ++ ProxyHost ++ ":" ++ integer_to_list(ProxyPort) ++ "/proxies/pulsar",
-    Body = case Switch of
-               off -> <<"{\"enabled\":false}">>;
-               on  -> <<"{\"enabled\":true}">>
-           end,
-    {ok, {{_, 200, _}, _, _}} = httpc:request(post, {Url, [], "application/json", Body}, [],
-                                              [{body_format, binary}]).
-
-timeout_proxy(on, ProxyHost, ProxyPort) ->
-    Url = "http://" ++ ProxyHost ++ ":" ++ integer_to_list(ProxyPort) ++ "/proxies/pulsar/toxics",
-    Body = <<"{\"name\":\"timeout\",\"type\":\"timeout\","
-             "\"stream\":\"upstream\",\"toxicity\":1.0,"
-             "\"attributes\":{\"timeout\":0}}">>,
-    {ok, {{_, 200, _}, _, _}} = httpc:request(post, {Url, [], "application/json", Body}, [],
-                                              [{body_format, binary}]);
-timeout_proxy(off, ProxyHost, ProxyPort) ->
-    Url = "http://" ++ ProxyHost ++ ":" ++ integer_to_list(ProxyPort) ++ "/proxies/pulsar/toxics/timeout",
-    Body = <<>>,
-    {ok, {{_, 204, _}, _, _}} = httpc:request(delete, {Url, [], "application/json", Body}, [],
-                                              [{body_format, binary}]).
 
 wait_until_produced(ExpectedSeqNo, Timeout) ->
     receive
@@ -705,25 +659,6 @@ wait_until_consumed(ExpectedPayloads0, Timeout) ->
                 Timeout ->
                     error({missing_messages, lists:sort(sets:to_list(ExpectedPayloads0))})
             end
-    end.
-
-wait_for_state(_Pid, DesiredState, Retries, _Sleep) when Retries =< 0 ->
-    error({didnt_reach_desired_state, DesiredState});
-wait_for_state(Pid, DesiredState, Retries, Sleep) ->
-    %% the producer may hang for ~ 60 s on the `pulsar_socket:send'
-    %% call, which has a `send_timeout' on the socket of 60 s by
-    %% default.  we set it to 10 s in the test to make it quicker.
-    Timeout = timer:seconds(11),
-    try sys:get_state(Pid, Timeout) of
-        {DesiredState, _} ->
-            ok;
-        _ ->
-            ct:sleep(Sleep),
-            wait_for_state(Pid, DesiredState, Retries - 1, Sleep)
-    catch
-        exit:{timeout, _} ->
-            ct:sleep(Sleep),
-            wait_for_state(Pid, DesiredState, Retries - 1, Sleep)
     end.
 
 %%----------------------

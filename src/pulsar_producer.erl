@@ -39,6 +39,11 @@
         , queue_item_marshaller/1
         ]).
 
+%% for testing only
+-ifdef(TEST).
+-export([code_change_requests/2]).
+-endif.
+
 -type statem() :: idle | connecting | connected.
 -type sequence_id() :: integer().
 -type send_receipt() :: #{ sequence_id := sequence_id()
@@ -298,11 +303,17 @@ do_connect(State = #state{opts = Opts, broker_server = {Host, Port}}) ->
              [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]}
     end.
 
-code_change({down, _Vsn}, State, Data0, _Extra) ->
-    Data = ensure_replayq_absent(Data0),
+code_change({down, _Vsn} = Direction, State, Data0, _Extra) ->
+    Data1 = ensure_replayq_absent(Data0),
+    Requests0 = Data0#state.requests,
+    Requests = code_change_requests(Direction, Requests0),
+    Data = Data1#state{requests = Requests},
     {ok, State, Data};
-code_change(_Vsn, State, Data0, _Extra) ->
-    Data = ensure_replayq_present(Data0),
+code_change(_Vsn = Direction, State, Data0, _Extra) ->
+    Data1 = ensure_replayq_present(Data0),
+    Requests0 = Data0#state.requests,
+    Requests = code_change_requests(Direction, Requests0),
+    Data = Data1#state{requests = Requests},
     {ok, State, Data}.
 
 terminate(_Reason, _StateName, _State) ->
@@ -355,6 +366,12 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
         %% SequenceId ->
         %%     _ = invoke_callback(Callback, Resp),
         %%     {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
+
+        %% State transferred from hot-upgrade; it doesn't have enough
+        %% info to migrate to the new format.
+        {SequenceId, BatchLen} ->
+            _ = invoke_callback(Callback, Resp, BatchLen),
+            {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
         {QAckRef, Froms, _Messages} ->
             ok = replayq:ack(Q, QAckRef),
             lists:foreach(
@@ -510,20 +527,25 @@ resend_sent_requests(State) ->
     Requests =
         maps:fold(
           fun(SequenceId, {QAckRef, Froms, Messages0}, Acc) ->
-            Messages = lists:filter(
-                         fun({Ts, _Msgs}) ->
-                                 not is_batch_expired(Ts, RetentionPeriod, Now)
-                         end,
-                         Messages0),
-            case Messages of
-                [] ->
-                    ok = replayq:ack(Q, QAckRef),
-                    Acc;
-                [_ | _] ->
-                    send_batch_payload([Msg || {_Ts, Msgs} <- Messages, Msg <- Msgs],
-                                       SequenceId, State),
-                    Acc#{SequenceId => {QAckRef, Froms, Messages}}
-            end
+               Messages = lists:filter(
+                            fun({Ts, _Msgs}) ->
+                              not is_batch_expired(Ts, RetentionPeriod, Now)
+                            end,
+                            Messages0),
+               case Messages of
+                   [] ->
+                       ok = replayq:ack(Q, QAckRef),
+                       Acc;
+                   [_ | _] ->
+                       send_batch_payload([Msg || {_Ts, Msgs} <- Messages, Msg <- Msgs],
+                                          SequenceId, State),
+                       Acc#{SequenceId => {QAckRef, Froms, Messages}}
+               end;
+             (SequenceId, Req = {_SequenceId1, _BatchLen}, Acc) ->
+               %% this clause is when one hot-upgrades from a version
+               %% without replayq.  we don't have enough info to
+               %% resend nor expire.
+               Acc#{SequenceId => Req}
           end,
           #{},
           Requests0),
@@ -557,3 +579,21 @@ ensure_replayq_absent(Data = #state{opts = ProducerOpts0}) ->
             ProducerOpts0
     end,
     Data#state{opts = ProducerOpts}.
+
+code_change_requests({down, _Vsn}, Requests) ->
+    maps:map(
+      fun(SequenceId, {_QAckRef, _Froms, TSMsgs}) ->
+        lists:foldl(
+         fun({_Timestamp, Messages}, {_SequenceId, BatchLen}) ->
+           {SequenceId, BatchLen + length(Messages)}
+         end,
+         {SequenceId, 0},
+         TSMsgs)
+      end,
+      Requests);
+code_change_requests(_Vsn, Requests) ->
+    %% The upgrade back from the old version is lossy; we can't
+    %% produce an `replayq:ack_ref', the messages themselves, or the
+    %% `Froms'...  Have to handle this case when resending or
+    %% receiving a response.
+    Requests.

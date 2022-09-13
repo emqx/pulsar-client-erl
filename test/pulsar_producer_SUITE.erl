@@ -30,6 +30,7 @@
 
 all() ->
     [ t_code_change_replayq
+    , t_code_change_requests
     ].
 
 init_per_suite(Cfg) ->
@@ -136,5 +137,31 @@ t_code_change_replayq(Config) ->
     #{replayq := Q2} = Opts2,
     %% new replayq is mem-only, since we can't configure it.
     ?assert(replayq:is_mem_only(Q2)),
+
+    ok.
+
+t_code_change_requests(_Config) ->
+    %% new format:
+    %% {replayq:ack_ref(), [gen_statem:from()], [{timestamp(), [pulsar:message()]}]}
+    SequenceId = 1,
+    AckRef = {1,1},
+    Froms = [{self(), erlang:make_ref()}],
+    Timestamp0 = erlang:system_time(millisecond),
+    Messages0 = [#{key => <<"k1">>, value => <<"v1">>},
+                 #{key => <<"k2">>, value => <<"v2">>}],
+    Timestamp1 = erlang:system_time(millisecond),
+    Messages1 = [#{key => <<"k3">>, value => <<"v3">>}],
+    Request = {AckRef, Froms, [{Timestamp0, Messages0}, {Timestamp1, Messages1}]},
+    Requests0 = #{SequenceId => Request},
+
+    Requests1 = pulsar_producer:code_change_requests({down, vsn}, Requests0),
+    %% old format
+    ExpectedBatchLen = length(Messages0 ++ Messages1),
+    ?assertEqual(#{SequenceId => {SequenceId, ExpectedBatchLen}}, Requests1),
+
+    Requests2 = pulsar_producer:code_change_requests(vsn, Requests1),
+    %% new format again, but we don't have timestamp nor "from"
+    %% information, so we keep that information as-is.
+    ?assertEqual(#{SequenceId => {SequenceId, ExpectedBatchLen}}, Requests2),
 
     ok.

@@ -173,7 +173,7 @@ init([PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0]) ->
             false ->
                 #{mem_only => true};
             BaseDir ->
-                Dir = filename:join([BaseDir, PartitionTopic, integer_to_list(ProducerID)]),
+                Dir = filename:join([BaseDir, PartitionTopic]),
                 SegBytes = maps:get(replayq_seg_bytes, ProducerOpts0, ?DEFAULT_REPLAYQ_SEG_BYTES),
                 Offload = maps:get(replayq_offload_mode, ProducerOpts0, false),
                 #{dir => Dir, seg_bytes => SegBytes, offload => Offload}

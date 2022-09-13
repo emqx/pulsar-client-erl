@@ -57,6 +57,7 @@
                    , replayq_max_total_bytes => pos_integer()
                    , replayq_seg_bytes => pos_integer()
                    , replayq_offload_mode => boolean()
+                   , max_batch_bytes => pos_integer()
                    , producer_name => atom()
                    , callback => undefined | mfa() | fun((map()) -> ok)
                    , batch_size => non_neg_integer()
@@ -73,6 +74,7 @@
 
 -define(DEFAULT_REPLAYQ_SEG_BYTES, 10 * 1024 * 1024).
 -define(DEFAULT_REPLAYQ_LIMIT, 2_000_000_000).
+-define(DEFAULT_MAX_BATCH_BYTES, 1_000_000).
 -define(Q_ITEM(From, Ts, Messages), {From, Ts, Messages}).
 -define(SEND_REQ(From, Messages), {send, From, Messages}).
 
@@ -179,13 +181,17 @@ init([PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0]) ->
                 #{dir => Dir, seg_bytes => SegBytes, offload => Offload}
         end,
     MaxTotalBytes = maps:get(replayq_max_total_bytes, ProducerOpts0, ?DEFAULT_REPLAYQ_LIMIT),
+    MaxBatchBytes = maps:get(max_batch_bytes, ProducerOpts0, ?DEFAULT_MAX_BATCH_BYTES),
     ReplayqCfg =
         ReplayqCfg0#{ sizer => fun ?MODULE:queue_item_sizer/1
                     , marshaller => fun ?MODULE:queue_item_marshaller/1
                     , max_total_bytes => MaxTotalBytes
                     },
     Q = replayq:open(ReplayqCfg),
-    ProducerOpts = maps:put(replayq, Q, ProducerOpts0),
+    ProducerOpts =
+        ProducerOpts0#{ replayq => Q
+                      , max_batch_bytes => MaxBatchBytes
+                      },
     State = #state{
         partitiontopic = PartitionTopic,
         producer_id = ProducerID,
@@ -475,7 +481,10 @@ maybe_send_to_pulsar(State0) ->
         true ->
             State0;
         false ->
-            {NewQ, QAckRef, Items} = replayq:pop(Q, #{count_limit => BatchSize}),
+            MaxBatchBytes = maps:get(max_batch_bytes, ProducerOpts0, ?DEFAULT_MAX_BATCH_BYTES),
+            {NewQ, QAckRef, Items} = replayq:pop(Q, #{ count_limit => BatchSize
+                                                     , bytes_limit => MaxBatchBytes
+                                                     }),
             State1 = State0#state{opts = ProducerOpts0#{replayq := NewQ}},
             RetentionPeriod = maps:get(retention_period, ProducerOpts0, infinity),
             Now = now_ts(),

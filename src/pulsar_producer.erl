@@ -372,10 +372,18 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
         {SequenceId, BatchLen} ->
             _ = invoke_callback(Callback, Resp, BatchLen),
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
-        {QAckRef, Froms, _Messages} ->
+        {QAckRef, Froms, Messages} ->
             ok = replayq:ack(Q, QAckRef),
+            BatchLen =
+                lists:foldl(
+                  fun({_TS, Msgs}, Acc) ->
+                    Acc + length(Msgs)
+                  end,
+                  0,
+                  Messages),
             lists:foreach(
               fun(undefined) ->
+                   _ = invoke_callback(Callback, Resp, BatchLen),
                    ok;
                  (From) ->
                    gen_statem:reply(From, {ok, Resp})
@@ -474,10 +482,9 @@ maybe_send_to_pulsar(State0) ->
             {Froms, Messages} =
                 lists:foldr(
                   fun(?Q_ITEM(From, Timestamp, Msgs), {Froms, AccMsgs}) ->
-                    case {From, is_batch_expired(Timestamp, RetentionPeriod, Now)} of
-                      {_, true} -> {Froms, AccMsgs};
-                      {undefined, false} -> {Froms, [{Timestamp, Msgs} | AccMsgs]};
-                      {From, false} -> {[From | Froms], [{Timestamp, Msgs} | AccMsgs]}
+                    case is_batch_expired(Timestamp, RetentionPeriod, Now) of
+                      true -> {Froms, AccMsgs};
+                      false -> {[From | Froms], [{Timestamp, Msgs} | AccMsgs]}
                     end
                   end,
                   {[], []},

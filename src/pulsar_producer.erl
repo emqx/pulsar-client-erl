@@ -448,8 +448,8 @@ invoke_callback(Callback, Resp, BatchLen) when is_function(Callback, 1) ->
         Callback(Resp)
       end,  lists:seq(1, BatchLen)).
 
-queue_item_sizer(?Q_ITEM(_CallId, _Ts, Batch)) ->
-    length(Batch).
+queue_item_sizer(?Q_ITEM(_CallId, _Ts, _Batch) = Item) ->
+    size(queue_item_marshaller(Item)).
 
 queue_item_marshaller(?Q_ITEM(_, _, _) = I) ->
   term_to_binary(I);

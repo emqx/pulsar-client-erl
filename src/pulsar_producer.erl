@@ -555,7 +555,7 @@ maybe_send_to_pulsar(State0) ->
     end.
 
 collect_send_requests(Acc, Limit) ->
-    Count = 0,
+    Count = length(Acc),
     do_collect_send_requests(Acc, Count, Limit).
 
 do_collect_send_requests(Acc, Count, Limit) when Count >= Limit ->

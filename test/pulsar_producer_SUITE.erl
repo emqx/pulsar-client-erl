@@ -89,18 +89,16 @@ t_code_change_replayq(Config) ->
     {_StatemState0, State0} = sys:get_state(ProducerPid),
 
     ?assert(is_map(State0)),
-    % replayq in opts
-    Opts0 = maps:get(opts, State0),
     ?assertMatch(
        #{ replayq := #{ config := _
                       , sizer := _
                       , stats := _
                       }
-        , retention_period := 1_000
         },
-       Opts0),
-    #{replayq := Q} = Opts0,
+       State0),
+    #{replayq := Q, opts := Opts0} = State0,
     ?assertNot(replayq:is_mem_only(Q)),
+    ?assertMatch(#{retention_period := 1_000}, Opts0),
     OriginalSize = map_size(State0),
     %% FIXME: another way to check if open?
     #{w_cur := #{fd := {_, _, #{pid := ReplayQPID}}}} = Q,
@@ -111,8 +109,9 @@ t_code_change_replayq(Config) ->
     %% ok = sys:resume(ProducerPid),
     {_StatemState1, State1} = sys:get_state(ProducerPid),
     ?assertEqual(state, element(1, State1)),
-    %% - 1 for the record name at 1st position.
-    ?assertEqual(OriginalSize, tuple_size(State1) - 1),
+    %% state record has 1 element more (the record name), but also has
+    %% one field less (`replayq').
+    ?assertEqual(OriginalSize, tuple_size(State1)),
     Opts1 = element(9, State1),
     ?assertNot(maps:is_key(replayq, Opts1)),
     ?assertNot(maps:is_key(retention_period, Opts1)),
@@ -126,17 +125,16 @@ t_code_change_replayq(Config) ->
     {_StatemState2, State2} = sys:get_state(ProducerPid),
     ?assert(is_map(State2)),
     ?assertEqual(OriginalSize, map_size(State2)),
-    Opts2 = maps:get(opts, State2),
 
     ?assertMatch(
        #{ replayq := #{ config := _
                       , sizer := _
                       , stats := _
                       }
-        , retention_period := infinity
         },
-       Opts2),
-    #{replayq := Q2} = Opts2,
+       State2),
+    #{replayq := Q2, opts := Opts2} = State2,
+    ?assertMatch(#{retention_period := infinity}, Opts2),
     %% new replayq is mem-only, since we can't configure it.
     ?assert(replayq:is_mem_only(Q2)),
 

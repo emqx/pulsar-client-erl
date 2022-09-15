@@ -99,6 +99,7 @@
                    partitiontopic := binary(),
                    producer_id := integer(),
                    producer_name := atom(),
+                   replayq := replayq:q(),
                    request_id := integer(),
                    requests := #{sequence_id() => [{replayq:ack_ref(),
                                                     [gen_statem:from()],
@@ -182,10 +183,14 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
                     , max_total_bytes => MaxTotalBytes
                     },
     Q = replayq:open(ReplayqCfg),
-    ProducerOpts =
-        ProducerOpts0#{ replayq => Q
-                      , max_batch_bytes => MaxBatchBytes
-                      },
+    ProducerOpts1 = ProducerOpts0#{max_batch_bytes => MaxBatchBytes},
+    %% drop replayq options, now that it's open.
+    ProducerOpts = maps:without([ replayq_dir
+                                , replayq_seg_bytes
+                                , replayq_offload_mode
+                                , replayq_max_total_bytes
+                                ],
+                                ProducerOpts1),
     State = #{
         batch_size => maps:get(batch_size, ProducerOpts, 0),
         broker_server => BrokerServer,
@@ -195,6 +200,7 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
         partitiontopic => PartitionTopic,
         producer_id => ProducerID,
         producer_name => maps:get(producer_name, ProducerOpts, pulsar_producer),
+        replayq => Q,
         request_id => 1,
         requests => #{},
         sequence_id => 1,
@@ -362,7 +368,7 @@ handle_response({close_producer, #{}}, State = #{partitiontopic := Topic}) ->
     {next_state, idle, State#{sock := undefined}, [{next_event, internal, do_connect}]};
 handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                 State = #{callback := Callback, requests := Reqs,
-                               opts := #{replayq := Q}}) ->
+                          replayq := Q}) ->
     case maps:get(SequenceId, Reqs, undefined) of
         undefined ->
             _ = invoke_callback(Callback, Resp),
@@ -463,31 +469,32 @@ now_ts() ->
 make_queue_item(From, Messages) ->
     ?Q_ITEM(From, now_ts(), Messages).
 
-enqueue_send_requests(Requests, State = #{opts := #{replayq := Q} = Opts0}) ->
+enqueue_send_requests(Requests, State = #{replayq := Q}) ->
     QItems = lists:map(
                fun(?SEND_REQ(From, Messages)) ->
                  make_queue_item(From, Messages)
                end,
                Requests),
     NewQ = replayq:append(Q, QItems),
-    State#{opts := Opts0#{replayq := NewQ}}.
+    State#{replayq := NewQ}.
 
 maybe_send_to_pulsar(State0) ->
     #{ batch_size := BatchSize
      , sequence_id := SequenceId
      , requests := Requests0
-     , opts := ProducerOpts0 = #{replayq := Q}
+     , replayq := Q
+     , opts := ProducerOpts
      } = State0,
     case replayq:count(Q) =:= 0 of
         true ->
             State0;
         false ->
-            MaxBatchBytes = maps:get(max_batch_bytes, ProducerOpts0, ?DEFAULT_MAX_BATCH_BYTES),
+            MaxBatchBytes = maps:get(max_batch_bytes, ProducerOpts, ?DEFAULT_MAX_BATCH_BYTES),
             {NewQ, QAckRef, Items} = replayq:pop(Q, #{ count_limit => BatchSize
                                                      , bytes_limit => MaxBatchBytes
                                                      }),
-            State1 = State0#{opts := ProducerOpts0#{replayq := NewQ}},
-            RetentionPeriod = maps:get(retention_period, ProducerOpts0, infinity),
+            State1 = State0#{replayq := NewQ},
+            RetentionPeriod = maps:get(retention_period, ProducerOpts, infinity),
             Now = now_ts(),
             {Froms, Messages} =
                 lists:foldr(
@@ -537,7 +544,8 @@ try_close_socket(#{sock := Sock, opts := Opts}) ->
 
 resend_sent_requests(State) ->
     #{ requests := Requests0
-     , opts := ProducerOpts = #{replayq := Q}
+     , replayq := Q
+     , opts := ProducerOpts
      } = State,
     Now = now_ts(),
     RetentionPeriod = maps:get(retention_period, ProducerOpts, infinity),
@@ -573,6 +581,7 @@ is_batch_expired(_Timestamp, infinity = _RetentionPeriod, _Now) ->
 is_batch_expired(Timestamp, RetentionPeriod, Now) ->
     Timestamp =< Now - RetentionPeriod.
 
+-spec ensure_replayq_present(map()) -> state().
 ensure_replayq_present(Data = #{opts := ProducerOpts0}) ->
     RetentionPeriod = maps:get(retention_period, ProducerOpts0, infinity),
     MaxTotalBytes = maps:get(replayq_max_total_bytes, ProducerOpts0, ?DEFAULT_REPLAYQ_LIMIT),
@@ -582,20 +591,20 @@ ensure_replayq_present(Data = #{opts := ProducerOpts0}) ->
                   , max_total_bytes => MaxTotalBytes
                   },
     Q = replayq:open(ReplayqCfg),
-    ProducerOpts = ProducerOpts0#{ replayq => Q
-                                 , retention_period => RetentionPeriod
-                                 },
-    Data#{opts := ProducerOpts}.
+    ProducerOpts = ProducerOpts0#{retention_period => RetentionPeriod},
+    Data#{opts := ProducerOpts, replayq => Q}.
 
-ensure_replayq_absent(Data = #{opts := ProducerOpts0}) ->
-    ProducerOpts = case maps:take(replayq, ProducerOpts0) of
-        {Q, ProducerOpts1} ->
+-spec ensure_replayq_absent(state()) -> map().
+ensure_replayq_absent(Data0) ->
+    Data = case maps:take(replayq, Data0) of
+        {Q, Data1 = #{opts := ProducerOpts0}} ->
             _ = replayq:close(Q),
-            maps:without([retention_period], ProducerOpts1);
+            ProducerOpts = maps:without([retention_period, replayq], ProducerOpts0),
+            Data1#{opts := ProducerOpts};
         error ->
-            ProducerOpts0
+            Data0
     end,
-    Data#{opts := ProducerOpts}.
+    Data.
 
 code_change_requests({down, _Vsn}, Requests) ->
     maps:map(

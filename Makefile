@@ -17,9 +17,6 @@ eunit:
 xref:
 	$(REBAR) xref
 
-dialyzer:
-	$(REBAR) dialyzer
-
 distclean:
 	@rm -rf _build
 	@rm -f rebar.lock

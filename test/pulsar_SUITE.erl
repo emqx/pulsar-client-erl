@@ -376,7 +376,7 @@ t_pulsar_drop_expired_batch(Config) ->
         connnect_timeout => 5_000,
         batch_size => ?BATCH_SIZE,
         strategy => random,
-        callback => {?MODULE, producer_callback, []},
+        callback => {?MODULE, echo_callback, [self()]},
         retention_period => RetentionPeriodMS
     },
     {ok, Producers} = pulsar:ensure_supervised_producers(
@@ -413,6 +413,13 @@ t_pulsar_drop_expired_batch(Config) ->
     after
         1_000 ->
             ok
+    end,
+    receive
+        {produce_response, {error, expired}} ->
+            ok
+    after
+        1_000 ->
+            error(should_have_invoked_callback)
     end,
 
     ct:pal("producing message that should be received now"),
@@ -671,3 +678,6 @@ handle_message(_Msg, _Payloads, Loop) ->
     {ok, 'Individual', Loop}.
 
 producer_callback(_Args) -> ok.
+
+echo_callback(Resp, SendTo) ->
+    SendTo ! {produce_response, Resp}.

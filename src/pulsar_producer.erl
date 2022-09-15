@@ -534,16 +534,17 @@ do_send_to_pulsar(State0) ->
     State1 = State0#{replayq := NewQ},
     RetentionPeriod = maps:get(retention_period, ProducerOpts, infinity),
     Now = now_ts(),
-    {Froms, Messages} =
+    {Expired, Froms, Messages} =
        lists:foldr(
-         fun(?Q_ITEM(From, Timestamp, Msgs), {Froms, AccMsgs}) ->
+         fun(?Q_ITEM(From, Timestamp, Msgs), {Expired, Froms, AccMsgs}) ->
            case is_batch_expired(Timestamp, RetentionPeriod, Now) of
-             true -> {Froms, AccMsgs};
-             false -> {[From | Froms], [{Timestamp, Msgs} | AccMsgs]}
+             true -> {[{From, Msgs} | Expired], Froms, AccMsgs};
+             false -> {Expired, [From | Froms], [{Timestamp, Msgs} | AccMsgs]}
            end
          end,
-         {[], []},
+         {[], [], []},
          Items),
+    reply_expired_messages(Expired, State1),
     case Messages of
         [] ->
             %% all expired, immediately ack replayq batch and continue
@@ -557,6 +558,17 @@ do_send_to_pulsar(State0) ->
             State = next_sequence_id(State2),
             maybe_send_to_pulsar(State)
     end.
+
+-spec reply_expired_messages([{gen_statem:from() | undefined, [pulsar:message()]}],
+                             state()) -> ok.
+reply_expired_messages(Expired, #{callback := Callback}) ->
+    lists:foreach(
+      fun({undefined, Msgs}) ->
+              invoke_callback(Callback, {error, expired}, length(Msgs));
+         ({From, _Msgs}) ->
+              gen_statem:reply(From, {error, expired})
+      end,
+      Expired).
 
 collect_send_requests(Acc, Limit) ->
     Count = length(Acc),
@@ -589,11 +601,17 @@ resend_sent_requests(State) ->
     Requests =
         maps:fold(
           fun(SequenceId, {QAckRef, Froms, Messages0}, Acc) ->
-               Messages = lists:filter(
-                            fun({Ts, _Msgs}) ->
-                              not is_batch_expired(Ts, RetentionPeriod, Now)
-                            end,
-                            Messages0),
+               {Messages, Expired} =
+                      lists:partition(
+                        fun({Ts, _Msgs}) ->
+                          not is_batch_expired(Ts, RetentionPeriod, Now)
+                        end,
+                        Messages0),
+               lists:foreach(
+                 fun(From) ->
+                   reply_expired_messages([{From, Msgs} || {_Ts, Msgs} <- Expired], State)
+                 end,
+                 Froms),
                case Messages of
                    [] ->
                        ok = replayq:ack(Q, QAckRef),

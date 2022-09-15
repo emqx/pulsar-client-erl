@@ -576,7 +576,7 @@ do_collect_send_requests(Acc, Count, Limit) ->
 try_close_socket(#{sock := undefined}) ->
     ok;
 try_close_socket(#{sock := Sock, opts := Opts}) ->
-    catch pulsar_socket:close(Sock, Opts),
+    _ = pulsar_socket:close(Sock, Opts),
     ok.
 
 resend_sent_requests(State) ->

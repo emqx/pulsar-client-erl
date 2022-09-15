@@ -138,8 +138,13 @@ connect(Host, Port, Opts) ->
     end.
 
 close(Sock, Opts) ->
-    TcpMod = tcp_module(Opts),
-    TcpMod:close(Sock).
+    try
+        TcpMod = tcp_module(Opts),
+        TcpMod:close(Sock)
+    catch
+        _:_ ->
+            ok
+    end.
 
 get_pulsar_uri(Sock, Opts) ->
     case peername(Sock, Opts) of

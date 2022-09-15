@@ -217,8 +217,19 @@ idle(enter, _OldState, _State) ->
     keep_state_and_data;
 idle(_, do_connect, State) ->
     do_connect(State);
+idle({call, From}, {send, Messages}, State0) ->
+    %% for race conditions when upgrading from previous versions only
+    SendRequest = ?SEND_REQ(From, Messages),
+    State = enqueue_send_requests([SendRequest], State0),
+    {keep_state, State};
 idle({call, From}, _EventContent, _State) ->
     {keep_state_and_data, [{reply, From, {error, unknown_call}}]};
+idle(cast, {send, Messages}, State0) ->
+    %% for race conditions when upgrading from previous versions only
+    From = undefined,
+    SendRequest = ?SEND_REQ(From, Messages),
+    State = enqueue_send_requests([SendRequest], State0),
+    {keep_state, State};
 idle(cast, _EventContent, _State) ->
     keep_state_and_data;
 idle(info, ?SEND_REQ(_, _) = SendRequest, State0) ->
@@ -247,8 +258,19 @@ connecting(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
 connecting(info, Msg, _State) ->
     logger:info("[pulsar-producer][connecting] unknown message received ~p~n  ~p", [Msg, _State]),
     keep_state_and_data;
+connecting({call, From}, {send, Messages}, State0) ->
+    %% for race conditions when upgrading from previous versions only
+    SendRequest = ?SEND_REQ(From, Messages),
+    State = enqueue_send_requests([SendRequest], State0),
+    {keep_state, State};
 connecting({call, From}, _EventContent, _State) ->
     {keep_state_and_data, [{reply, From, {error, unknown_call}}]};
+connecting(cast, {send, Messages}, State0) ->
+    %% for race conditions when upgrading from previous versions only
+    From = undefined,
+    SendRequest = ?SEND_REQ(From, Messages),
+    State = enqueue_send_requests([SendRequest], State0),
+    {keep_state, State};
 connecting(cast, _EventContent, _State) ->
    keep_state_and_data.
 
@@ -284,8 +306,19 @@ connected(_EventType, {Inet, _, Bin}, State = #{last_bin := LastBin})
 connected(_EventType, ping, State = #{sock := Sock, opts := Opts}) ->
     pulsar_socket:ping(Sock, Opts),
     {keep_state, State};
+connected({call, From}, {send, Messages}, State0) ->
+    %% for race conditions when upgrading from previous versions only
+    SendRequest = ?SEND_REQ(From, Messages),
+    State = enqueue_send_requests([SendRequest], State0),
+    {keep_state, State};
 connected({call, From}, _EventContent, _State) ->
     {keep_state_and_data, [{reply, From, {error, unknown_call}}]};
+connected(cast, {send, Messages}, State0) ->
+    %% for race conditions when upgrading from previous versions only
+    From = undefined,
+    SendRequest = ?SEND_REQ(From, Messages),
+    State = enqueue_send_requests([SendRequest], State0),
+    {keep_state, State};
 connected(cast, _EventContent, _State) ->
     keep_state_and_data;
 connected(_EventType, EventContent, State) ->

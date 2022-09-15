@@ -511,47 +511,51 @@ enqueue_send_requests(Requests, State = #{replayq := Q}) ->
     NewQ = replayq:append(Q, QItems),
     State#{replayq := NewQ}.
 
-maybe_send_to_pulsar(State0) ->
+maybe_send_to_pulsar(State) ->
+    #{replayq := Q} = State,
+    case replayq:count(Q) =:= 0 of
+        true ->
+            State;
+        false ->
+            do_send_to_pulsar(State)
+    end.
+
+do_send_to_pulsar(State0) ->
     #{ batch_size := BatchSize
      , sequence_id := SequenceId
      , requests := Requests0
      , replayq := Q
      , opts := ProducerOpts
      } = State0,
-    case replayq:count(Q) =:= 0 of
-        true ->
-            State0;
-        false ->
-            MaxBatchBytes = maps:get(max_batch_bytes, ProducerOpts, ?DEFAULT_MAX_BATCH_BYTES),
-            {NewQ, QAckRef, Items} = replayq:pop(Q, #{ count_limit => BatchSize
-                                                     , bytes_limit => MaxBatchBytes
-                                                     }),
-            State1 = State0#{replayq := NewQ},
-            RetentionPeriod = maps:get(retention_period, ProducerOpts, infinity),
-            Now = now_ts(),
-            {Froms, Messages} =
-                lists:foldr(
-                  fun(?Q_ITEM(From, Timestamp, Msgs), {Froms, AccMsgs}) ->
-                    case is_batch_expired(Timestamp, RetentionPeriod, Now) of
-                      true -> {Froms, AccMsgs};
-                      false -> {[From | Froms], [{Timestamp, Msgs} | AccMsgs]}
-                    end
-                  end,
-                  {[], []},
-                  Items),
-            case Messages of
-                [] ->
-                    %% all expired, immediately ack replayq batch and continue
-                    ok = replayq:ack(Q, QAckRef),
-                    maybe_send_to_pulsar(State1);
-                [_ | _] ->
-                    send_batch_payload([Msg || {_Timestamp, Msgs} <- Messages, Msg <- Msgs],
-                                       SequenceId, State0),
-                    Requests = Requests0#{SequenceId => {QAckRef, Froms, Messages}},
-                    State2 = State1#{requests := Requests},
-                    State = next_sequence_id(State2),
-                    maybe_send_to_pulsar(State)
-            end
+    MaxBatchBytes = maps:get(max_batch_bytes, ProducerOpts, ?DEFAULT_MAX_BATCH_BYTES),
+    {NewQ, QAckRef, Items} = replayq:pop(Q, #{ count_limit => BatchSize
+                                             , bytes_limit => MaxBatchBytes
+                                             }),
+    State1 = State0#{replayq := NewQ},
+    RetentionPeriod = maps:get(retention_period, ProducerOpts, infinity),
+    Now = now_ts(),
+    {Froms, Messages} =
+       lists:foldr(
+         fun(?Q_ITEM(From, Timestamp, Msgs), {Froms, AccMsgs}) ->
+           case is_batch_expired(Timestamp, RetentionPeriod, Now) of
+             true -> {Froms, AccMsgs};
+             false -> {[From | Froms], [{Timestamp, Msgs} | AccMsgs]}
+           end
+         end,
+         {[], []},
+         Items),
+    case Messages of
+        [] ->
+            %% all expired, immediately ack replayq batch and continue
+            ok = replayq:ack(Q, QAckRef),
+            maybe_send_to_pulsar(State1);
+        [_ | _] ->
+            send_batch_payload([Msg || {_Timestamp, Msgs} <- Messages, Msg <- Msgs],
+                               SequenceId, State0),
+            Requests = Requests0#{SequenceId => {QAckRef, Froms, Messages}},
+            State2 = State1#{requests := Requests},
+            State = next_sequence_id(State2),
+            maybe_send_to_pulsar(State)
     end.
 
 collect_send_requests(Acc, Limit) ->

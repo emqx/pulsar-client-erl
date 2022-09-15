@@ -1,5 +1,4 @@
-# pulsar-client-erl
-A Erlang client library for Apache Pulsar
+# Apache Pulsar client for Erlang/Elixir
 
 ## Example Code
 

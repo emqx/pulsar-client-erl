@@ -31,6 +31,7 @@
 all() ->
     [ t_code_change_replayq
     , t_code_change_requests
+    , t_state_rec_roundtrip
     ].
 
 init_per_suite(Cfg) ->
@@ -87,9 +88,9 @@ t_code_change_replayq(Config) ->
 
     {_StatemState0, State0} = sys:get_state(ProducerPid),
 
-    ?assertEqual(state, element(1, State0)),
+    ?assert(is_map(State0)),
     % replayq in opts
-    Opts0 = element(9, State0),
+    Opts0 = maps:get(opts, State0),
     ?assertMatch(
        #{ replayq := #{ config := _
                       , sizer := _
@@ -100,17 +101,18 @@ t_code_change_replayq(Config) ->
        Opts0),
     #{replayq := Q} = Opts0,
     ?assertNot(replayq:is_mem_only(Q)),
-    OriginalSize = tuple_size(State0),
+    OriginalSize = map_size(State0),
     %% FIXME: another way to check if open?
     #{w_cur := #{fd := {_, _, #{pid := ReplayQPID}}}} = Q,
 
     %% check downgrade has no replayq, and replayq is closed.
     ok = sys:suspend(ProducerPid),
     ok = sys:change_code(ProducerPid, pulsar_producer, {down, vsn}, extra),
-    ok = sys:resume(ProducerPid),
+    %% ok = sys:resume(ProducerPid),
     {_StatemState1, State1} = sys:get_state(ProducerPid),
     ?assertEqual(state, element(1, State1)),
-    ?assertEqual(OriginalSize, tuple_size(State1)),
+    %% - 1 for the record name at 1st position.
+    ?assertEqual(OriginalSize, tuple_size(State1) - 1),
     Opts1 = element(9, State1),
     ?assertNot(maps:is_key(replayq, Opts1)),
     ?assertNot(maps:is_key(retention_period, Opts1)),
@@ -118,13 +120,13 @@ t_code_change_replayq(Config) ->
     ?assertNot(is_process_alive(ReplayQPID)),
 
     %% check upgrade has replayq and retention_period.
-    ok = sys:suspend(ProducerPid),
+    %% ok = sys:suspend(ProducerPid),
     ok = sys:change_code(ProducerPid, pulsar_producer, vsn, extra),
     ok = sys:resume(ProducerPid),
     {_StatemState2, State2} = sys:get_state(ProducerPid),
-    ?assertEqual(state, element(1, State2)),
-    ?assertEqual(OriginalSize, tuple_size(State2)),
-    Opts2 = element(9, State2),
+    ?assert(is_map(State2)),
+    ?assertEqual(OriginalSize, map_size(State2)),
+    Opts2 = maps:get(opts, State2),
 
     ?assertMatch(
        #{ replayq := #{ config := _
@@ -165,3 +167,23 @@ t_code_change_requests(_Config) ->
     ?assertEqual(#{SequenceId => {SequenceId, ExpectedBatchLen}}, Requests2),
 
     ok.
+
+t_state_rec_roundtrip(_Config) ->
+    StateMap =
+        maps:from_list([{K, erlang:make_ref()}
+                        || K <- [ batch_size
+                                , broker_server
+                                , callback
+                                , last_bin
+                                , opts
+                                , partitiontopic
+                                , producer_id
+                                , producer_name
+                                , request_id
+                                , requests
+                                , sequence_id
+                                , sock
+                                ]]),
+    ?assertEqual(StateMap,
+                 pulsar_producer:from_old_state_record(
+                   pulsar_producer:to_old_state_record(StateMap))).

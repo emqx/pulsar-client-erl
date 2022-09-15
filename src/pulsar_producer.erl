@@ -41,7 +41,10 @@
 
 %% for testing only
 -ifdef(TEST).
--export([code_change_requests/2]).
+-export([ code_change_requests/2
+        , from_old_state_record/1
+        , to_old_state_record/1
+        ]).
 -endif.
 
 -type statem() :: idle | connecting | connected.
@@ -87,40 +90,28 @@
     {reuseaddr, true},
     {send_timeout, ?TIMEOUT}]).
 
--record(state, {partitiontopic,
-                broker_server,
-                sock,
-                request_id = 1,
-                producer_id = 1,
-                sequence_id = 1,
-                producer_name,
-                opts = #{},
-                callback,
-                batch_size = 0,
-                requests = #{},
-                last_bin = <<>>}).
--type state() :: #state{
-                    partitiontopic :: binary(),
-                    broker_server :: {binary(), pos_integer()},
-                    sock :: undefined | port(),
-                    request_id :: integer(),
-                    producer_id :: integer(),
-                    sequence_id :: sequence_id(),
-                    producer_name :: atom(),
-                    opts :: map(),
-                    callback :: undefined | mfa() | fun((map()) -> ok),
-                    batch_size :: non_neg_integer(),
-                    requests :: #{sequence_id() => [{replayq:ack_ref(),
-                                                     [gen_statem:from()],
-                                                     [{timestamp(), [pulsar:message()]}]}]},
-                    last_bin :: binary()
-                   }.
+-type state() :: #{
+                   batch_size := non_neg_integer(),
+                   broker_server := {binary(), pos_integer()},
+                   callback := undefined | mfa() | fun((map()) -> ok),
+                   last_bin := binary(),
+                   opts := map(),
+                   partitiontopic := binary(),
+                   producer_id := integer(),
+                   producer_name := atom(),
+                   request_id := integer(),
+                   requests := #{sequence_id() => [{replayq:ack_ref(),
+                                                    [gen_statem:from()],
+                                                    [{timestamp(), [pulsar:message()]}]}]},
+                   sequence_id := sequence_id(),
+                   sock := undefined | port()
+                  }.
 -type handler_result() :: gen_statem:event_handler_result(statem(), state()).
 
 callback_mode() -> [state_functions, state_enter].
 
 start_link(PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts) ->
-    gen_statem:start_link(?MODULE, [PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts], []).
+    gen_statem:start_link(?MODULE, {PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts}, []).
 
 -spec send(gen_statem:server_ref(), [pulsar:message()]) -> ok.
 send(Pid, Messages) ->
@@ -167,7 +158,9 @@ send_sync(Pid, Messages, Timeout) ->
 %% gen_statem callback
 %%--------------------------------------------------------------------
 
-init([PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0]) ->
+-spec init({string(), string(), string() | undefined, config()}) ->
+          gen_statem:init_result(statem(), state()).
+init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
     process_flag(trap_exit, true),
     {Transport, BrokerServer} = pulsar_utils:parse_url(Server),
     ProducerID = maps:get(producer_id, ProducerOpts0),
@@ -193,14 +186,19 @@ init([PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0]) ->
         ProducerOpts0#{ replayq => Q
                       , max_batch_bytes => MaxBatchBytes
                       },
-    State = #state{
-        partitiontopic = PartitionTopic,
-        producer_id = ProducerID,
-        producer_name = maps:get(producer_name, ProducerOpts, pulsar_producer),
-        callback = maps:get(callback, ProducerOpts, undefined),
-        batch_size = maps:get(batch_size, ProducerOpts, 0),
-        broker_server = BrokerServer,
-        opts = pulsar_utils:maybe_enable_ssl_opts(Transport, ProducerOpts)
+    State = #{
+        batch_size => maps:get(batch_size, ProducerOpts, 0),
+        broker_server => BrokerServer,
+        callback => maps:get(callback, ProducerOpts, undefined),
+        last_bin => <<>>,
+        opts => pulsar_utils:maybe_enable_ssl_opts(Transport, ProducerOpts),
+        partitiontopic => PartitionTopic,
+        producer_id => ProducerID,
+        producer_name => maps:get(producer_name, ProducerOpts, pulsar_producer),
+        request_id => 1,
+        requests => #{},
+        sequence_id => 1,
+        sock => undefined
     },
     %% use process dict to avoid the trouble of relup
     put(proxy_to_broker_url, ProxyToBrokerUrl),
@@ -233,10 +231,10 @@ connecting(_, do_connect, State) ->
 connecting(info, ?SEND_REQ(_, _) = SendRequest, State0) ->
     State = enqueue_send_requests([SendRequest], State0),
     {keep_state, State};
-connecting(info, {CloseEvent, _Sock}, State0 = #state{})
+connecting(info, {CloseEvent, _Sock}, State0 = #{})
   when CloseEvent =:= tcp_closed; CloseEvent =:= ssl_closed ->
     try_close_socket(State0),
-    {next_state, idle, State0#state{sock = undefined}, [{next_event, internal, do_connect}]};
+    {next_state, idle, State0#{sock := undefined}, [{next_event, internal, do_connect}]};
 connecting(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
     {Cmd, _} = pulsar_protocol_frame:parse(Bin),
     handle_response(Cmd, State);
@@ -257,27 +255,27 @@ connected(enter, _OldState, State0) ->
     {keep_state, State};
 connected(_, do_connect, _State) ->
     keep_state_and_data;
-connected(info, ?SEND_REQ(_, _) = SendRequest, State0 = #state{batch_size = BatchSize}) ->
+connected(info, ?SEND_REQ(_, _) = SendRequest, State0 = #{batch_size := BatchSize}) ->
     SendRequests = collect_send_requests([SendRequest], BatchSize),
     State1 = enqueue_send_requests(SendRequests, State0),
     State = maybe_send_to_pulsar(State1),
     {keep_state, State};
-connected(_EventType, {InetClose, _Sock}, State = #state{partitiontopic = Topic})
+connected(_EventType, {InetClose, _Sock}, State = #{partitiontopic := Topic})
         when InetClose == tcp_closed; InetClose == ssl_closed ->
     log_error("connection closed by peer, topic: ~p~n", [Topic], State),
     try_close_socket(State),
-    {next_state, idle, State#state{sock = undefined},
+    {next_state, idle, State#{sock := undefined},
      [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]};
-connected(_EventType, {InetError, _Sock, Reason}, State = #state{partitiontopic = Topic})
+connected(_EventType, {InetError, _Sock, Reason}, State = #{partitiontopic := Topic})
         when InetError == tcp_error; InetError == ssl_error ->
     log_error("connection error on topic: ~p, error: ~p~n", [Topic, Reason], State),
     try_close_socket(State),
-    {next_state, idle, State#state{sock = undefined},
+    {next_state, idle, State#{sock := undefined},
      [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]};
-connected(_EventType, {Inet, _, Bin}, State = #state{last_bin = LastBin})
+connected(_EventType, {Inet, _, Bin}, State = #{last_bin := LastBin})
         when Inet == tcp; Inet == ssl ->
     parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
-connected(_EventType, ping, State = #state{sock = Sock, opts = Opts}) ->
+connected(_EventType, ping, State = #{sock := Sock, opts := Opts}) ->
     pulsar_socket:ping(Sock, Opts),
     {keep_state, State};
 connected({call, From}, _EventContent, _State) ->
@@ -288,46 +286,48 @@ connected(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
 
 -spec do_connect(state()) -> handler_result().
-do_connect(State = #state{opts = Opts, broker_server = {Host, Port}}) ->
+do_connect(State = #{opts := Opts, broker_server := {Host, Port}}) ->
     try pulsar_socket:connect(Host, Port, Opts) of
         {ok, Sock} ->
             pulsar_socket:send_connect_packet(Sock,
                 pulsar_utils:maybe_add_proxy_to_broker_url_opts(Opts,
                     erlang:get(proxy_to_broker_url))),
-            {next_state, connecting, State#state{sock = Sock}};
+            {next_state, connecting, State#{sock := Sock}};
         {error, Reason} ->
             log_error("error connecting: ~p", [Reason], State),
             try_close_socket(State),
-            {next_state, idle, State#state{sock = undefined},
+            {next_state, idle, State#{sock := undefined},
              [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]}
     catch
         Kind:Error:Stacktrace ->
             log_error("exception connecting: ~p -> ~p~n  ~p", [Kind, Error, Stacktrace], State),
             try_close_socket(State),
-            {next_state, idle, State#state{sock = undefined},
+            {next_state, idle, State#{sock := undefined},
              [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]}
     end.
 
 code_change({down, _Vsn} = Direction, State, Data0, _Extra) ->
     Data1 = ensure_replayq_absent(Data0),
-    Requests0 = Data0#state.requests,
+    Requests0 = maps:get(requests, Data0),
     Requests = code_change_requests(Direction, Requests0),
-    Data = Data1#state{requests = Requests},
-    {ok, State, Data};
-code_change(_Vsn = Direction, State, Data0, _Extra) ->
+    DataMap = Data1#{requests := Requests},
+    DataRec = to_old_state_record(DataMap),
+    {ok, State, DataRec};
+code_change(_Vsn = Direction, State, DataRec, _Extra) ->
+    Data0 = from_old_state_record(DataRec),
     Data1 = ensure_replayq_present(Data0),
-    Requests0 = Data0#state.requests,
+    Requests0 = maps:get(requests, Data0),
     Requests = code_change_requests(Direction, Requests0),
-    Data = Data1#state{requests = Requests},
+    Data = Data1#{requests := Requests},
     {ok, State, Data}.
 
 terminate(_Reason, _StateName, _State) ->
     ok.
 
 parse({incomplete, Bin}, State) ->
-    {keep_state, State#state{last_bin = Bin}};
+    {keep_state, State#{last_bin := Bin}};
 parse({Cmd, <<>>}, State) ->
-    handle_response(Cmd, State#state{last_bin = <<>>});
+    handle_response(Cmd, State#{last_bin := <<>>});
 parse({Cmd, LastBin}, State) ->
     State2 = case handle_response(Cmd, State) of
         keep_state_and_data -> State;
@@ -338,31 +338,31 @@ parse({Cmd, LastBin}, State) ->
 
 -spec handle_response(_EventContent, state()) ->
           handler_result().
-handle_response({connected, _ConnectedData}, State = #state{
-        sock = Sock,
-        opts = Opts,
-        request_id = RequestId,
-        producer_id = ProducerId,
-        partitiontopic = Topic
+handle_response({connected, _ConnectedData}, State = #{
+        sock := Sock,
+        opts := Opts,
+        request_id := RequestId,
+        producer_id := ProducerId,
+        partitiontopic := Topic
     }) ->
     start_keepalive(),
     pulsar_socket:send_create_producer_packet(Sock, Topic, RequestId, ProducerId, Opts),
     {keep_state, next_request_id(State)};
 handle_response({producer_success, #{producer_name := ProName}}, State) ->
-    {next_state, connected, State#state{producer_name = ProName}};
+    {next_state, connected, State#{producer_name := ProName}};
 handle_response({pong, #{}}, _State) ->
     start_keepalive(),
     keep_state_and_data;
-handle_response({ping, #{}}, #state{sock = Sock, opts = Opts}) ->
+handle_response({ping, #{}}, #{sock := Sock, opts := Opts}) ->
     pulsar_socket:pong(Sock, Opts),
     keep_state_and_data;
-handle_response({close_producer, #{}}, State = #state{partitiontopic = Topic}) ->
+handle_response({close_producer, #{}}, State = #{partitiontopic := Topic}) ->
     log_error("Close producer: ~p~n", [Topic], State),
     try_close_socket(State),
-    {next_state, idle, State#state{sock = undefined}, [{next_event, internal, do_connect}]};
+    {next_state, idle, State#{sock := undefined}, [{next_event, internal, do_connect}]};
 handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
-                State = #state{callback = Callback, requests = Reqs,
-                               opts = #{replayq := Q}}) ->
+                State = #{callback := Callback, requests := Reqs,
+                               opts := #{replayq := Q}}) ->
     case maps:get(SequenceId, Reqs, undefined) of
         undefined ->
             _ = invoke_callback(Callback, Resp),
@@ -376,7 +376,7 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
         %% info to migrate to the new format.
         {SequenceId, BatchLen} ->
             _ = invoke_callback(Callback, Resp, BatchLen),
-            {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
+            {keep_state, State#{requests := maps:remove(SequenceId, Reqs)}};
         {QAckRef, Froms, Messages} ->
             ok = replayq:ack(Q, QAckRef),
             BatchLen =
@@ -394,24 +394,24 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                    gen_statem:reply(From, {ok, Resp})
               end,
               Froms),
-            {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}}
+            {keep_state, State#{requests := maps:remove(SequenceId, Reqs)}}
     end;
 handle_response({error, #{error := Error, message := Msg}}, State) ->
     log_error("Response error:~p, msg:~p~n", [Error, Msg], State),
     try_close_socket(State),
-    {next_state, idle, State#state{sock = undefined},
+    {next_state, idle, State#{sock := undefined},
      [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]};
 handle_response(Msg, State) ->
     log_error("Receive unknown message:~p~n", [Msg], State),
     keep_state_and_data.
 
 -spec send_batch_payload([{timestamp(), [pulsar:message()]}], sequence_id(), state()) -> ok.
-send_batch_payload(Messages, SequenceId, #state{
-            partitiontopic = Topic,
-            producer_id = ProducerId,
-            producer_name = ProducerName,
-            sock = Sock,
-            opts = Opts
+send_batch_payload(Messages, SequenceId, #{
+            partitiontopic := Topic,
+            producer_id := ProducerId,
+            producer_name := ProducerName,
+            sock := Sock,
+            opts := Opts
         }) ->
     pulsar_socket:send_batch_message_packet(Sock, Topic, Messages, SequenceId, ProducerId,
         ProducerName, Opts).
@@ -419,18 +419,18 @@ send_batch_payload(Messages, SequenceId, #state{
 start_keepalive() ->
     erlang:send_after(30_000, self(), ping).
 
-next_request_id(State = #state{request_id = ?MAX_REQ_ID}) ->
-    State#state{request_id = 1};
-next_request_id(State = #state{request_id = RequestId}) ->
-    State#state{request_id = RequestId+1}.
+next_request_id(State = #{request_id := ?MAX_REQ_ID}) ->
+    State#{request_id := 1};
+next_request_id(State = #{request_id := RequestId}) ->
+    State#{request_id := RequestId + 1}.
 
-next_sequence_id(State = #state{sequence_id = ?MAX_SEQ_ID}) ->
-    State#state{sequence_id = 1};
-next_sequence_id(State = #state{sequence_id = SequenceId}) ->
-    State#state{sequence_id = SequenceId+1}.
+next_sequence_id(State = #{sequence_id := ?MAX_SEQ_ID}) ->
+    State#{sequence_id := 1};
+next_sequence_id(State = #{sequence_id := SequenceId}) ->
+    State#{sequence_id := SequenceId + 1}.
 
 -spec log_error(string(), [term()], state()) -> ok.
-log_error(Fmt, Args, #state{partitiontopic = PartitionTopic}) ->
+log_error(Fmt, Args, #{partitiontopic := PartitionTopic}) ->
     logger:error("[pulsar-producer][~s] " ++ Fmt, [PartitionTopic | Args]).
 
 invoke_callback(Callback, Resp) ->
@@ -463,21 +463,21 @@ now_ts() ->
 make_queue_item(From, Messages) ->
     ?Q_ITEM(From, now_ts(), Messages).
 
-enqueue_send_requests(Requests, State = #state{opts = #{replayq := Q} = Opts0}) ->
+enqueue_send_requests(Requests, State = #{opts := #{replayq := Q} = Opts0}) ->
     QItems = lists:map(
                fun(?SEND_REQ(From, Messages)) ->
                  make_queue_item(From, Messages)
                end,
                Requests),
     NewQ = replayq:append(Q, QItems),
-    State#state{opts = Opts0#{replayq := NewQ}}.
+    State#{opts := Opts0#{replayq := NewQ}}.
 
 maybe_send_to_pulsar(State0) ->
-    #state{ batch_size = BatchSize
-          , sequence_id = SequenceId
-          , requests = Requests0
-          , opts = ProducerOpts0 = #{replayq := Q}
-          } = State0,
+    #{ batch_size := BatchSize
+     , sequence_id := SequenceId
+     , requests := Requests0
+     , opts := ProducerOpts0 = #{replayq := Q}
+     } = State0,
     case replayq:count(Q) =:= 0 of
         true ->
             State0;
@@ -486,7 +486,7 @@ maybe_send_to_pulsar(State0) ->
             {NewQ, QAckRef, Items} = replayq:pop(Q, #{ count_limit => BatchSize
                                                      , bytes_limit => MaxBatchBytes
                                                      }),
-            State1 = State0#state{opts = ProducerOpts0#{replayq := NewQ}},
+            State1 = State0#{opts := ProducerOpts0#{replayq := NewQ}},
             RetentionPeriod = maps:get(retention_period, ProducerOpts0, infinity),
             Now = now_ts(),
             {Froms, Messages} =
@@ -506,9 +506,9 @@ maybe_send_to_pulsar(State0) ->
                     maybe_send_to_pulsar(State1);
                 [_ | _] ->
                     send_batch_payload([Msg || {_Timestamp, Msgs} <- Messages, Msg <- Msgs],
-                                       State1#state.sequence_id, State0),
+                                       SequenceId, State0),
                     Requests = Requests0#{SequenceId => {QAckRef, Froms, Messages}},
-                    State2 = State1#state{requests = Requests},
+                    State2 = State1#{requests := Requests},
                     State = next_sequence_id(State2),
                     maybe_send_to_pulsar(State)
             end
@@ -529,16 +529,16 @@ do_collect_send_requests(Acc, Count, Limit) ->
             lists:reverse(Acc)
     end.
 
-try_close_socket(#state{sock = undefined}) ->
+try_close_socket(#{sock := undefined}) ->
     ok;
-try_close_socket(#state{sock = Sock, opts = Opts}) ->
+try_close_socket(#{sock := Sock, opts := Opts}) ->
     catch pulsar_socket:close(Sock, Opts),
     ok.
 
 resend_sent_requests(State) ->
-    #state{ requests = Requests0
-          , opts = ProducerOpts = #{replayq := Q}
-          } = State,
+    #{ requests := Requests0
+     , opts := ProducerOpts = #{replayq := Q}
+     } = State,
     Now = now_ts(),
     RetentionPeriod = maps:get(retention_period, ProducerOpts, infinity),
     Requests =
@@ -566,14 +566,14 @@ resend_sent_requests(State) ->
           end,
           #{},
           Requests0),
-    State#state{requests = Requests}.
+    State#{requests := Requests}.
 
 is_batch_expired(_Timestamp, infinity = _RetentionPeriod, _Now) ->
     false;
 is_batch_expired(Timestamp, RetentionPeriod, Now) ->
     Timestamp =< Now - RetentionPeriod.
 
-ensure_replayq_present(Data = #state{opts = ProducerOpts0}) ->
+ensure_replayq_present(Data = #{opts := ProducerOpts0}) ->
     RetentionPeriod = maps:get(retention_period, ProducerOpts0, infinity),
     MaxTotalBytes = maps:get(replayq_max_total_bytes, ProducerOpts0, ?DEFAULT_REPLAYQ_LIMIT),
     ReplayqCfg = #{ mem_only => true
@@ -585,9 +585,9 @@ ensure_replayq_present(Data = #state{opts = ProducerOpts0}) ->
     ProducerOpts = ProducerOpts0#{ replayq => Q
                                  , retention_period => RetentionPeriod
                                  },
-    Data#state{opts = ProducerOpts}.
+    Data#{opts := ProducerOpts}.
 
-ensure_replayq_absent(Data = #state{opts = ProducerOpts0}) ->
+ensure_replayq_absent(Data = #{opts := ProducerOpts0}) ->
     ProducerOpts = case maps:take(replayq, ProducerOpts0) of
         {Q, ProducerOpts1} ->
             _ = replayq:close(Q),
@@ -595,7 +595,7 @@ ensure_replayq_absent(Data = #state{opts = ProducerOpts0}) ->
         error ->
             ProducerOpts0
     end,
-    Data#state{opts = ProducerOpts}.
+    Data#{opts := ProducerOpts}.
 
 code_change_requests({down, _Vsn}, Requests) ->
     maps:map(
@@ -614,3 +614,46 @@ code_change_requests(_Vsn, Requests) ->
     %% `Froms'...  Have to handle this case when resending or
     %% receiving a response.
     Requests.
+
+%% -record(state, {partitiontopic,
+%%                 broker_server,
+%%                 sock,
+%%                 request_id = 1,
+%%                 producer_id = 1,
+%%                 sequence_id = 1,
+%%                 producer_name,
+%%                 opts = #{},
+%%                 callback,
+%%                 batch_size = 0,
+%%                 requests = #{},
+%%                 last_bin = <<>>}).
+to_old_state_record(StateMap = #{}) ->
+    { state
+    , maps:get(partitiontopic, StateMap)
+    , maps:get(broker_server, StateMap)
+    , maps:get(sock, StateMap)
+    , maps:get(request_id, StateMap)
+    , maps:get(producer_id, StateMap)
+    , maps:get(sequence_id, StateMap)
+    , maps:get(producer_name, StateMap)
+    , maps:get(opts, StateMap)
+    , maps:get(callback, StateMap)
+    , maps:get(batch_size, StateMap)
+    , maps:get(requests, StateMap)
+    , maps:get(last_bin, StateMap)
+    }.
+
+from_old_state_record(StateRec) ->
+    #{ partitiontopic => element(2, StateRec)
+     , broker_server => element(3, StateRec)
+     , sock => element(4, StateRec)
+     , request_id => element(5, StateRec)
+     , producer_id => element(6, StateRec)
+     , sequence_id => element(7, StateRec)
+     , producer_name => element(8, StateRec)
+     , opts => element(9, StateRec)
+     , callback => element(10, StateRec)
+     , batch_size => element(11, StateRec)
+     , requests => element(12, StateRec)
+     , last_bin => element(13, StateRec)
+     }.

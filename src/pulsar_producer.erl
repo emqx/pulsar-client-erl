@@ -101,7 +101,7 @@
                 last_bin = <<>>}).
 -type state() :: #state{
                     partitiontopic :: binary(),
-                    broker_server :: binary(),
+                    broker_server :: {binary(), pos_integer()},
                     sock :: undefined | port(),
                     request_id :: integer(),
                     producer_id :: integer(),
@@ -115,6 +115,7 @@
                                                      [{timestamp(), [pulsar:message()]}]}]},
                     last_bin :: binary()
                    }.
+-type handler_result() :: gen_statem:event_handler_result(statem(), state()).
 
 callback_mode() -> [state_functions, state_enter].
 
@@ -207,7 +208,7 @@ init([PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0]) ->
 
 %% idle state
 -spec idle(gen_statem:event_type(), _EventContent, state()) ->
-          gen_statem:event_handler_result(statem()).
+          handler_result().
 idle(enter, _OldState, _State) ->
     keep_state_and_data;
 idle(_, do_connect, State) ->
@@ -224,7 +225,7 @@ idle(_EventType, _Event, _State) ->
 
 %% connecting state
 -spec connecting(gen_statem:event_type(), _EventContent, state()) ->
-          gen_statem:event_handler_result(statem()).
+          handler_result().
 connecting(enter, _OldState, _State) ->
     keep_state_and_data;
 connecting(_, do_connect, State) ->
@@ -249,7 +250,7 @@ connecting(cast, _EventContent, _State) ->
 
 %% connected state
 -spec connected(gen_statem:event_type(), _EventContent, state()) ->
-          gen_statem:event_handler_result(statem()).
+          handler_result().
 connected(enter, _OldState, State0) ->
     State1 = resend_sent_requests(State0),
     State = maybe_send_to_pulsar(State1),
@@ -286,6 +287,7 @@ connected(cast, _EventContent, _State) ->
 connected(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
 
+-spec do_connect(state()) -> handler_result().
 do_connect(State = #state{opts = Opts, broker_server = {Host, Port}}) ->
     try pulsar_socket:connect(Host, Port, Opts) of
         {ok, Sock} ->
@@ -335,7 +337,7 @@ parse({Cmd, LastBin}, State) ->
     parse(pulsar_protocol_frame:parse(LastBin), State2).
 
 -spec handle_response(_EventContent, state()) ->
-          gen_statem:event_handler_result(statem()).
+          handler_result().
 handle_response({connected, _ConnectedData}, State = #state{
         sock = Sock,
         opts = Opts,
@@ -427,6 +429,7 @@ next_sequence_id(State = #state{sequence_id = ?MAX_SEQ_ID}) ->
 next_sequence_id(State = #state{sequence_id = SequenceId}) ->
     State#state{sequence_id = SequenceId+1}.
 
+-spec log_error(string(), [term()], state()) -> ok.
 log_error(Fmt, Args, #state{partitiontopic = PartitionTopic}) ->
     logger:error("[pulsar-producer][~s] " ++ Fmt, [PartitionTopic | Args]).
 

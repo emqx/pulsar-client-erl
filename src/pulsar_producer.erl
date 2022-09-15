@@ -263,13 +263,13 @@ connected(info, ?SEND_REQ(_, _) = SendRequest, State0 = #state{batch_size = Batc
     {keep_state, State};
 connected(_EventType, {InetClose, _Sock}, State = #state{partitiontopic = Topic})
         when InetClose == tcp_closed; InetClose == ssl_closed ->
-    log_error("connection closed by peer, topic: ~p~n", [Topic]),
+    log_error("connection closed by peer, topic: ~p~n", [Topic], State),
     try_close_socket(State),
     {next_state, idle, State#state{sock = undefined},
      [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]};
 connected(_EventType, {InetError, _Sock, Reason}, State = #state{partitiontopic = Topic})
         when InetError == tcp_error; InetError == ssl_error ->
-    log_error("connection error on topic: ~p, error: ~p~n", [Topic, Reason]),
+    log_error("connection error on topic: ~p, error: ~p~n", [Topic, Reason], State),
     try_close_socket(State),
     {next_state, idle, State#state{sock = undefined},
      [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]};
@@ -294,13 +294,13 @@ do_connect(State = #state{opts = Opts, broker_server = {Host, Port}}) ->
                     erlang:get(proxy_to_broker_url))),
             {next_state, connecting, State#state{sock = Sock}};
         {error, Reason} ->
-            log_error("error connecting: ~p", [Reason]),
+            log_error("error connecting: ~p", [Reason], State),
             try_close_socket(State),
             {next_state, idle, State#state{sock = undefined},
              [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]}
     catch
         Kind:Error:Stacktrace ->
-            log_error("exception connecting: ~p -> ~p~n  ~p", [Kind, Error, Stacktrace]),
+            log_error("exception connecting: ~p -> ~p~n  ~p", [Kind, Error, Stacktrace], State),
             try_close_socket(State),
             {next_state, idle, State#state{sock = undefined},
              [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]}
@@ -355,7 +355,7 @@ handle_response({ping, #{}}, #state{sock = Sock, opts = Opts}) ->
     pulsar_socket:pong(Sock, Opts),
     keep_state_and_data;
 handle_response({close_producer, #{}}, State = #state{partitiontopic = Topic}) ->
-    log_error("Close producer: ~p~n", [Topic]),
+    log_error("Close producer: ~p~n", [Topic], State),
     try_close_socket(State),
     {next_state, idle, State#state{sock = undefined}, [{next_event, internal, do_connect}]};
 handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
@@ -395,12 +395,12 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}}
     end;
 handle_response({error, #{error := Error, message := Msg}}, State) ->
-    log_error("Response error:~p, msg:~p~n", [Error, Msg]),
+    log_error("Response error:~p, msg:~p~n", [Error, Msg], State),
     try_close_socket(State),
     {next_state, idle, State#state{sock = undefined},
      [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]};
-handle_response(Msg, _State) ->
-    log_error("Receive unknown message:~p~n", [Msg]),
+handle_response(Msg, State) ->
+    log_error("Receive unknown message:~p~n", [Msg], State),
     keep_state_and_data.
 
 -spec send_batch_payload([{timestamp(), [pulsar:message()]}], sequence_id(), state()) -> ok.
@@ -427,7 +427,8 @@ next_sequence_id(State = #state{sequence_id = ?MAX_SEQ_ID}) ->
 next_sequence_id(State = #state{sequence_id = SequenceId}) ->
     State#state{sequence_id = SequenceId+1}.
 
-log_error(Fmt, Args) -> logger:error("[pulsar-producer] " ++ Fmt, Args).
+log_error(Fmt, Args, #state{partitiontopic = PartitionTopic}) ->
+    logger:error("[pulsar-producer][~s] " ++ Fmt, [PartitionTopic | Args]).
 
 invoke_callback(Callback, Resp) ->
     invoke_callback(Callback, Resp, _BatchLen = 1).

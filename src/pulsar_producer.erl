@@ -56,13 +56,15 @@
                          , any() => term()
                          }.
 -type timestamp() :: integer().
+-type callback() :: undefined | mfa() | fun((map()) -> ok).
+-type callback_input() :: {ok, send_receipt()} | {error, expired}.
 -type config() :: #{ replayq_dir := string()
                    , replayq_max_total_bytes => pos_integer()
                    , replayq_seg_bytes => pos_integer()
                    , replayq_offload_mode => boolean()
                    , max_batch_bytes => pos_integer()
                    , producer_name => atom()
-                   , callback => undefined | mfa() | fun((map()) -> ok)
+                   , callback => callback()
                    , batch_size => non_neg_integer()
                    , retention_period => timeout()
                    }.
@@ -408,17 +410,17 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                           replayq := Q}) ->
     case maps:get(SequenceId, Reqs, undefined) of
         undefined ->
-            _ = invoke_callback(Callback, Resp),
+            _ = invoke_callback(Callback, {ok, Resp}),
             {keep_state, State};
         %% impossible case!?!??
         %% SequenceId ->
-        %%     _ = invoke_callback(Callback, Resp),
+        %%     _ = invoke_callback(Callback, {ok, Resp}),
         %%     {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
 
         %% State transferred from hot-upgrade; it doesn't have enough
         %% info to migrate to the new format.
         {SequenceId, BatchLen} ->
-            _ = invoke_callback(Callback, Resp, BatchLen),
+            _ = invoke_callback(Callback, {ok, Resp}, BatchLen),
             {keep_state, State#{requests := maps:remove(SequenceId, Reqs)}};
         {QAckRef, Froms, Messages} ->
             ok = replayq:ack(Q, QAckRef),
@@ -431,7 +433,7 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                   Messages),
             lists:foreach(
               fun(undefined) ->
-                   _ = invoke_callback(Callback, Resp, BatchLen),
+                   _ = invoke_callback(Callback, {ok, Resp}, BatchLen),
                    ok;
                  (From) ->
                    gen_statem:reply(From, {ok, Resp})
@@ -476,9 +478,11 @@ next_sequence_id(State = #{sequence_id := SequenceId}) ->
 log_error(Fmt, Args, #{partitiontopic := PartitionTopic}) ->
     logger:error("[pulsar-producer][~s] " ++ Fmt, [PartitionTopic | Args]).
 
+-spec invoke_callback(callback(), callback_input()) -> ok.
 invoke_callback(Callback, Resp) ->
     invoke_callback(Callback, Resp, _BatchLen = 1).
 
+-spec invoke_callback(callback(), callback_input(), non_neg_integer()) -> ok.
 invoke_callback(_Callback = undefined, _Resp, _BatchLen) ->
     ok;
 invoke_callback({M, F, A}, Resp, BatchLen) ->

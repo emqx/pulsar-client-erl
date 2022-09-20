@@ -102,7 +102,7 @@
                    replayq := replayq:q(),
                    request_id := integer(),
                    requests := #{sequence_id() => [{replayq:ack_ref(),
-                                                    [gen_statem:from()],
+                                                    [gen_statem:from() | undefined],
                                                     [{timestamp(), [pulsar:message()]}]}]},
                    sequence_id := sequence_id(),
                    sock := undefined | port()
@@ -136,7 +136,10 @@ send_sync(Pid, Messages) ->
 send_sync(Pid, Messages, Timeout) ->
     Caller = self(),
     MRef = erlang:monitor(process, Pid),
-    erlang:send(Pid, ?SEND_REQ({Caller, MRef}, Messages)),
+    %% Mimicking gen_statem's From, so the reply can be sent with
+    %% `gen_statem:reply/2'
+    From = {Caller, MRef},
+    erlang:send(Pid, ?SEND_REQ(From, Messages)),
     receive
         {MRef, Response} ->
             erlang:demonitor(MRef, [flush]),

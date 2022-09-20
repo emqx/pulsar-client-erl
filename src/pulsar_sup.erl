@@ -22,7 +22,11 @@
 start_link() -> supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
-    _ = ets:new(?PULSAR_METRICS_ETS, [named_table, public, {write_concurrency, true}]),
+    _ = ets:new(?PULSAR_METRICS_ETS, [ named_table
+                                     , ordered_set
+                                     , public
+                                     , {write_concurrency, true}
+                                     ]),
     SupFlags = #{strategy => one_for_all,
                  intensity => 10,
                  period => 5},

@@ -1,5 +1,5 @@
 %% -*- mode: erlang; -*-
-{"0.6.5",
+{"0.7.0",
    [{"0.6.4",
      [{update, pulsar_producer, {advanced, []}},
       {load_module,pulsar,brutal_purge,soft_purge,[]},

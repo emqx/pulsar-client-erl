@@ -363,7 +363,8 @@ code_change(_Vsn = Direction, State, DataRec, _Extra) ->
     Data = Data1#{requests := Requests},
     {ok, State, Data}.
 
-terminate(_Reason, _StateName, _State) ->
+terminate(_Reason, _StateName, _State = #{replayq := Q}) ->
+    ok = replayq:close(Q),
     ok.
 
 parse({incomplete, Bin}, State) ->

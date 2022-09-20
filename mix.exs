@@ -21,10 +21,10 @@ defmodule PulsarClientErl.MixProject do
   defp deps do
     [
       {:crc32cer, github: "emqx/crc32cer", tag: "0.1.9"},
-      {:murmerl3, github: "emqx/murmerl3", ref: "5ae165c034e601b52e9569187b33ac95f6b3878e"},
+      {:murmerl3, github: "emqx/murmerl3", tag: "0.1.0-emqx.1"},
       {:snappyer, github: "emqx/snappyer", tag: "1.2.5"},
       {:replayq, github: "emqx/replayq", tag: "0.3.4"},
-      {:redbug, "~> 2.0"}
+      {:redbug, "~> 2.0", only: [:test, :dev]}
     ]
   end
 

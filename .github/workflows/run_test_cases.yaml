@@ -20,6 +20,7 @@ jobs:
       - name: run test cases
         env:
           PULSAR_TAG: ${{ matrix.pulsar_tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           docker-compose -f ./docker-compose.yml up -d
           sleep 3m
@@ -28,3 +29,5 @@ jobs:
           docker exec -i erlang sh -c "make -C /pulsar_client_erl eunit"
           docker exec -i erlang sh -c "make -C /pulsar_client_erl ct"
           docker exec -i erlang sh -c "make -C /pulsar_client_erl cover"
+          printenv | grep "^GITHUB_" > envvars
+          docker exec --env-file envvars -i erlang sh -c "make -C /pulsar_client_erl coveralls"

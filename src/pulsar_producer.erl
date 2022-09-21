@@ -177,7 +177,8 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
             false ->
                 #{mem_only => true};
             BaseDir ->
-                Dir = filename:join([BaseDir, PartitionTopic]),
+                PartitionTopicPath = escape(PartitionTopic),
+                Dir = filename:join([BaseDir, PartitionTopicPath]),
                 SegBytes = maps:get(replayq_seg_bytes, ProducerOpts0, ?DEFAULT_REPLAYQ_SEG_BYTES),
                 Offload = maps:get(replayq_offload_mode, ProducerOpts0, false),
                 #{dir => Dir, seg_bytes => SegBytes, offload => Offload}
@@ -736,3 +737,8 @@ from_old_state_record(StateRec) ->
      , requests => element(12, StateRec)
      , last_bin => element(13, StateRec)
      }.
+
+-spec escape(string()) -> binary().
+escape(Str) ->
+    NormalizedStr = unicode:characters_to_nfd_list(Str),
+    iolist_to_binary(pulsar_utils:escape_uri(NormalizedStr)).

@@ -26,3 +26,6 @@ dialyzer:
 
 cover:
 	$(REBAR) cover
+
+coveralls:
+	$(REBAR) as test coveralls send

@@ -1,5 +1,7 @@
 # Apache Pulsar client for Erlang/Elixir
 
+[![Coverage Status](https://coveralls.io/repos/github/emqx/pulsar-client-erl/badge.svg?branch=master)](https://coveralls.io/github/emqx/pulsar-client-erl?branch=master)
+
 ## Example Code
 
 ### Async Produce

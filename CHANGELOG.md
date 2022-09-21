@@ -10,7 +10,7 @@
   `infinity` (does not expire) any messages.
 - Producer is more sturdy: it'll tolerate more failures without being
   killed, so that messages will be enqueued to `replayq`.
-- The producer callback will either return `{ok, SendReceipt}` when
+- The producer callback will either be called with the first argument as `{ok, SendReceipt}` when
   publishing is successful or `{error, expired}` if the payload has
   expired before it got sent to Pulsar.
 

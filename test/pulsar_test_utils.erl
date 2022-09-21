@@ -34,6 +34,12 @@ populate_proxy(ProxyHost, ProxyPort, FakePulsarPort, PulsarUrl) ->
                                               [{body_format, binary}]),
     "pulsar://" ++ ProxyHost ++ ":" ++ integer_to_list(FakePulsarPort).
 
+reset_proxy(ProxyHost, ProxyPort) ->
+    Url = "http://" ++ ProxyHost ++ ":" ++ integer_to_list(ProxyPort) ++ "/reset",
+    Body = <<>>,
+    {ok, {{_, 204, _}, _, _}} = httpc:request(post, {Url, [], "application/json", Body}, [],
+                                              [{body_format, binary}]).
+
 enable_failure(FailureType, ProxyHost, ProxyPort) ->
     case FailureType of
         down -> switch_proxy(off, ProxyHost, ProxyPort);

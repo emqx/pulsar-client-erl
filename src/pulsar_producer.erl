@@ -16,6 +16,8 @@
 
 -behaviour(gen_statem).
 
+-include_lib("snabbkaffe/include/snabbkaffe.hrl").
+
 -export([ send/2
         , send_sync/2
         , send_sync/3
@@ -289,9 +291,11 @@ connected(enter, _OldState, State0) ->
 connected(_, do_connect, _State) ->
     keep_state_and_data;
 connected(info, ?SEND_REQ(_, _) = SendRequest, State0 = #{batch_size := BatchSize}) ->
+    ?tp(pulsar_producer_send_req_enter, #{}),
     SendRequests = collect_send_requests([SendRequest], BatchSize),
     State1 = enqueue_send_requests(SendRequests, State0),
     State = maybe_send_to_pulsar(State1),
+    ?tp(pulsar_producer_send_req_exit, #{}),
     {keep_state, State};
 connected(_EventType, {InetClose, _Sock}, State = #{partitiontopic := Topic})
         when InetClose == tcp_closed; InetClose == ssl_closed ->
@@ -408,6 +412,7 @@ handle_response({close_producer, #{}}, State = #{partitiontopic := Topic}) ->
 handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                 State = #{callback := Callback, requests := Reqs,
                           replayq := Q}) ->
+    ?tp(pulsar_producer_recv_send_receipt, #{receipt => Resp}),
     case maps:get(SequenceId, Reqs, undefined) of
         undefined ->
             _ = invoke_callback(Callback, {ok, Resp}),
@@ -600,6 +605,7 @@ try_close_socket(#{sock := Sock, opts := Opts}) ->
     ok.
 
 resend_sent_requests(State) ->
+    ?tp(pulsar_producer_resend_sent_requests_enter, #{}),
     #{ requests := Requests0
      , replayq := Q
      , opts := ProducerOpts
@@ -622,6 +628,7 @@ resend_sent_requests(State) ->
                  Froms),
                case Messages of
                    [] ->
+                       ?tp(pulsar_producer_resend_all_expired, #{}),
                        ok = replayq:ack(Q, QAckRef),
                        Acc;
                    [_ | _] ->

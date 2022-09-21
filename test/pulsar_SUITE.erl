@@ -26,6 +26,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
+-include_lib("snabbkaffe/include/snabbkaffe.hrl").
 
 %%--------------------------------------------------------------------
 %% Setups
@@ -40,17 +41,25 @@ all() ->
     ].
 
 resilience_tests() ->
+    resilience_multi_failure_tests() ++ resilience_single_failure_tests().
+
+resilience_multi_failure_tests() ->
     [ t_pulsar_replayq
     , t_pulsar_replayq_producer_restart
     , t_pulsar_drop_expired_batch
     ].
 
+resilience_single_failure_tests() ->
+    [ t_pulsar_drop_expired_batch_resend_inflight
+    ].
+
 groups() ->
     [ {resilience, [ {group, timeout}
                    , {group, down}
+                   | resilience_single_failure_tests()
                    ]}
-    , {timeout, resilience_tests()}
-    , {down, resilience_tests()}
+    , {timeout, resilience_multi_failure_tests()}
+    , {down, resilience_multi_failure_tests()}
     ].
 
 init_per_suite(Cfg) ->
@@ -59,6 +68,21 @@ init_per_suite(Cfg) ->
 end_per_suite(_Args) ->
     ok.
 
+init_per_group(resilience, Config) ->
+    PulsarHost = os:getenv("PULSAR_HOST", ?PULSAR_HOST),
+    ProxyHost = os:getenv("PROXY_HOST", "proxy"),
+    ProxyPort = list_to_integer(os:getenv("PROXY_PORT", "8474")),
+    UpstreamHost = os:getenv("PROXY_PULSAR_HOST", PulsarHost),
+    %% when testing locally; externally exposed port for container
+    FakePulsarPort = list_to_integer(os:getenv("PROXY_PULSAR_PORT", "6650")),
+    FakePulsarHost = pulsar_test_utils:populate_proxy(ProxyHost, ProxyPort, FakePulsarPort, UpstreamHost),
+    {ok, _} = application:ensure_all_started(pulsar),
+    [ {pulsar_host, PulsarHost}
+    , {proxy_host, ProxyHost}
+    , {proxy_port, ProxyPort}
+    , {fake_pulsar_host, FakePulsarHost}
+    , {resilience_test, true}
+    | Config];
 init_per_group(timeout, Config) ->
     [ {failure_type, timeout}
     | Config];
@@ -71,11 +95,7 @@ init_per_group(_Group, Config) ->
 end_per_group(_Group, Config) ->
     ProxyHost = ?config(proxy_host, Config),
     ProxyPort = ?config(proxy_port, Config),
-    FailureType = ?config(failure_type, Config),
-    case FailureType of
-        undefined -> ok;
-        FailureType -> catch pulsar_test_utils:heal_failure(FailureType, ProxyHost, ProxyPort)
-    end,
+    pulsar_test_utils:reset_proxy(ProxyHost, ProxyPort),
     ok.
 
 init_per_testcase(t_pulsar_basic_auth, Config) ->
@@ -88,50 +108,49 @@ init_per_testcase(t_pulsar_token_auth, Config) ->
     {ok, _} = application:ensure_all_started(pulsar),
     [ {pulsar_host, PulsarHost}
     | Config];
-init_per_testcase(TestCase, Config)
-  when TestCase =:= t_pulsar_replayq;
-       TestCase =:= t_pulsar_replayq_producer_restart;
-       TestCase =:= t_pulsar_drop_expired_batch ->
-    PulsarHost = os:getenv("PULSAR_HOST", ?PULSAR_HOST),
-    ProxyHost = os:getenv("PROXY_HOST", "proxy"),
-    ProxyPort = list_to_integer(os:getenv("PROXY_PORT", "8474")),
-    UpstreamHost = os:getenv("PROXY_PULSAR_HOST", PulsarHost),
-    %% when testing locally; externally exposed port for container
-    FakePulsarPort = list_to_integer(os:getenv("PROXY_PULSAR_PORT", "6650")),
-    FakePulsarHost = pulsar_test_utils:populate_proxy(ProxyHost, ProxyPort, FakePulsarPort, UpstreamHost),
-    %% since the broker reports a proxy URL to itself, we need to
-    %% patch that so we always use toxiproxy.
-    ok = meck:new(pulsar_client, [non_strict, passthrough, no_history]),
-    ok = meck:expect(
-           pulsar_client, lookup_topic,
-           fun(Pid, PartitionTopic) ->
-             case meck:passthrough([Pid, PartitionTopic]) of
-               {ok, Resp} -> {ok, Resp#{brokerServiceUrl => FakePulsarHost}};
-               Error -> Error
-             end
-           end),
-    {ok, _} = application:ensure_all_started(pulsar),
-    [ {pulsar_host, PulsarHost}
-    , {proxy_host, ProxyHost}
-    , {proxy_port, ProxyPort}
-    , {fake_pulsar_host, FakePulsarHost}
-    | Config];
 init_per_testcase(_TestCase, Config) ->
     PulsarHost = os:getenv("PULSAR_HOST", ?PULSAR_HOST),
     {ok, _} = application:ensure_all_started(pulsar),
+    group_initializations(Config),
     [ {pulsar_host, PulsarHost}
     | Config].
 
-end_per_testcase(TestCase, _Config)
+end_per_testcase(TestCase, Config)
   when TestCase =:= t_pulsar_replayq;
        TestCase =:= t_pulsar_replayq_producer_restart;
        TestCase =:= t_pulsar_drop_expired_batch ->
+    ProxyHost = ?config(proxy_host, Config),
+    ProxyPort = ?config(proxy_port, Config),
     application:stop(pulsar),
+    snabbkaffe:stop(),
+    pulsar_test_utils:reset_proxy(ProxyHost, ProxyPort),
+    file:del_dir_r("/tmp/replayq1"),
     meck:unload([pulsar_client]),
+    ok;
+end_per_testcase(t_pulsar_drop_expired_batch_resend_inflight, Config) ->
+    ProxyHost = ?config(proxy_host, Config),
+    ProxyPort = ?config(proxy_port, Config),
+    application:stop(pulsar),
+    snabbkaffe:stop(),
+    catch meck:unload([pulsar_producer, pulsar_client]),
+    pulsar_test_utils:reset_proxy(ProxyHost, ProxyPort),
+    file:del_dir_r("/tmp/replayq2"),
     ok;
 end_per_testcase(_TestCase, _Config) ->
     application:stop(pulsar),
+    snabbkaffe:stop(),
     ok.
+
+group_initializations(Config) ->
+    IsResilienceTest = ?config(resilience_test, Config),
+    case IsResilienceTest of
+        true ->
+            FakePulsarHost = ?config(fake_pulsar_host, Config),
+            fix_broker_service_url(FakePulsarHost),
+            ok;
+        _ ->
+            ok
+    end.
 
 %%--------------------------------------------------------------------
 %% Test cases
@@ -391,9 +410,11 @@ t_pulsar_drop_expired_batch(Config) ->
     ct:sleep(StabilizationPeriod),
 
     %% Produce messages that'll expire
+    ct:pal("sending messages..."),
     pulsar:send(Producers,
                 [#{key => <<"k">>, value => integer_to_binary(SeqNo)}
                  || SeqNo <- lists:seq(1, 150)]),
+    ct:pal("waiting for retention period to expire..."),
     ct:sleep(RetentionPeriodMS * 2),
 
     ct:pal("reestablishing connection with pulsar..."),
@@ -432,6 +453,136 @@ t_pulsar_drop_expired_batch(Config) ->
         15_000 ->
             error(timeout)
     end,
+
+    ok.
+
+t_pulsar_drop_expired_batch_resend_inflight(Config) ->
+    PulsarHost = ?config(fake_pulsar_host, Config),
+    ProxyHost = ?config(proxy_host, Config),
+    ProxyPort = ?config(proxy_port, Config),
+    FailureType = down,
+    StabilizationPeriod = timer:seconds(15),
+    {ok, _} = application:ensure_all_started(pulsar),
+
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    ct:pal("started client"),
+    ConsumerOpts = #{
+        cb_init_args => #{send_to => self()},
+        cb_module => pulsar_echo_consumer,
+        sub_type => 'Shared',
+        subscription => "pulsar_test_expired",
+        max_consumer_num => 1,
+        name => pulsar_test_expired
+    },
+    Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
+    {ok, _Consumers} = pulsar:ensure_supervised_consumers(
+                        ?TEST_SUIT_CLIENT,
+                        Topic,
+                        ConsumerOpts),
+    ct:pal("started consumer"),
+
+    meck:new(pulsar_producer, [non_strict, no_history, no_link, passthrough]),
+    meck:expect(pulsar_producer, handle_response,
+      fun({send_receipt, _}, State) ->
+              %% ignore receipts so we can test resend
+              State;
+         (Arg, State) ->
+              meck:passthrough([Arg, State])
+      end),
+    RetentionPeriodMS = 1_000,
+    ProducerOpts = #{
+        %% to speed up the test a bit
+        send_timeout => 5_000,
+        connnect_timeout => 5_000,
+        batch_size => ?BATCH_SIZE,
+        strategy => random,
+        callback => {?MODULE, echo_callback, [self()]},
+        replayq_dir => "/tmp/replayq2",
+        replayq_seg_bytes => 20 * 1024 * 1024,
+        replayq_offload_mode => false,
+        replayq_max_total_bytes => 1_000_000_000,
+        retention_period => RetentionPeriodMS
+    },
+    {ok, Producers} = pulsar:ensure_supervised_producers(
+                        ?TEST_SUIT_CLIENT,
+                        Topic,
+                        ProducerOpts),
+    ct:pal("started producer"),
+    {_, ProducerPid} = pulsar_producers:pick_producer(Producers,
+                                                      [#{key => <<"k">>, value => <<>>}]),
+    pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
+
+
+    %% 1. produce some messages and, while we are processing them,
+    %% simulate a disconnect message to change state to `idle'.
+    %% 2. also cut the connection with pulsar, so it'll stay idle
+    %% while the messages expire.
+    %% 3. restore the connection so that inflight messages will be
+    %% resent.
+    ct:pal("forcing disconnect"),
+    ?check_trace(
+       begin
+         ?force_ordering(#{?snk_kind := pulsar_producer_send_req_enter},
+                         #{?snk_kind := will_force_disconnect}),
+         ?force_ordering(#{?snk_kind := force_disconnect},
+                         #{?snk_kind := pulsar_producer_send_req_exit}),
+         spawn_link(fun() ->
+           ?tp(will_force_disconnect, #{}),
+           ProducerPid ! {tcp_closed, port},
+           pulsar_test_utils:enable_failure(FailureType, ProxyHost, ProxyPort),
+           ?tp(force_disconnect, #{}),
+           ok
+         end),
+
+         %% Produce messages that'll expire when resent
+         pulsar:send(Producers,
+                     [#{key => <<"k">>, value => integer_to_binary(SeqNo)}
+                      || SeqNo <- lists:seq(1, 150)]),
+         ?block_until(#{?snk_kind := pulsar_producer_send_req_exit}),
+         ct:sleep(RetentionPeriodMS * 2),
+
+
+         ct:pal("healing failure..."),
+         pulsar_test_utils:heal_failure(FailureType, ProxyHost, ProxyPort),
+         ct:pal("failure healed"),
+         ct:sleep(StabilizationPeriod * 2),
+         ct:pal("waiting for producer to be connected again"),
+         {_, ProducerPid} = pulsar_producers:pick_producer(Producers,
+                                                           [#{key => <<"k">>, value => <<>>}]),
+         pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
+         ct:pal("producer connected"),
+
+         %% we can't assert that the messages have been expired, as
+         %% the produce request might have succeeded in Pulsar's side,
+         %% but our producer doens't know that because of the network
+         %% partition.  we can assert that the messages were deemed
+         %% expired and dropped by checking the trace, and by checking
+         %% that the callback was called with the expiration error.
+         receive
+             {produce_response, {error, expired}} ->
+                 ok
+         after
+             1_000 ->
+                 error(should_have_invoked_callback)
+         end,
+
+         ct:pal("producing message that should be received now"),
+         pulsar:send(Producers, [#{key => <<"k">>, value => <<"should receive">>}]),
+
+         receive
+             {pulsar_message, _Topic1, _Receipt1, [<<"should receive">>]} ->
+                 ok
+         after
+             15_000 ->
+                 error(timeout)
+         end,
+         ok
+       end,
+       fun(Trace) ->
+         ?assertMatch([_], ?of_kind(pulsar_producer_resend_all_expired,
+                                    Trace)),
+         ok
+       end),
 
     ok.
 
@@ -667,6 +818,20 @@ wait_until_consumed(ExpectedPayloads0, Timeout) ->
                     error({missing_messages, lists:sort(sets:to_list(ExpectedPayloads0))})
             end
     end.
+
+fix_broker_service_url(FakePulsarHost) ->
+    %% since the broker reports a proxy URL to itself, we need to
+    %% patch that so we always use toxiproxy.
+    ok = meck:new(pulsar_client, [non_strict, passthrough, no_history]),
+    ok = meck:expect(
+           pulsar_client, lookup_topic,
+           fun(Pid, PartitionTopic) ->
+             case meck:passthrough([Pid, PartitionTopic]) of
+               {ok, Resp} -> {ok, Resp#{brokerServiceUrl => FakePulsarHost}};
+               Error -> Error
+             end
+           end),
+    ok.
 
 %%----------------------
 %% pulsar callback

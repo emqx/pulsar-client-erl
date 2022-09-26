@@ -8,10 +8,10 @@ compile:
 
 clean: distclean
 
-ct: compile
-	$(REBAR) as test ct -v
+ct:
+	$(REBAR) ct -v
 
-eunit: compile
+eunit:
 	$(REBAR) as test eunit
 
 xref:

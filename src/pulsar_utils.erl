@@ -19,6 +19,7 @@
         , hostport_from_url/1
         , maybe_enable_ssl_opts/2
         , maybe_add_proxy_to_broker_url_opts/2
+        , escape_uri/1
         ]).
 
 -export([collect_send_calls/1]).
@@ -67,7 +68,6 @@ collect_send_calls(Cnt) when Cnt > 0 ->
 
 collect_send_calls(0, Acc) ->
     lists:reverse(Acc);
-
 collect_send_calls(Cnt, Acc) ->
     receive
         {'$gen_cast', {send, Messages}} ->
@@ -84,3 +84,41 @@ proplist_diff(Opts1, Opts2) ->
             end,
             proplists:delete(Key, Opts1Acc)
         end, Opts1, Opts2).
+
+%% copied from `edoc_lib' because dialyzer cannot see this private
+%% function there.
+escape_uri([C | Cs]) when C >= $a, C =< $z ->
+    [C | escape_uri(Cs)];
+escape_uri([C | Cs]) when C >= $A, C =< $Z ->
+    [C | escape_uri(Cs)];
+escape_uri([C | Cs]) when C >= $0, C =< $9 ->
+    [C | escape_uri(Cs)];
+escape_uri([C = $. | Cs]) ->
+    [C | escape_uri(Cs)];
+escape_uri([C = $- | Cs]) ->
+    [C | escape_uri(Cs)];
+escape_uri([C = $_ | Cs]) ->
+    [C | escape_uri(Cs)];
+escape_uri([C | Cs]) when C > 16#7f ->
+    %% This assumes that characters are at most 16 bits wide.
+    escape_byte(((C band 16#c0) bsr 6) + 16#c0)
+	++ escape_byte(C band 16#3f + 16#80)
+	++ escape_uri(Cs);
+escape_uri([C | Cs]) ->
+    escape_byte(C) ++ escape_uri(Cs);
+escape_uri([]) ->
+    [].
+
+%% copied from `edoc_lib' because dialyzer cannot see this private
+%% function there.
+%% has a small modification: it uses `=' in place of `%' so that it
+%% won't generate invalid paths in windows.
+escape_byte(C) when C >= 0, C =< 255 ->
+    [$=, hex_digit(C bsr 4), hex_digit(C band 15)].
+
+%% copied from `edoc_lib' because dialyzer cannot see this private
+%% function there.
+hex_digit(N) when N >= 0, N =< 9 ->
+    N + $0;
+hex_digit(N) when N > 9, N =< 15 ->
+    N + $a - 10.

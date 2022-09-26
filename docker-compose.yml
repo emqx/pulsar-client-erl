@@ -3,12 +3,23 @@ version: '3'
 services:
   erlang:
     container_name: erlang
-    image: erlang:22.3
+    image: erlang:24.3.4.2
     volumes:
       - ./:/pulsar_client_erl
     depends_on:
       - pulsar
+      - toxiproxy
     tty: true
+
+  toxiproxy:
+    container_name: proxy
+    image: ghcr.io/shopify/toxiproxy
+    ports:
+      - 8474:8474
+      - 7650:6650
+    expose:
+      - 8474
+    restart: always
 
   pulsar:
     container_name: pulsar

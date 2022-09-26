@@ -25,6 +25,7 @@ jobs:
           sleep 3m
           docker exec -i pulsar sh -c "bin/pulsar-admin topics create-partitioned-topic persistent://public/default/test -p 4"
           docker exec -i erlang sh -c "make -C /pulsar_client_erl xref"
+          docker exec -i erlang sh -c "make -C /pulsar_client_erl dialyzer"
           docker exec -i erlang sh -c "make -C /pulsar_client_erl eunit"
           docker exec -i erlang sh -c "make -C /pulsar_client_erl ct"
           docker exec -i erlang sh -c "make -C /pulsar_client_erl cover"

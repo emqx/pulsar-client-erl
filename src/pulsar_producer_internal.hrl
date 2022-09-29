@@ -1,0 +1,1 @@
+-define(SEND_REQ(From, Messages), {send, From, Messages}).

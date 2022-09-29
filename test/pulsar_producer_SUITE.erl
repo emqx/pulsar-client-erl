@@ -34,20 +34,28 @@ all() ->
     , t_state_rec_roundtrip
     ].
 
-init_per_suite(Cfg) ->
+init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(pulsar),
-    Cfg.
+    Config.
 
-end_per_suite(_Args) ->
+end_per_suite(_Config) ->
     ok = application:stop(pulsar),
     ok.
 
 init_per_testcase(t_code_change_replayq, Config) ->
     PulsarHost = os:getenv("PULSAR_HOST", ?DEFAULT_PULSAR_HOST),
     {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    TestPID = self(),
+    Counter = counters:new(1, [atomics]),
+    Callback =
+        fun(Response) ->
+          counters:add(Counter, 1, 1),
+          erlang:send(TestPID, Response),
+          ok
+        end,
     ProducerOpts = #{ batch_size => 100
                     , strategy => random
-                    , callback => {pulsar_SUITE, producer_callback, []}
+                    , callback => Callback
                     , replayq_dir => "/tmp/replayq1"
                     , replayq_seg_bytes => 20 * 1024 * 1024
                     , replayq_offload_mode => false
@@ -63,6 +71,7 @@ init_per_testcase(t_code_change_replayq, Config) ->
     [ {pulsar_host, PulsarHost}
     , {producer_pid, ProducerPid}
     , {producers, Producers}
+    , {async_counter, Counter}
     | Config];
 init_per_testcase(_TestCase, Config) ->
     Config.
@@ -78,6 +87,17 @@ end_per_testcase(_TestCase, _Config) ->
 %%--------------------------------------------------------------------
 %% Helper fns
 %%--------------------------------------------------------------------
+
+drain_messages(ExpectedN, Acc) when ExpectedN =< 0 ->
+    lists:reverse(Acc);
+drain_messages(ExpectedN, Acc) ->
+    receive
+        Msg ->
+            drain_messages(ExpectedN - 1, [Msg | Acc])
+    after
+        1_000 ->
+            ct:fail("expected messages have not arrived;~n  so far: ~100p", [Acc])
+    end.
 
 %%--------------------------------------------------------------------
 %% Testcases
@@ -105,9 +125,19 @@ t_code_change_replayq(Config) ->
 
     %% check downgrade has no replayq, and replayq is closed.
     ok = sys:suspend(ProducerPid),
-    ok = sys:change_code(ProducerPid, pulsar_producer, {down, vsn}, extra),
+    ExtraDown = #{from_version => {0, 7, 0}, to_version => {0, 6, 4}},
+    %% make some requests to downgrade
+    Messages = [#{key => <<"key">>, value => <<"value">>}],
+    pulsar_producer:send(ProducerPid, Messages),
+    try
+        pulsar_producer:send_sync(ProducerPid, Messages, 1)
+    catch
+        error:timeout -> ok
+    end,
+    ok = sys:change_code(ProducerPid, pulsar_producer, {down, unused_vsn}, ExtraDown),
     %% ok = sys:resume(ProducerPid),
     {_StatemState1, State1} = sys:get_state(ProducerPid),
+    ?assert(is_tuple(State1), #{state_after => State1}),
     ?assertEqual(state, element(1, State1)),
     %% state record has 1 element more (the record name), but also has
     %% one field less (`replayq').
@@ -120,10 +150,11 @@ t_code_change_replayq(Config) ->
 
     %% check upgrade has replayq and retention_period.
     %% ok = sys:suspend(ProducerPid),
-    ok = sys:change_code(ProducerPid, pulsar_producer, vsn, extra),
+    ExtraUp = #{from_version => {0, 6, 4}, to_version => {0, 7, 0}},
+    ok = sys:change_code(ProducerPid, pulsar_producer, unused_vsn, ExtraUp),
     ok = sys:resume(ProducerPid),
     {_StatemState2, State2} = sys:get_state(ProducerPid),
-    ?assert(is_map(State2)),
+    ?assert(is_map(State2), #{state_after => State2}),
     ?assertEqual(OriginalSize, map_size(State2)),
 
     ?assertMatch(
@@ -138,6 +169,12 @@ t_code_change_replayq(Config) ->
     %% new replayq is mem-only, since we can't configure it.
     ?assert(replayq:is_mem_only(Q2)),
 
+    %% one sync, one async
+    drain_messages(_Expected = 2, _Acc = []),
+    %% assert that async callback was called only once
+    Counter = ?config(async_counter, Config),
+    ?assertEqual(1, counters:get(Counter, 1)),
+
     ok.
 
 t_code_change_requests(_Config) ->
@@ -145,24 +182,22 @@ t_code_change_requests(_Config) ->
     %% {replayq:ack_ref(), [gen_statem:from()], [{timestamp(), [pulsar:message()]}]}
     SequenceId = 1,
     AckRef = {1,1},
-    Froms = [{self(), erlang:make_ref()}],
+    From0 = {self(), erlang:make_ref()},
+    From1 = undefined,
     Timestamp0 = erlang:system_time(millisecond),
     Messages0 = [#{key => <<"k1">>, value => <<"v1">>},
                  #{key => <<"k2">>, value => <<"v2">>}],
     Timestamp1 = erlang:system_time(millisecond),
     Messages1 = [#{key => <<"k3">>, value => <<"v3">>}],
-    Request = {AckRef, Froms, [{Timestamp0, Messages0}, {Timestamp1, Messages1}]},
+    FromsToMessages = [{From0, {Timestamp0, Messages0}},
+                       {From1, {Timestamp1, Messages1}}],
+    Request = {inflight_req, AckRef, FromsToMessages},
     Requests0 = #{SequenceId => Request},
 
-    Requests1 = pulsar_producer:code_change_requests({down, vsn}, Requests0),
+    Requests1 = pulsar_producer:code_change_requests_down(Requests0),
     %% old format
     ExpectedBatchLen = length(Messages0 ++ Messages1),
     ?assertEqual(#{SequenceId => {SequenceId, ExpectedBatchLen}}, Requests1),
-
-    Requests2 = pulsar_producer:code_change_requests(vsn, Requests1),
-    %% new format again, but we don't have timestamp nor "from"
-    %% information, so we keep that information as-is.
-    ?assertEqual(#{SequenceId => {SequenceId, ExpectedBatchLen}}, Requests2),
 
     ok.
 

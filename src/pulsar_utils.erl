@@ -20,6 +20,8 @@
         , maybe_enable_ssl_opts/2
         , maybe_add_proxy_to_broker_url_opts/2
         , escape_uri/1
+        , wrap_secrets/1
+        , unwrap_conn_opts/1
         ]).
 
 -export([collect_send_calls/1]).
@@ -122,3 +124,23 @@ hex_digit(N) when N >= 0, N =< 9 ->
     N + $0;
 hex_digit(N) when N > 9, N =< 15 ->
     N + $a - 10.
+
+%% wraps secrets inside connection options to avoid them being stored
+%% in plain-text in supervisors child specs and in the process state,
+%% only to be printed when there's a crash and restart.
+-spec wrap_secrets(#{conn_opts := #{auth_data => term(), any() => term()}, any() => term()}) ->
+          #{conn_opts := #{auth_data => function(), any() => term()}, any() => term()}.
+wrap_secrets(Opts0 = #{conn_opts := ConnOpts0 = #{auth_data := AuthData}}) ->
+    ConnOpts = ConnOpts0#{auth_data := secret:wrap(AuthData)},
+    Opts0#{conn_opts := ConnOpts};
+wrap_secrets(Opts) ->
+    Opts.
+
+-spec unwrap_conn_opts(#{auth_data => function(), any() => term()}) ->
+          #{auth_data => term(), any() => term()}.
+unwrap_conn_opts(ConnOpts0 = #{auth_data := AuthDataFn})
+  when is_function(AuthDataFn, 0) ->
+    AuthData = secret:unwrap(AuthDataFn),
+    ConnOpts0#{auth_data := AuthData};
+unwrap_conn_opts(Opts) ->
+    Opts.

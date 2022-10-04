@@ -33,7 +33,8 @@ init([]) ->
     {ok, {SupFlags, Children}}.
 
 %% ensure a client started under supervisor
-ensure_present(ClientId, Hosts, Opts) ->
+ensure_present(ClientId, Hosts, Opts0) ->
+    Opts = pulsar_utils:wrap_secrets(Opts0),
     ChildSpec = child_spec(ClientId, Hosts, Opts),
     case supervisor:start_child(?SUPERVISOR, ChildSpec) of
         {ok, Pid} -> {ok, Pid};

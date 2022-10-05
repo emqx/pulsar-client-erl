@@ -19,7 +19,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
--include("src/pulsar_producer_internal.hrl").
+-include("include/pulsar_producer_internal.hrl").
 
 -define(TEST_SUIT_CLIENT, ?MODULE).
 -define(DEFAULT_PULSAR_HOST, "pulsar://pulsar:6650").

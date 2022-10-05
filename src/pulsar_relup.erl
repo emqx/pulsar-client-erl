@@ -14,7 +14,7 @@
 
 -module(pulsar_relup).
 
--include("src/pulsar_producer_internal.hrl").
+-include("include/pulsar_producer_internal.hrl").
 
 -define(REPLAYQ_VSN, {0, 7, 0}).
 

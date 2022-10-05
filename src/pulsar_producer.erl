@@ -16,7 +16,7 @@
 
 -behaviour(gen_statem).
 
--include("src/pulsar_producer_internal.hrl").
+-include("include/pulsar_producer_internal.hrl").
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
 
 -export([ send/2

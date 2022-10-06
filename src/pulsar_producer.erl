@@ -35,6 +35,8 @@
         , init/1
         , terminate/3
         , code_change/4
+        , format_status/1
+        , format_status/2
         ]).
 
 %% replayq API
@@ -347,6 +349,25 @@ do_connect(State = #{opts := Opts, broker_server := {Host, Port}}) ->
             {next_state, idle, State#{sock := undefined},
              [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]}
     end.
+
+format_status(Status) ->
+    maps:map(
+      fun(data, Data0) ->
+              censor_secrets(Data0);
+         (_Key, Value)->
+              Value
+      end,
+      Status).
+
+%% `format_status/2' is deprecated as of OTP 25.0
+format_status(_Opt, [_PDict, _State0, Data0]) ->
+    Data = censor_secrets(Data0),
+    [{data, [{"State", Data}]}].
+
+censor_secrets(Data0 = #{opts := Opts0 = #{conn_opts := ConnOpts0 = #{auth_data := _}}}) ->
+    Data0#{opts := Opts0#{conn_opts := ConnOpts0#{auth_data := "******"}}};
+censor_secrets(Data) ->
+    Data.
 
 code_change({down, _ToVsn}, State, Data, Extra) when is_map(Data) ->
     #{to_version := ToVsn} = Extra,

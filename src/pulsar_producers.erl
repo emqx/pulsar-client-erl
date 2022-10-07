@@ -28,6 +28,8 @@
         , handle_info/2
         , init/1
         , terminate/2
+        , format_status/1
+        , format_status/2
         ]).
 
 -record(state, {topic,
@@ -193,6 +195,25 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 terminate(_, _St) -> ok.
+
+format_status(Status) ->
+    maps:map(
+      fun(state, State0) ->
+              censor_secrets(State0);
+         (_Key, Value)->
+              Value
+      end,
+      Status).
+
+%% `format_status/2' is deprecated as of OTP 25.0
+format_status(_Opt, [_PDict, State0]) ->
+    State = censor_secrets(State0),
+    [{data, [{"State", State}]}].
+
+censor_secrets(State0 = #state{producer_opts = Opts0 = #{conn_opts := ConnOpts0 = #{auth_data := _}}}) ->
+    State0#state{producer_opts = Opts0#{conn_opts := ConnOpts0#{auth_data := "******"}}};
+censor_secrets(State) ->
+    State.
 
 restart_producer_later(Partition, PartitionTopic) ->
     erlang:send_after(?T_RETRY_START, self(), {restart_producer, Partition, PartitionTopic}).

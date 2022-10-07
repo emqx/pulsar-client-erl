@@ -25,6 +25,8 @@
         , handle_info/2
         , init/1
         , terminate/2
+        , format_status/1
+        , format_status/2
         ]).
 
 -record(state, {topic,
@@ -106,6 +108,37 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 terminate(_, _St) -> ok.
+
+format_status(Status) ->
+    maps:map(
+      fun(state, State) ->
+              censor_secrets(State);
+         (_Key, Value)->
+              Value
+      end,
+      Status).
+
+%% `format_status/2' is deprecated as of OTP 25.0
+format_status(_Opt, [_PDict, State0]) ->
+    State = censor_secrets(State0),
+    [{data, [{"State", State}]}].
+
+censor_secrets(State0 = #state{consumer_opts = Opts0}) ->
+    Opts1 = censor_conn_opts(Opts0),
+    Opts =
+        maps:map(
+          fun(cb_init_args, CBInitArgs) ->
+                  censor_conn_opts(CBInitArgs);
+             (_Key, Val) ->
+                  Val
+          end,
+          Opts1),
+    State0#state{consumer_opts = Opts}.
+
+censor_conn_opts(Opts0 = #{conn_opts := ConnOpts0 = #{auth_data := _}}) ->
+    Opts0#{conn_opts := ConnOpts0#{auth_data := "******"}};
+censor_conn_opts(Opts) ->
+    Opts.
 
 create_partition_topic(Topic, 0) ->
     [Topic];

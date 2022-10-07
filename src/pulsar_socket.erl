@@ -51,7 +51,8 @@
 
 send_connect_packet(Sock, Opts) ->
     Mod = tcp_module(Opts),
-    Mod:send(Sock, pulsar_protocol_frame:connect(maps:get(conn_opts, Opts, #{}))).
+    ConnOpts = maps:get(conn_opts, Opts, #{}),
+    Mod:send(Sock, pulsar_protocol_frame:connect(ConnOpts)).
 
 send_topic_metadata_packet(Sock, Topic, RequestId, Opts) ->
     Mod = tcp_module(Opts),

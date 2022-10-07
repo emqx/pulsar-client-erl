@@ -13,6 +13,8 @@
 - The producer callback will either be called with the first argument as `{ok, SendReceipt}` when
   publishing is successful or `{error, expired}` if the payload has
   expired before it got sent to Pulsar.
+- Special formatting has been added when printing the process state as
+  to avoid printing secrets during crashes.
 
 # 0.6.4 and earlier
 

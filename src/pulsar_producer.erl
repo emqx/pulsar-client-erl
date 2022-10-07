@@ -16,6 +16,7 @@
 
 -behaviour(gen_statem).
 
+-include("include/pulsar_producer_internal.hrl").
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
 
 -export([ send/2
@@ -34,6 +35,8 @@
         , init/1
         , terminate/3
         , code_change/4
+        , format_status/1
+        , format_status/2
         ]).
 
 %% replayq API
@@ -43,7 +46,7 @@
 
 %% for testing only
 -ifdef(TEST).
--export([ code_change_requests/2
+-export([ code_change_requests_down/1
         , from_old_state_record/1
         , to_old_state_record/1
         ]).
@@ -73,7 +76,6 @@
 -export_type([ config/0
              ]).
 
--define(TIMEOUT, 60_000).
 -define(RECONNECT_TIMEOUT, 5_000).
 
 -define(MAX_REQ_ID, 4294836225).
@@ -83,16 +85,7 @@
 -define(DEFAULT_REPLAYQ_LIMIT, 2_000_000_000).
 -define(DEFAULT_MAX_BATCH_BYTES, 1_000_000).
 -define(Q_ITEM(From, Ts, Messages), {From, Ts, Messages}).
--define(SEND_REQ(From, Messages), {send, From, Messages}).
-
--define(TCPOPTIONS, [
-    binary,
-    {packet,    raw},
-    {reuseaddr, true},
-    {nodelay,   true},
-    {active,    true},
-    {reuseaddr, true},
-    {send_timeout, ?TIMEOUT}]).
+-define(INFLIGHT_REQ(QAckRef, FromsToMessages), {inflight_req, QAckRef, FromsToMessages}).
 
 -type state() :: #{
                    batch_size := non_neg_integer(),
@@ -105,9 +98,11 @@
                    producer_name := atom(),
                    replayq := replayq:q(),
                    request_id := integer(),
-                   requests := #{sequence_id() => [{replayq:ack_ref(),
-                                                    [gen_statem:from() | undefined],
-                                                    [{timestamp(), [pulsar:message()]}]}]},
+                   requests := #{sequence_id() =>
+                                     ?INFLIGHT_REQ(
+                                       replayq:ack_ref(),
+                                        [{gen_statem:from() | undefined,
+                                          {timestamp(), [pulsar:message()]}}])},
                    sequence_id := sequence_id(),
                    sock := undefined | port()
                   }.
@@ -316,18 +311,18 @@ connected(_EventType, {Inet, _, Bin}, State = #{last_bin := LastBin})
 connected(_EventType, ping, State = #{sock := Sock, opts := Opts}) ->
     pulsar_socket:ping(Sock, Opts),
     {keep_state, State};
-connected({call, From}, {send, Messages}, State0) ->
+connected({call, From}, {send, Messages}, State) ->
     %% for race conditions when upgrading from previous versions only
     SendRequest = ?SEND_REQ(From, Messages),
-    State = enqueue_send_requests([SendRequest], State0),
+    self() ! SendRequest,
     {keep_state, State};
 connected({call, From}, _EventContent, _State) ->
     {keep_state_and_data, [{reply, From, {error, unknown_call}}]};
-connected(cast, {send, Messages}, State0) ->
+connected(cast, {send, Messages}, State) ->
     %% for race conditions when upgrading from previous versions only
     From = undefined,
     SendRequest = ?SEND_REQ(From, Messages),
-    State = enqueue_send_requests([SendRequest], State0),
+    self() ! SendRequest,
     {keep_state, State};
 connected(cast, _EventContent, _State) ->
     keep_state_and_data;
@@ -355,19 +350,58 @@ do_connect(State = #{opts := Opts, broker_server := {Host, Port}}) ->
              [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]}
     end.
 
-code_change({down, _Vsn} = Direction, State, Data0, _Extra) ->
+format_status(Status) ->
+    maps:map(
+      fun(data, Data0) ->
+              censor_secrets(Data0);
+         (_Key, Value)->
+              Value
+      end,
+      Status).
+
+%% `format_status/2' is deprecated as of OTP 25.0
+format_status(_Opt, [_PDict, _State0, Data0]) ->
+    Data = censor_secrets(Data0),
+    [{data, [{"State", Data}]}].
+
+censor_secrets(Data0 = #{opts := Opts0 = #{conn_opts := ConnOpts0 = #{auth_data := _}}}) ->
+    Data0#{opts := Opts0#{conn_opts := ConnOpts0#{auth_data := "******"}}};
+censor_secrets(Data) ->
+    Data.
+
+code_change({down, _ToVsn}, State, Data, Extra) when is_map(Data) ->
+    #{to_version := ToVsn} = Extra,
+    case pulsar_relup:is_before_replayq(ToVsn) of
+        true ->
+            do_code_change_down_replayq(State, Data, Extra);
+        false ->
+            {ok, State, Data}
+    end;
+code_change({down, _Vsn}, State, Data, _Extra) ->
+    {ok, State, Data};
+code_change(_ToVsn, State, DataRec, Extra) when is_tuple(DataRec) ->
+    #{to_version := ToVsn} = Extra,
+    case pulsar_relup:is_before_replayq(ToVsn) of
+        true ->
+            {ok, State, DataRec};
+        false ->
+            do_code_change_up_replayq(State, DataRec, Extra)
+    end;
+code_change(_ToVsn, State, Data, _Extra) ->
+    {ok, State, Data}.
+
+do_code_change_down_replayq(State, Data0, _Extra) ->
+    downgrade_buffered_send_requests(Data0),
     Data1 = ensure_replayq_absent(Data0),
     Requests0 = maps:get(requests, Data0),
-    Requests = code_change_requests(Direction, Requests0),
+    Requests = code_change_requests_down(Requests0),
     DataMap = Data1#{requests := Requests},
     DataRec = to_old_state_record(DataMap),
-    {ok, State, DataRec};
-code_change(_Vsn = Direction, State, DataRec, _Extra) ->
+    {ok, State, DataRec}.
+
+do_code_change_up_replayq(State, DataRec, _Extra) ->
     Data0 = from_old_state_record(DataRec),
-    Data1 = ensure_replayq_present(Data0),
-    Requests0 = maps:get(requests, Data0),
-    Requests = code_change_requests(Direction, Requests0),
-    Data = Data1#{requests := Requests},
+    Data = ensure_replayq_present(Data0),
     {ok, State, Data}.
 
 terminate(_Reason, _StateName, _State = #{replayq := Q}) ->
@@ -428,23 +462,22 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
         {SequenceId, BatchLen} ->
             _ = invoke_callback(Callback, {ok, Resp}, BatchLen),
             {keep_state, State#{requests := maps:remove(SequenceId, Reqs)}};
-        {QAckRef, Froms, Messages} ->
+        %% State transferred from hot-upgrade; it doesn't have enough
+        %% info to migrate to the new format.
+        {_FromPID, _Alias} = OldFrom ->
+            gen_statem:reply(OldFrom, {ok, Resp}),
+            {keep_state, State#{requests := maps:remove(SequenceId, Reqs)}};
+        ?INFLIGHT_REQ(QAckRef, FromsToMessages) ->
             ok = replayq:ack(Q, QAckRef),
-            BatchLen =
-                lists:foldl(
-                  fun({_TS, Msgs}, Acc) ->
-                    Acc + length(Msgs)
-                  end,
-                  0,
-                  Messages),
             lists:foreach(
-              fun(undefined) ->
+              fun({undefined, {_TS, Messages}}) ->
+                   BatchLen = length(Messages),
                    _ = invoke_callback(Callback, {ok, Resp}, BatchLen),
                    ok;
-                 (From) ->
+                 ({From, {_TS, _Messages}}) ->
                    gen_statem:reply(From, {ok, Resp})
               end,
-              Froms),
+              FromsToMessages),
             {keep_state, State#{requests := maps:remove(SequenceId, Reqs)}}
     end;
 handle_response({error, #{error := Error, message := Msg}}, State) ->
@@ -548,26 +581,30 @@ do_send_to_pulsar(State0) ->
     State1 = State0#{replayq := NewQ},
     RetentionPeriod = maps:get(retention_period, ProducerOpts, infinity),
     Now = now_ts(),
-    {Expired, Froms, Messages} =
+    {Expired, FromsToMessages} =
        lists:foldr(
-         fun(?Q_ITEM(From, Timestamp, Msgs), {Expired, Froms, AccMsgs}) ->
+         fun(?Q_ITEM(From, Timestamp, Msgs), {Expired, Acc}) ->
            case is_batch_expired(Timestamp, RetentionPeriod, Now) of
-             true -> {[{From, Msgs} | Expired], Froms, AccMsgs};
-             false -> {Expired, [From | Froms], [{Timestamp, Msgs} | AccMsgs]}
+             true ->
+               {[{From, Msgs} | Expired], Acc};
+             false ->
+               {Expired, [{From, {Timestamp, Msgs}} | Acc]}
            end
          end,
-         {[], [], []},
+         {[], []},
          Items),
     reply_expired_messages(Expired, State1),
-    case Messages of
+    case FromsToMessages of
         [] ->
             %% all expired, immediately ack replayq batch and continue
             ok = replayq:ack(Q, QAckRef),
             maybe_send_to_pulsar(State1);
         [_ | _] ->
-            send_batch_payload([Msg || {_Timestamp, Msgs} <- Messages, Msg <- Msgs],
+            send_batch_payload([Msg || {_From, {_Timestamp, Msgs}} <-
+                                           FromsToMessages,
+                                       Msg <- Msgs],
                                SequenceId, State0),
-            Requests = Requests0#{SequenceId => {QAckRef, Froms, Messages}},
+            Requests = Requests0#{SequenceId => ?INFLIGHT_REQ(QAckRef, FromsToMessages)},
             State2 = State1#{requests := Requests},
             State = next_sequence_id(State2),
             maybe_send_to_pulsar(State)
@@ -615,27 +652,28 @@ resend_sent_requests(State) ->
     RetentionPeriod = maps:get(retention_period, ProducerOpts, infinity),
     Requests =
         maps:fold(
-          fun(SequenceId, {QAckRef, Froms, Messages0}, Acc) ->
+          fun(SequenceId, ?INFLIGHT_REQ(QAckRef, FromsToMessages), Acc) ->
                {Messages, Expired} =
-                      lists:partition(
-                        fun({Ts, _Msgs}) ->
-                          not is_batch_expired(Ts, RetentionPeriod, Now)
-                        end,
-                        Messages0),
+                  lists:partition(
+                    fun({_From, {Ts, _Msgs}}) ->
+                      not is_batch_expired(Ts, RetentionPeriod, Now)
+                    end,
+                    FromsToMessages),
                lists:foreach(
-                 fun(From) ->
-                   reply_expired_messages([{From, Msgs} || {_Ts, Msgs} <- Expired], State)
+                 fun({From, {_Ts, Msgs}}) ->
+                   reply_expired_messages([{From, Msgs}], State)
                  end,
-                 Froms),
+                 Expired),
                case Messages of
                    [] ->
                        ?tp(pulsar_producer_resend_all_expired, #{}),
                        ok = replayq:ack(Q, QAckRef),
                        Acc;
                    [_ | _] ->
-                       send_batch_payload([Msg || {_Ts, Msgs} <- Messages, Msg <- Msgs],
+                       send_batch_payload([Msg || {_From, {_Ts, Msgs}} <- Messages,
+                                                  Msg <- Msgs],
                                           SequenceId, State),
-                       Acc#{SequenceId => {QAckRef, Froms, Messages}}
+                       Acc#{SequenceId => ?INFLIGHT_REQ(QAckRef, Messages)}
                end;
              (SequenceId, Req = {_SequenceId1, _BatchLen}, Acc) ->
                %% this clause is when one hot-upgrades from a version
@@ -677,23 +715,33 @@ ensure_replayq_absent(Data0) ->
     end,
     Data.
 
-code_change_requests({down, _Vsn}, Requests) ->
+code_change_requests_down(Requests) ->
     maps:map(
-      fun(SequenceId, {_QAckRef, _Froms, TSMsgs}) ->
+      fun(SequenceId, ?INFLIGHT_REQ(_QAckRef, FromsToMessages)) ->
         lists:foldl(
-         fun({_Timestamp, Messages}, {_SequenceId, BatchLen}) ->
+         fun({_From, {_Ts, Messages}}, {_SequenceId, BatchLen}) ->
            {SequenceId, BatchLen + length(Messages)}
          end,
          {SequenceId, 0},
-         TSMsgs)
+         FromsToMessages)
       end,
-      Requests);
-code_change_requests(_Vsn, Requests) ->
-    %% The upgrade back from the old version is lossy; we can't
-    %% produce an `replayq:ack_ref', the messages themselves, or the
-    %% `Froms'...  Have to handle this case when resending or
-    %% receiving a response.
-    Requests.
+      Requests).
+
+%% when downgrading to a previous version before replayq, there may be
+%% some `?SEND_REQ' messages in the mailbox that'll be unknown to the
+%% old code.  We attempt to convert them to call/casts to avoid losing
+%% them.  Calls might still be lost if the downgrade + processing the
+%% message afterwards takes longer than the call timeout.
+downgrade_buffered_send_requests(#{replayq := Q}) ->
+    {NewQ, QAckRef, BufferedItems} = replayq:pop(Q, #{count_limit => 10_000}),
+    replayq:ack(NewQ, QAckRef),
+    lists:foreach(
+      fun(?Q_ITEM(_From = undefined, _Timestamp, Messages)) ->
+              self() ! {'$gen_cast', {send, Messages}};
+         (?Q_ITEM(From, _Timestamp, Messages)) ->
+              self() ! {'$gen_call', From, {send, Messages}}
+      end,
+      BufferedItems).
 
 %% -record(state, {partitiontopic,
 %%                 broker_server,

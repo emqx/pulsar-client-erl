@@ -49,6 +49,7 @@
 -export([ code_change_requests_down/1
         , from_old_state_record/1
         , to_old_state_record/1
+        , make_queue_item/2
         ]).
 -endif.
 
@@ -134,7 +135,7 @@ send_sync(Pid, Messages) ->
                 | term()}.
 send_sync(Pid, Messages, Timeout) ->
     Caller = self(),
-    MRef = erlang:monitor(process, Pid),
+    MRef = erlang:monitor(process, Pid, [{alias, reply_demonitor}]),
     %% Mimicking gen_statem's From, so the reply can be sent with
     %% `gen_statem:reply/2'
     From = {Caller, MRef},
@@ -541,7 +542,17 @@ queue_item_sizer(?Q_ITEM(_CallId, _Ts, _Batch) = Item) ->
 queue_item_marshaller(?Q_ITEM(_, _, _) = I) ->
   term_to_binary(I);
 queue_item_marshaller(Bin) when is_binary(Bin) ->
-  binary_to_term(Bin).
+  case binary_to_term(Bin) of
+      Item = ?Q_ITEM({Pid, _Tag}, Ts, Msgs) when is_pid(Pid) ->
+          case node(Pid) =:= node() andalso erlang:is_process_alive(Pid) of
+              true ->
+                  Item;
+              false ->
+                  ?Q_ITEM(undefined, Ts, Msgs)
+          end;
+      Item ->
+          Item
+  end.
 
 now_ts() ->
     erlang:system_time(millisecond).

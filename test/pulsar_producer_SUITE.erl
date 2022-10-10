@@ -32,6 +32,7 @@ all() ->
     [ t_code_change_replayq
     , t_code_change_requests
     , t_state_rec_roundtrip
+    , t_queue_item_marshaller
     ].
 
 init_per_suite(Config) ->
@@ -220,3 +221,36 @@ t_state_rec_roundtrip(_Config) ->
     ?assertEqual(StateMap,
                  pulsar_producer:from_old_state_record(
                    pulsar_producer:to_old_state_record(StateMap))).
+
+t_queue_item_marshaller(_Config) ->
+    Pid = spawn_link(
+             fun() ->
+               receive
+                 die -> ok
+               end
+             end),
+    Messages = [#{key => <<"k">>, value => <<"v">>}],
+    Ref = monitor(process, Pid, [{alias, reply_demonitor}]),
+    From = {Pid, Ref},
+    QueueItem0 = pulsar_producer:make_queue_item(From, Messages),
+    QueueItemBin = pulsar_producer:queue_item_marshaller(QueueItem0),
+    ?assert(is_binary(QueueItemBin)),
+    QueueItem1 = pulsar_producer:queue_item_marshaller(QueueItemBin),
+    ?assertNot(is_binary(QueueItem1)),
+    ?assertEqual(QueueItem0, QueueItem1),
+    %% if the pid in `From' is dead, especially if it's from a
+    %% previous incarnation of the Erlang VM, we should convert it to
+    %% an `undefined' atom.
+    Pid ! die,
+    receive
+        {'DOWN', Ref, process, Pid, _} ->
+            ok
+    after
+        100 ->
+            ct:fail("pid should have died")
+    end,
+    QueueItem2 = pulsar_producer:queue_item_marshaller(QueueItemBin),
+    ?assertNot(is_binary(QueueItem2)),
+    ?assertNotEqual(QueueItem0, QueueItem2),
+    ?assertMatch({undefined, _, _}, QueueItem2),
+    ok.

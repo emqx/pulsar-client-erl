@@ -16,6 +16,7 @@
 
 -behaviour(gen_statem).
 
+-include_lib("kernel/include/inet.hrl").
 -include("include/pulsar_producer_internal.hrl").
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
 
@@ -87,6 +88,8 @@
 -define(DEFAULT_MAX_BATCH_BYTES, 1_000_000).
 -define(Q_ITEM(From, Ts, Messages), {From, Ts, Messages}).
 -define(INFLIGHT_REQ(QAckRef, FromsToMessages), {inflight_req, QAckRef, FromsToMessages}).
+-define(NEXT_STATE_IDLE_RECONNECT(State), {next_state, idle, State#{sock := undefined},
+                                           [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]}).
 
 -type state() :: #{
                    batch_size := non_neg_integer(),
@@ -255,7 +258,7 @@ connecting(info, ?SEND_REQ(_, _) = SendRequest, State0) ->
 connecting(info, {CloseEvent, _Sock}, State0 = #{})
   when CloseEvent =:= tcp_closed; CloseEvent =:= ssl_closed ->
     try_close_socket(State0),
-    {next_state, idle, State0#{sock := undefined}, [{next_event, internal, do_connect}]};
+    ?NEXT_STATE_IDLE_RECONNECT(State0);
 connecting(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
     {Cmd, _} = pulsar_protocol_frame:parse(Bin),
     handle_response(Cmd, State);
@@ -298,14 +301,12 @@ connected(_EventType, {InetClose, _Sock}, State = #{partitiontopic := Topic})
         when InetClose == tcp_closed; InetClose == ssl_closed ->
     log_error("connection closed by peer, topic: ~p~n", [Topic], State),
     try_close_socket(State),
-    {next_state, idle, State#{sock := undefined},
-     [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]};
+    ?NEXT_STATE_IDLE_RECONNECT(State);
 connected(_EventType, {InetError, _Sock, Reason}, State = #{partitiontopic := Topic})
         when InetError == tcp_error; InetError == ssl_error ->
     log_error("connection error on topic: ~p, error: ~p~n", [Topic, Reason], State),
     try_close_socket(State),
-    {next_state, idle, State#{sock := undefined},
-     [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]};
+    ?NEXT_STATE_IDLE_RECONNECT(State);
 connected(_EventType, {Inet, _, Bin}, State = #{last_bin := LastBin})
         when Inet == tcp; Inet == ssl ->
     parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
@@ -341,14 +342,12 @@ do_connect(State = #{opts := Opts, broker_server := {Host, Port}}) ->
         {error, Reason} ->
             log_error("error connecting: ~p", [Reason], State),
             try_close_socket(State),
-            {next_state, idle, State#{sock := undefined},
-             [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]}
+            ?NEXT_STATE_IDLE_RECONNECT(State)
     catch
         Kind:Error:Stacktrace ->
             log_error("exception connecting: ~p -> ~p~n  ~p", [Kind, Error, Stacktrace], State),
             try_close_socket(State),
-            {next_state, idle, State#{sock := undefined},
-             [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]}
+            ?NEXT_STATE_IDLE_RECONNECT(State)
     end.
 
 format_status(Status) ->
@@ -427,12 +426,75 @@ handle_response({connected, _ConnectedData}, State = #{
         sock := Sock,
         opts := Opts,
         request_id := RequestId,
-        producer_id := ProducerId,
-        partitiontopic := Topic
+        partitiontopic := PartitionTopic
     }) ->
     start_keepalive(),
-    pulsar_socket:send_create_producer_packet(Sock, Topic, RequestId, ProducerId, Opts),
+    %% if Pulsar went down and then restarted later, we must issue a
+    %% LookupTopic command again after reconnecting.
+    %% https://pulsar.apache.org/docs/2.10.x/developing-binary-protocol/#topic-lookup
+    %% > Topic lookup needs to be performed each time a client needs
+    %% > to create or reconnect a producer or a consumer. Lookup is used
+    %% > to discover which particular broker is serving the topic we are
+    %% > about to use.
+    %% Simply looking up the topic (even from a distinct connection)
+    %% will "unblock" the topic so we may send messages to it.  The
+    %% producer may be started only after that.
+    pulsar_socket:send_lookup_topic_packet(Sock, PartitionTopic, RequestId, Opts),
     {keep_state, next_request_id(State)};
+handle_response({lookupTopicResponse, #{error := Reason, message := Msg, response := 'Failed'}},
+                State) ->
+    log_error("error looking up topic: ~p", [#{msg => Msg, error => Reason}], State),
+    try_close_socket(State),
+    ?NEXT_STATE_IDLE_RECONNECT(State);
+handle_response({lookupTopicResponse, #{} = Response}, State0) ->
+    #{ opts := Opts
+     , partitiontopic := PartitionTopic
+     , broker_server := BrokerServer0
+     , sock := Sock
+     , producer_id := ProducerId
+     , request_id := RequestId
+     } = State0,
+    %% TODO: unify this with similar handler from `pulsar_client' ???
+    ServiceURL =
+        case {Opts, Response} of
+            {#{enable_ssl := true}, #{brokerServiceUrlTls := BrokerServiceUrlTls}} ->
+                BrokerServiceUrlTls;
+            {#{enable_ssl := true}, #{brokerServiceUrl := BrokerServiceUrl}} ->
+                log_error("SSL enabled but brokerServiceUrlTls is not provided by pulsar,"
+                          " falling back to brokerServiceUrl: ~p", [BrokerServiceUrl],
+                          State0),
+                BrokerServiceUrl;
+            {_, #{brokerServiceUrl := BrokerServiceUrl}} ->
+                %% the 'brokerServiceUrl' is a mandatory field in case the SSL is disabled
+                BrokerServiceUrl
+        end,
+    {_Transport, {Host, Port}} = pulsar_utils:parse_url(ServiceURL),
+    BrokerServer1 =
+        %% we do this transformation because usually an IP string is
+        %% given by `pulsar_client', but the lookup might return a
+        %% hostname like `localhost' and trigger the reconnection
+        %% needlessly.
+        case inet:gethostbyname(Host) of
+            {ok, #hostent{h_addr_list = [IP | _]}} ->
+                {inet:ntoa(IP), Port};
+            _ ->
+                {Host, Port}
+        end,
+    case BrokerServer0 =:= BrokerServer1 of
+        false ->
+            %% URL changed; try to reconnect to new URL
+            log_error("broker service url changed from ~p to ~p; reconnecting...",
+                      [BrokerServer0, BrokerServer1],
+                      State0),
+            try_close_socket(State0),
+            State = State0#{ sock := undefined
+                           , broker_server := BrokerServer1
+                           },
+            ?NEXT_STATE_IDLE_RECONNECT(State);
+        true ->
+            pulsar_socket:send_create_producer_packet(Sock, PartitionTopic, RequestId, ProducerId, Opts),
+            {keep_state, next_request_id(State0)}
+    end;
 handle_response({producer_success, #{producer_name := ProName}}, State) ->
     {next_state, connected, State#{producer_name := ProName}};
 handle_response({pong, #{}}, _State) ->
@@ -444,7 +506,7 @@ handle_response({ping, #{}}, #{sock := Sock, opts := Opts}) ->
 handle_response({close_producer, #{}}, State = #{partitiontopic := Topic}) ->
     log_error("Close producer: ~p~n", [Topic], State),
     try_close_socket(State),
-    {next_state, idle, State#{sock := undefined}, [{next_event, internal, do_connect}]};
+    ?NEXT_STATE_IDLE_RECONNECT(State);
 handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                 State = #{callback := Callback, requests := Reqs,
                           replayq := Q}) ->
@@ -484,8 +546,7 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
 handle_response({error, #{error := Error, message := Msg}}, State) ->
     log_error("Response error:~p, msg:~p~n", [Error, Msg], State),
     try_close_socket(State),
-    {next_state, idle, State#{sock := undefined},
-     [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]};
+    ?NEXT_STATE_IDLE_RECONNECT(State);
 handle_response(Msg, State) ->
     log_error("Receive unknown message:~p~n", [Msg], State),
     keep_state_and_data.

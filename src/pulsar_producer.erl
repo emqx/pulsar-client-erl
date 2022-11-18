@@ -228,7 +228,7 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
 idle(enter, _OldState, _State) ->
     keep_state_and_data;
 idle(_, do_connect, State) ->
-    do_connect(State);
+    refresh_urls_and_connect(State);
 idle({call, From}, {send, Messages}, State0) ->
     %% for race conditions when upgrading from previous versions only
     SendRequest = ?SEND_REQ(From, Messages),
@@ -256,7 +256,7 @@ idle(_EventType, _Event, _State) ->
 connecting(enter, _OldState, _State) ->
     keep_state_and_data;
 connecting(_, do_connect, State) ->
-    do_connect(State);
+    refresh_urls_and_connect(State);
 connecting(info, ?SEND_REQ(_, _) = SendRequest, State0) ->
     State = enqueue_send_requests([SendRequest], State0),
     {keep_state, State};
@@ -367,6 +367,53 @@ connected(cast, _EventContent, _State) ->
 connected(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
 
+-spec refresh_urls_and_connect(state()) -> handler_result().
+refresh_urls_and_connect(State0) ->
+    %% if Pulsar went down and then restarted later, we must issue a
+    %% LookupTopic command again after reconnecting.
+    %% https://pulsar.apache.org/docs/2.10.x/developing-binary-protocol/#topic-lookup
+    %% > Topic lookup needs to be performed each time a client needs
+    %% > to create or reconnect a producer or a consumer. Lookup is used
+    %% > to discover which particular broker is serving the topic we are
+    %% > about to use.
+    %% Simply looking up the topic (even from a distinct connection)
+    %% will "unblock" the topic so we may send messages to it.  The
+    %% producer may be started only after that.
+    #{broker_server := OldBrokerServer} = State0,
+    OldBrokerServiceURL = get(proxy_to_broker_url),
+    try lookup_topic_and_refresh_urls(State0) of
+        {ok, #{ alive_pulsar_url := AlivePulsarURL
+              , broker_service_url := NewBrokerServiceURL
+              }} ->
+            {_Transport, NewBrokerServer} = pulsar_utils:parse_url(AlivePulsarURL),
+            case {OldBrokerServer, OldBrokerServiceURL} =:= {NewBrokerServer, NewBrokerServiceURL} of
+                true ->
+                    do_connect(State0);
+                false ->
+                    %% broker changed; reconnect.
+                    log_error("pulsar broker changed: ~0p -> ~0p; reconnecting...",
+                              [ #{ broker_server => OldBrokerServer
+                                 , proxy_url => OldBrokerServiceURL
+                                 }
+                              , #{ broker_server => NewBrokerServer
+                                 , proxy_url => NewBrokerServiceURL
+                                 }
+                              ],
+                              State0),
+                    try_close_socket(State0),
+                    State = State0#{broker_server := NewBrokerServer},
+                    put(proxy_to_broker_url, NewBrokerServiceURL),
+                    ?NEXT_STATE_IDLE_RECONNECT(State)
+            end;
+        {error, _Reason} ->
+            %% try again some time later; error already logged
+            ?NEXT_STATE_IDLE_RECONNECT(State0)
+    catch
+        exit:{timeout, _} ->
+            log_error("timed out calling client", [], State0),
+            ?NEXT_STATE_IDLE_RECONNECT(State0)
+    end.
+
 -spec do_connect(state()) -> handler_result().
 do_connect(State = #{opts := Opts, broker_server := {Host, Port}}) ->
     try pulsar_socket:connect(Host, Port, Opts) of
@@ -459,55 +506,15 @@ parse({Cmd, LastBin}, State) ->
 -spec handle_response(_EventContent, state()) ->
           handler_result().
 handle_response({connected, _ConnectedData}, State0 = #{
-        broker_server := OldBrokerServer,
         sock := Sock,
         opts := Opts,
         producer_id := ProducerId,
         request_id := RequestId,
         partitiontopic := PartitionTopic
     }) ->
-    OldBrokerServiceURL = get(proxy_to_broker_url),
     start_keepalive(),
-    %% if Pulsar went down and then restarted later, we must issue a
-    %% LookupTopic command again after reconnecting.
-    %% https://pulsar.apache.org/docs/2.10.x/developing-binary-protocol/#topic-lookup
-    %% > Topic lookup needs to be performed each time a client needs
-    %% > to create or reconnect a producer or a consumer. Lookup is used
-    %% > to discover which particular broker is serving the topic we are
-    %% > about to use.
-    %% Simply looking up the topic (even from a distinct connection)
-    %% will "unblock" the topic so we may send messages to it.  The
-    %% producer may be started only after that.
-    case lookup_topic_and_refresh_urls(State0) of
-        {ok, #{ alive_pulsar_url := AlivePulsarURL
-              , broker_service_url := NewBrokerServiceURL
-              }} ->
-            {_Transport, NewBrokerServer} = pulsar_utils:parse_url(AlivePulsarURL),
-            case {OldBrokerServer, OldBrokerServiceURL} =:= {NewBrokerServer, NewBrokerServiceURL} of
-                true ->
-                    pulsar_socket:send_create_producer_packet(Sock, PartitionTopic, RequestId, ProducerId, Opts),
-                    {keep_state, next_request_id(State0)};
-                false ->
-                    %% broker changed; reconnect.
-                    log_error("pulsar broker changed: ~0p -> ~0p; reconnecting...",
-                              [ #{ broker_server => OldBrokerServer
-                                 , proxy_url => OldBrokerServiceURL
-                                 }
-                              , #{ broker_server => NewBrokerServer
-                                 , proxy_url => NewBrokerServiceURL
-                                 }
-                              ],
-                              State0),
-                    try_close_socket(State0),
-                    State = State0#{broker_server := NewBrokerServer},
-                    put(proxy_to_broker_url, NewBrokerServiceURL),
-                    ?NEXT_STATE_IDLE_RECONNECT(State)
-            end;
-        {error, _Reason} ->
-            %% try again some time later; error already logged
-            try_close_socket(State0),
-            ?NEXT_STATE_IDLE_RECONNECT(State0)
-    end;
+    pulsar_socket:send_create_producer_packet(Sock, PartitionTopic, RequestId, ProducerId, Opts),
+    {keep_state, next_request_id(State0)};
 handle_response({producer_success, #{producer_name := ProName}}, State) ->
     {next_state, connected, State#{producer_name := ProName}};
 handle_response({pong, #{}}, _State) ->

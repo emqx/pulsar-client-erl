@@ -141,8 +141,8 @@ t_code_change_replayq(Config) ->
     ?assert(is_tuple(State1), #{state_after => State1}),
     ?assertEqual(state, element(1, State1)),
     %% state record has 1 element more (the record name), but also has
-    %% one field less (`replayq').
-    ?assertEqual(OriginalSize, tuple_size(State1)),
+    %% two fields less (`replayq' and `clientid').
+    ?assertEqual(OriginalSize, tuple_size(State1) + 1),
     Opts1 = element(9, State1),
     ?assertNot(maps:is_key(replayq, Opts1)),
     ?assertNot(maps:is_key(retention_period, Opts1)),
@@ -163,6 +163,8 @@ t_code_change_replayq(Config) ->
                       , sizer := _
                       , stats := _
                       }
+          %% cannot infer clientid...
+        , clientid := undefined
         },
        State2),
     #{replayq := Q2, opts := Opts2} = State2,
@@ -208,6 +210,7 @@ t_state_rec_roundtrip(_Config) ->
                         || K <- [ batch_size
                                 , broker_server
                                 , callback
+                                , clientid
                                 , last_bin
                                 , opts
                                 , partitiontopic
@@ -218,7 +221,8 @@ t_state_rec_roundtrip(_Config) ->
                                 , sequence_id
                                 , sock
                                 ]]),
-    ?assertEqual(StateMap,
+    %% only clientid is not preserved
+    ?assertEqual(StateMap#{clientid := undefined},
                  pulsar_producer:from_old_state_record(
                    pulsar_producer:to_old_state_record(StateMap))).
 

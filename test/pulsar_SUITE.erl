@@ -63,6 +63,7 @@ groups() ->
     ].
 
 init_per_suite(Cfg) ->
+    ct:timetrap({minutes, 3}),
     Cfg.
 
 end_per_suite(_Args) ->

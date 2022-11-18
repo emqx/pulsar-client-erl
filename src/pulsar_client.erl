@@ -255,8 +255,8 @@ handle_response({lookupTopicResponse, #{request_id := RequestId} = Response},
                     {#{enable_ssl := true}, #{brokerServiceUrlTls := BrokerServiceUrlTls}} ->
                         BrokerServiceUrlTls;
                     {#{enable_ssl := true}, #{brokerServiceUrl := BrokerServiceUrl}} ->
-                        log_error("SSL enabed but brokerServiceUrlTls is not provided by the puslar"
-                                  " server, fallback to use brokerServiceUrl: ~p", [BrokerServiceUrl]),
+                        log_error("SSL enabled but brokerServiceUrlTls is not provided by pulsar,"
+                                  " falling back to brokerServiceUrl: ~p", [BrokerServiceUrl]),
                         BrokerServiceUrl;
                     {_, #{brokerServiceUrl := BrokerServiceUrl}} ->
                         %% the 'brokerServiceUrl' is a mandatory field in case the SSL is disabled

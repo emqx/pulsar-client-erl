@@ -71,6 +71,7 @@
                    , replayq_offload_mode => boolean()
                    , max_batch_bytes => pos_integer()
                    , producer_name => atom()
+                   , clientid => atom()
                    , callback => callback()
                    , batch_size => non_neg_integer()
                    , retention_period => timeout()
@@ -95,6 +96,9 @@
                    batch_size := non_neg_integer(),
                    broker_server := {binary(), pos_integer()},
                    callback := undefined | mfa() | fun((map()) -> ok),
+                   %% Note: clientid might be undefined if
+                   %% hot-upgraded from version without it.
+                   clientid := atom(),
                    last_bin := binary(),
                    opts := map(),
                    partitiontopic := binary(),
@@ -202,6 +206,7 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
         batch_size => maps:get(batch_size, ProducerOpts, 0),
         broker_server => BrokerServer,
         callback => maps:get(callback, ProducerOpts, undefined),
+        clientid => maps:get(clientid, ProducerOpts),
         last_bin => <<>>,
         opts => pulsar_utils:maybe_enable_ssl_opts(Transport, ProducerOpts),
         partitiontopic => PartitionTopic,
@@ -255,10 +260,19 @@ connecting(_, do_connect, State) ->
 connecting(info, ?SEND_REQ(_, _) = SendRequest, State0) ->
     State = enqueue_send_requests([SendRequest], State0),
     {keep_state, State};
-connecting(info, {CloseEvent, _Sock}, State0 = #{})
+connecting(info, {CloseEvent, _Sock}, State0 = #{clientid := ClientId})
   when CloseEvent =:= tcp_closed; CloseEvent =:= ssl_closed ->
     try_close_socket(State0),
-    ?NEXT_STATE_IDLE_RECONNECT(State0);
+    %% NOTE: after hot-upgrade from version where clientid is
+    %% undefined, we cannot try to reconnect: we need to lookup the
+    %% broker URL again, and `pulsar_client' does that.  We just stop
+    %% and let `pulsar_producers' restart this producer.
+    case ClientId of
+        undefined ->
+            {stop, {error, no_clientid}};
+        _ ->
+            ?NEXT_STATE_IDLE_RECONNECT(State0)
+    end;
 connecting(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
     {Cmd, _} = pulsar_protocol_frame:parse(Bin),
     handle_response(Cmd, State);
@@ -297,16 +311,38 @@ connected(info, ?SEND_REQ(_, _) = SendRequest, State0 = #{batch_size := BatchSiz
     State = maybe_send_to_pulsar(State1),
     ?tp(pulsar_producer_send_req_exit, #{}),
     {keep_state, State};
-connected(_EventType, {InetClose, _Sock}, State = #{partitiontopic := Topic})
+connected(_EventType, {InetClose, _Sock}, State = #{ partitiontopic := Topic
+                                                   , clientid := ClientId
+                                                   })
         when InetClose == tcp_closed; InetClose == ssl_closed ->
     log_error("connection closed by peer, topic: ~p~n", [Topic], State),
     try_close_socket(State),
-    ?NEXT_STATE_IDLE_RECONNECT(State);
-connected(_EventType, {InetError, _Sock, Reason}, State = #{partitiontopic := Topic})
+    %% NOTE: after hot-upgrade from version where clientid is
+    %% undefined, we cannot try to reconnect: we need to lookup the
+    %% broker URL again, and `pulsar_client' does that.  We just stop
+    %% and let `pulsar_producers' restart this producer.
+    case ClientId of
+        undefined ->
+            {stop, {error, no_clientid}};
+        _ ->
+            ?NEXT_STATE_IDLE_RECONNECT(State)
+    end;
+connected(_EventType, {InetError, _Sock, Reason}, State = #{ clientid := ClientId
+                                                           , partitiontopic := Topic
+                                                           })
         when InetError == tcp_error; InetError == ssl_error ->
     log_error("connection error on topic: ~p, error: ~p~n", [Topic, Reason], State),
     try_close_socket(State),
-    ?NEXT_STATE_IDLE_RECONNECT(State);
+    %% NOTE: after hot-upgrade from version where clientid is
+    %% undefined, we cannot try to reconnect: we need to lookup the
+    %% broker URL again, and `pulsar_client' does that.  We just stop
+    %% and let `pulsar_producers' restart this producer.
+    case ClientId of
+        undefined ->
+            {stop, {error, no_clientid}};
+        _ ->
+            ?NEXT_STATE_IDLE_RECONNECT(State)
+    end;
 connected(_EventType, {Inet, _, Bin}, State = #{last_bin := LastBin})
         when Inet == tcp; Inet == ssl ->
     parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
@@ -422,12 +458,15 @@ parse({Cmd, LastBin}, State) ->
 
 -spec handle_response(_EventContent, state()) ->
           handler_result().
-handle_response({connected, _ConnectedData}, State = #{
+handle_response({connected, _ConnectedData}, State0 = #{
+        broker_server := OldBrokerServer,
         sock := Sock,
         opts := Opts,
+        producer_id := ProducerId,
         request_id := RequestId,
         partitiontopic := PartitionTopic
     }) ->
+    OldBrokerServiceURL = get(proxy_to_broker_url),
     start_keepalive(),
     %% if Pulsar went down and then restarted later, we must issue a
     %% LookupTopic command again after reconnecting.
@@ -439,23 +478,36 @@ handle_response({connected, _ConnectedData}, State = #{
     %% Simply looking up the topic (even from a distinct connection)
     %% will "unblock" the topic so we may send messages to it.  The
     %% producer may be started only after that.
-    pulsar_socket:send_lookup_topic_packet(Sock, PartitionTopic, RequestId, Opts),
-    {keep_state, next_request_id(State)};
-handle_response({lookupTopicResponse, #{error := Reason, message := Msg, response := 'Failed'}},
-                State) ->
-    log_error("error looking up topic: ~p", [#{msg => Msg, error => Reason}], State),
-    try_close_socket(State),
-    ?NEXT_STATE_IDLE_RECONNECT(State);
-handle_response({lookupTopicResponse, #{} = _Response}, State0) ->
-    #{ opts := Opts
-     , partitiontopic := PartitionTopic
-     , sock := Sock
-     , producer_id := ProducerId
-     , request_id := RequestId
-     } = State0,
-    %% FIXME: should we check if the URL changed? How???
-    pulsar_socket:send_create_producer_packet(Sock, PartitionTopic, RequestId, ProducerId, Opts),
-    {keep_state, next_request_id(State0)};
+    case lookup_topic_and_refresh_urls(State0) of
+        {ok, #{ alive_pulsar_url := AlivePulsarURL
+              , broker_service_url := NewBrokerServiceURL
+              }} ->
+            {_Transport, NewBrokerServer} = pulsar_utils:parse_url(AlivePulsarURL),
+            case {OldBrokerServer, OldBrokerServiceURL} =:= {NewBrokerServer, NewBrokerServiceURL} of
+                true ->
+                    pulsar_socket:send_create_producer_packet(Sock, PartitionTopic, RequestId, ProducerId, Opts),
+                    {keep_state, next_request_id(State0)};
+                false ->
+                    %% broker changed; reconnect.
+                    log_error("pulsar broker changed: ~0p -> ~0p; reconnecting...",
+                              [ #{ broker_server => OldBrokerServer
+                                 , proxy_url => OldBrokerServiceURL
+                                 }
+                              , #{ broker_server => NewBrokerServer
+                                 , proxy_url => NewBrokerServiceURL
+                                 }
+                              ],
+                              State0),
+                    try_close_socket(State0),
+                    State = State0#{broker_server := NewBrokerServer},
+                    put(proxy_to_broker_url, NewBrokerServiceURL),
+                    ?NEXT_STATE_IDLE_RECONNECT(State)
+            end;
+        {error, _Reason} ->
+            %% try again some time later; error already logged
+            try_close_socket(State0),
+            ?NEXT_STATE_IDLE_RECONNECT(State0)
+    end;
 handle_response({producer_success, #{producer_name := ProName}}, State) ->
     {next_state, connected, State#{producer_name := ProName}};
 handle_response({pong, #{}}, _State) ->
@@ -464,10 +516,21 @@ handle_response({pong, #{}}, _State) ->
 handle_response({ping, #{}}, #{sock := Sock, opts := Opts}) ->
     pulsar_socket:pong(Sock, Opts),
     keep_state_and_data;
-handle_response({close_producer, #{}}, State = #{partitiontopic := Topic}) ->
+handle_response({close_producer, #{}}, State = #{ clientid := ClientId
+                                                , partitiontopic := Topic
+                                                }) ->
     log_error("Close producer: ~p~n", [Topic], State),
     try_close_socket(State),
-    ?NEXT_STATE_IDLE_RECONNECT(State);
+    %% NOTE: after hot-upgrade from version where clientid is
+    %% undefined, we cannot try to reconnect: we need to lookup the
+    %% broker URL again, and `pulsar_client' does that.  We just stop
+    %% and let `pulsar_producers' restart this producer.
+    case ClientId of
+        undefined ->
+            {stop, {error, no_clientid}};
+        _ ->
+            ?NEXT_STATE_IDLE_RECONNECT(State)
+    end;
 handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                 State = #{callback := Callback, requests := Reqs,
                           replayq := Q}) ->
@@ -504,10 +567,19 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
               FromsToMessages),
             {keep_state, State#{requests := maps:remove(SequenceId, Reqs)}}
     end;
-handle_response({error, #{error := Error, message := Msg}}, State) ->
+handle_response({error, #{error := Error, message := Msg}}, State = #{clientid := ClientId}) ->
     log_error("Response error:~p, msg:~p~n", [Error, Msg], State),
     try_close_socket(State),
-    ?NEXT_STATE_IDLE_RECONNECT(State);
+    %% NOTE: after hot-upgrade from version where clientid is
+    %% undefined, we cannot try to reconnect: we need to lookup the
+    %% broker URL again, and `pulsar_client' does that.  We just stop
+    %% and let `pulsar_producers' restart this producer.
+    case ClientId of
+        undefined ->
+            {stop, {error, no_clientid}};
+        _ ->
+            ?NEXT_STATE_IDLE_RECONNECT(State)
+    end;
 handle_response(Msg, State) ->
     log_error("Receive unknown message:~p~n", [Msg], State),
     keep_state_and_data.
@@ -807,6 +879,8 @@ to_old_state_record(StateMap = #{}) ->
 from_old_state_record(StateRec) ->
     #{ partitiontopic => element(2, StateRec)
      , broker_server => element(3, StateRec)
+       %% cannot infer the clientid here...
+     , clientid => undefined
      , sock => element(4, StateRec)
      , request_id => element(5, StateRec)
      , producer_id => element(6, StateRec)
@@ -823,3 +897,54 @@ from_old_state_record(StateRec) ->
 escape(Str) ->
     NormalizedStr = unicode:characters_to_nfd_list(Str),
     iolist_to_binary(pulsar_utils:escape_uri(NormalizedStr)).
+
+-spec lookup_topic_and_refresh_urls(state()) ->
+          {ok, #{ alive_pulsar_url => string()
+                , broker_service_url => string() | undefined
+                }}
+          | {error, term()}.
+lookup_topic_and_refresh_urls(State) ->
+    #{clientid := ClientId} = State,
+    case pulsar_client_sup:find_client(ClientId) of
+        {ok, ClientPid} ->
+            do_lookup_topic(ClientPid, State);
+        {error, Reason} ->
+            log_error("client ~p not found; error: ~0p", [ClientId, Reason], State),
+            {error, Reason}
+    end.
+
+do_lookup_topic(ClientPid, State) ->
+    #{ partitiontopic := PartitionTopic
+     } = State,
+    case pulsar_client:lookup_topic(ClientPid, PartitionTopic) of
+        {ok, #{ brokerServiceUrl := _BrokerServiceURL
+              , proxy_through_service_url := _IsProxy
+              } = LookupTopicResponse} ->
+            do_refresh_urls(ClientPid, LookupTopicResponse, State);
+        {error, Reason} ->
+            log_error("error looking up pulsar topic: ~0p", [Reason], State),
+            {error, Reason}
+    end.
+
+do_refresh_urls(ClientPid,
+                _LookupTopicResponse = #{ proxy_through_service_url := true
+                                        , brokerServiceUrl := BrokerServiceURL
+                                        },
+                State) ->
+    case pulsar_client:get_alive_pulsar_url(ClientPid) of
+        {ok, AlivePulsarURL} ->
+            {ok, #{ alive_pulsar_url => AlivePulsarURL
+                  , broker_service_url => BrokerServiceURL
+                  }};
+        {error, Reason} ->
+            log_error("error getting pulsar alive URL: ~0p", [Reason], State),
+            {error, Reason}
+    end;
+do_refresh_urls(_ClientPid,
+                _LookupTopicResponse = #{ proxy_through_service_url := false
+                                        , brokerServiceUrl := BrokerServiceURL
+                                        },
+                _State) ->
+    {ok, #{ alive_pulsar_url => BrokerServiceURL
+          , broker_service_url => undefined
+          }}.

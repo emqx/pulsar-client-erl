@@ -250,9 +250,10 @@ start_producer(Pid, Partition, PartitionTopic, State) ->
     end.
 
 do_start_producer(#state{
+        client_id = ClientId,
         producers = Producers,
         workers = Workers,
-        producer_opts = ProducerOpts,
+        producer_opts = ProducerOpts0,
         producer_id = ProducerID} = State, Pid, Partition, PartitionTopic, BrokerServiceURL, IsProxy) ->
     NextID = next_producer_id(ProducerID),
     {AlivePulsarURL, ProxyToBrokerURL} = case IsProxy of
@@ -261,8 +262,11 @@ do_start_producer(#state{
                 {ok, URL} = pulsar_client:get_alive_pulsar_url(Pid),
                 {URL, BrokerServiceURL}
         end,
+    ProducerOpts = ProducerOpts0#{ producer_id => NextID
+                                 , clientid => ClientId
+                                 },
     {ok, Producer} = pulsar_producer:start_link(PartitionTopic,
-        AlivePulsarURL, ProxyToBrokerURL, ProducerOpts#{producer_id => NextID}),
+        AlivePulsarURL, ProxyToBrokerURL, ProducerOpts),
     ets:insert(Workers, {Partition, Producer}),
     State#state{
         producers = maps:put(Producer, {Partition, PartitionTopic}, Producers),

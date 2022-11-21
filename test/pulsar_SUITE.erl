@@ -372,6 +372,7 @@ t_pulsar_drop_expired_batch(Config) ->
     FailureType = ?config(failure_type, Config),
     StabilizationPeriod = timer:seconds(15),
     {ok, _} = application:ensure_all_started(pulsar),
+    ok = snabbkaffe:start_trace(),
 
     {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ct:pal("started client"),
@@ -379,11 +380,11 @@ t_pulsar_drop_expired_batch(Config) ->
         cb_init_args => #{send_to => self()},
         cb_module => pulsar_echo_consumer,
         sub_type => 'Shared',
-        subscription => "pulsar_test_expired",
+        subscription => "pulsar_test_expired" ++ integer_to_list(erlang:unique_integer()),
         max_consumer_num => 1,
         name => pulsar_test_expired
     },
-    Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
+    Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME) ++ integer_to_list(erlang:unique_integer()),
     {ok, _Consumers} = pulsar:ensure_supervised_consumers(
                         ?TEST_SUIT_CLIENT,
                         Topic,
@@ -404,11 +405,19 @@ t_pulsar_drop_expired_batch(Config) ->
                         Topic,
                         ProducerOpts),
     ct:pal("started producer"),
+    {_, ProducerPid} = pulsar_producers:pick_producer(Producers,
+                                                      [#{key => <<"k">>, value => <<>>}]),
+    pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 15, _Sleep = 5_000),
 
     ct:pal("cutting connection with pulsar..."),
     pulsar_test_utils:enable_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection cut"),
     ct:sleep(StabilizationPeriod),
+    %% we wait for the producer to be connected and then to be idle
+    %% here before producing the messages to avoid it hanging during
+    %% the send, at which point the check for expiration was already
+    %% done...
+    pulsar_test_utils:wait_for_state(ProducerPid, idle, _Retries = 15, _Sleep = 5_000),
 
     %% Produce messages that'll expire
     ok = snabbkaffe:start_trace(),
@@ -419,22 +428,18 @@ t_pulsar_drop_expired_batch(Config) ->
                        [#{key => <<"k">>, value => integer_to_binary(SeqNo)}
                         || SeqNo <- lists:seq(1, 150)]),
           #{?snk_kind := pulsar_producer_send_requests_enqueued},
-          _Timeout = 35_000),
+          _Timeout1 = 35_000),
     ct:pal("waiting for retention period to expire..."),
-    ct:sleep(RetentionPeriodMS * 2),
+    ct:sleep(RetentionPeriodMS * 10),
 
     ct:pal("reestablishing connection with pulsar..."),
     pulsar_test_utils:heal_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection reestablished"),
-    ct:sleep(StabilizationPeriod * 2),
 
     ct:pal("waiting for producer to be connected again"),
     {_, ProducerPid} = pulsar_producers:pick_producer(Producers,
                                                       [#{key => <<"k">>, value => <<>>}]),
-    %% for better debugging
-    ?check_trace(
-      pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 10, _Sleep = 5_000),
-      []),
+    pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 15, _Sleep = 5_000),
     ct:pal("producer connected"),
 
     receive
@@ -459,7 +464,7 @@ t_pulsar_drop_expired_batch(Config) ->
         {pulsar_message, _Topic1, _Receipt1, [<<"should receive">>]} ->
             ok
     after
-        15_000 ->
+        30_000 ->
             error(timeout)
     end,
 

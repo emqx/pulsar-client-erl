@@ -80,6 +80,7 @@
              ]).
 
 -define(RECONNECT_TIMEOUT, 5_000).
+-define(LOOKUP_TOPIC_TIMEOUT, 15_000).
 
 -define(MAX_REQ_ID, 4294836225).
 -define(MAX_SEQ_ID, 18445618199572250625).
@@ -228,10 +229,16 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
 -spec idle(gen_statem:event_type(), _EventContent, state()) ->
           handler_result().
 idle(enter, _OldState, _State) ->
-    ?tp(pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
+    ?tp(debug, pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
     keep_state_and_data;
-idle(_, do_connect, State) ->
+idle(internal, do_connect, State) ->
     refresh_urls_and_connect(State);
+idle(state_timeout, do_connect, State) ->
+    refresh_urls_and_connect(State);
+idle(state_timeout, lookup_topic_timeout, State0) ->
+    log_error("timed out waiting for lookup topic response", [], State0),
+    State = State0#{lookup_topic_request_ref := undefined},
+    ?NEXT_STATE_IDLE_RECONNECT(State);
 idle({call, From}, {send, Messages}, State0) ->
     %% for race conditions when upgrading from previous versions only
     SendRequest = ?SEND_REQ(From, Messages),
@@ -266,10 +273,14 @@ idle(_EventType, _Event, _State) ->
 -spec connecting(gen_statem:event_type(), _EventContent, state()) ->
           handler_result().
 connecting(enter, _OldState, _State) ->
-    ?tp(pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
+    ?tp(debug, pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
     keep_state_and_data;
-connecting(_, do_connect, State) ->
+connecting(state_timeout, do_connect, State) ->
     refresh_urls_and_connect(State);
+connecting(state_timeout, lookup_topic_timeout, State0) ->
+    log_error("timed out waiting for lookup topic response", [], State0),
+    State = State0#{lookup_topic_request_ref := undefined},
+    ?NEXT_STATE_IDLE_RECONNECT(State);
 connecting(info, ?SEND_REQ(_, _) = SendRequest, State0) ->
     State = enqueue_send_requests([SendRequest], State0),
     {keep_state, State};
@@ -321,12 +332,16 @@ connecting(cast, _EventContent, _State) ->
 -spec connected(gen_statem:event_type(), _EventContent, state()) ->
           handler_result().
 connected(enter, _OldState, State0) ->
-    ?tp(pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
+    ?tp(debug, pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
     State1 = resend_sent_requests(State0),
     State = maybe_send_to_pulsar(State1),
     {keep_state, State};
-connected(_, do_connect, _State) ->
+connected(state_timeout, do_connect, _State) ->
     keep_state_and_data;
+connected(state_timeout, lookup_topic_timeout, State0) ->
+    log_error("timed out waiting for lookup topic response", [], State0),
+    State = State0#{lookup_topic_request_ref := undefined},
+    ?NEXT_STATE_IDLE_RECONNECT(State);
 connected(info, ?SEND_REQ(_, _) = SendRequest, State0 = #{batch_size := BatchSize}) ->
     ?tp(pulsar_producer_send_req_enter, #{}),
     SendRequests = collect_send_requests([SendRequest], BatchSize),
@@ -414,10 +429,11 @@ refresh_urls_and_connect(State0) ->
     #{ clientid := ClientId
      , partitiontopic := PartitionTopic
      } = State0,
+    ?tp(debug, pulsar_producer_refresh_start, #{}),
     try pulsar_client:lookup_topic_async(ClientId, PartitionTopic) of
         {ok, LookupTopicRequestRef} ->
             State = State0#{lookup_topic_request_ref := LookupTopicRequestRef},
-            {keep_state, State}
+            {keep_state, State, [{state_timeout, ?LOOKUP_TOPIC_TIMEOUT, lookup_topic_timeout}]}
     catch
         exit:{noproc, _} ->
             log_error("client restarting; will retry later", [], State0),
@@ -927,6 +943,7 @@ handle_lookup_topic_reply({ok, #{ proxy_through_service_url := true
                                 , brokerServiceUrl := NewBrokerServiceURL
                                 }}, State0) ->
     #{clientid := ClientId} = State0,
+    ?tp(debug, pulsar_producer_lookup_alive_pulsar_url, #{}),
     try pulsar_client:get_alive_pulsar_url(ClientId) of
         {ok, AlivePulsarURL} ->
             maybe_connect(#{ broker_service_url => NewBrokerServiceURL

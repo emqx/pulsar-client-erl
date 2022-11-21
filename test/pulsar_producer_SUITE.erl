@@ -96,7 +96,7 @@ drain_messages(ExpectedN, Acc) ->
         Msg ->
             drain_messages(ExpectedN - 1, [Msg | Acc])
     after
-        30_000 ->
+        60_000 ->
             ct:fail("expected messages have not arrived;~n  so far: ~100p", [Acc])
     end.
 
@@ -106,6 +106,10 @@ drain_messages(ExpectedN, Acc) ->
 
 t_code_change_replayq(Config) ->
     ProducerPid = ?config(producer_pid, Config),
+
+    %% wait producer to be connected for this test to avoid race
+    %% conditions with looking up topic...
+    pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
 
     {_StatemState0, State0} = sys:get_state(ProducerPid),
 
@@ -125,9 +129,11 @@ t_code_change_replayq(Config) ->
     #{w_cur := #{fd := {_, _, #{pid := ReplayQPID}}}} = Q,
 
     %% check downgrade has no replayq, and replayq is closed.
+    ct:pal("suspending producer"),
     ok = sys:suspend(ProducerPid),
     ExtraDown = #{from_version => {0, 7, 0}, to_version => {0, 6, 4}},
     %% make some requests to downgrade
+    ct:pal("sending messages while suspended"),
     Messages = [#{key => <<"key">>, value => <<"value">>}],
     pulsar_producer:send(ProducerPid, Messages),
     try
@@ -135,6 +141,7 @@ t_code_change_replayq(Config) ->
     catch
         error:timeout -> ok
     end,
+    ct:pal("changing producer code (down)"),
     ok = sys:change_code(ProducerPid, pulsar_producer, {down, unused_vsn}, ExtraDown),
     %% ok = sys:resume(ProducerPid),
     {_StatemState1, State1} = sys:get_state(ProducerPid),
@@ -152,7 +159,9 @@ t_code_change_replayq(Config) ->
     %% check upgrade has replayq and retention_period.
     %% ok = sys:suspend(ProducerPid),
     ExtraUp = #{from_version => {0, 6, 4}, to_version => {0, 7, 0}},
+    ct:pal("changing producer code (up)"),
     ok = sys:change_code(ProducerPid, pulsar_producer, unused_vsn, ExtraUp),
+    ct:pal("resuming producer"),
     ok = sys:resume(ProducerPid),
     {_StatemState2, State2} = sys:get_state(ProducerPid),
     ?assert(is_map(State2), #{state_after => State2}),
@@ -173,6 +182,7 @@ t_code_change_replayq(Config) ->
     ?assert(replayq:is_mem_only(Q2)),
 
     %% one sync, one async
+    ct:pal("waiting for messages..."),
     drain_messages(_Expected = 2, _Acc = []),
     %% assert that async callback was called only once
     Counter = ?config(async_counter, Config),

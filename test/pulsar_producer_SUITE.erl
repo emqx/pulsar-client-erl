@@ -96,7 +96,7 @@ drain_messages(ExpectedN, Acc) ->
         Msg ->
             drain_messages(ExpectedN - 1, [Msg | Acc])
     after
-        1_000 ->
+        30_000 ->
             ct:fail("expected messages have not arrived;~n  so far: ~100p", [Acc])
     end.
 
@@ -141,8 +141,8 @@ t_code_change_replayq(Config) ->
     ?assert(is_tuple(State1), #{state_after => State1}),
     ?assertEqual(state, element(1, State1)),
     %% state record has 1 element more (the record name), but also has
-    %% two fields less (`replayq' and `clientid').
-    ?assertEqual(OriginalSize, tuple_size(State1) + 1),
+    %% three fields less (`replayq', `clientid', `lookup_topic_request_ref').
+    ?assertEqual(OriginalSize, tuple_size(State1) + 2),
     Opts1 = element(9, State1),
     ?assertNot(maps:is_key(replayq, Opts1)),
     ?assertNot(maps:is_key(retention_period, Opts1)),
@@ -212,6 +212,7 @@ t_state_rec_roundtrip(_Config) ->
                                 , callback
                                 , clientid
                                 , last_bin
+                                , lookup_topic_request_ref
                                 , opts
                                 , partitiontopic
                                 , producer_id
@@ -221,8 +222,10 @@ t_state_rec_roundtrip(_Config) ->
                                 , sequence_id
                                 , sock
                                 ]]),
-    %% only clientid is not preserved
-    ?assertEqual(StateMap#{clientid := undefined},
+    %% clientid and lookup_topic_request_ref is not preserved
+    ?assertEqual(StateMap#{ clientid := undefined
+                          , lookup_topic_request_ref := undefined
+                          },
                  pulsar_producer:from_old_state_record(
                    pulsar_producer:to_old_state_record(StateMap))).
 

@@ -167,7 +167,6 @@ handle_response({connected, _ConnectedData}, State = #state{sock = Sock,
     start_keepalive(),
     subscribe(Sock, Topic, RequestId, ConsumerId, Opts),
     {next_state, connected, next_request_id(State)};
-
 handle_response({pong, #{}}, State) ->
     start_keepalive(),
     {keep_state, State};
@@ -198,7 +197,6 @@ handle_response({message, Msg, Payloads}, State = #state{
         _ ->
             {keep_state, State}
     end;
-
 handle_response({close_consumer, #{}}, State = #state{partitiontopic = Topic}) ->
     log_error("Close consumer: ~p~n", [Topic]),
     {stop, {shutdown, close_consumer}, State};

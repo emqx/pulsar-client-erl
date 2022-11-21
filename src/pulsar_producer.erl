@@ -100,8 +100,9 @@
                    %% hot-upgraded from version without it.
                    clientid := atom(),
                    last_bin := binary(),
+                   lookup_topic_request_ref := reference() | undefined,
                    opts := map(),
-                   partitiontopic := binary(),
+                   partitiontopic := string(),
                    producer_id := integer(),
                    producer_name := atom(),
                    replayq := replayq:q(),
@@ -208,6 +209,7 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
         callback => maps:get(callback, ProducerOpts, undefined),
         clientid => maps:get(clientid, ProducerOpts),
         last_bin => <<>>,
+        lookup_topic_request_ref => undefined,
         opts => pulsar_utils:maybe_enable_ssl_opts(Transport, ProducerOpts),
         partitiontopic => PartitionTopic,
         producer_id => ProducerID,
@@ -226,6 +228,7 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
 -spec idle(gen_statem:event_type(), _EventContent, state()) ->
           handler_result().
 idle(enter, _OldState, _State) ->
+    ?tp(pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
     keep_state_and_data;
 idle(_, do_connect, State) ->
     refresh_urls_and_connect(State);
@@ -247,6 +250,15 @@ idle(cast, _EventContent, _State) ->
 idle(info, ?SEND_REQ(_, _) = SendRequest, State0) ->
     State = enqueue_send_requests([SendRequest], State0),
     {keep_state, State};
+idle(info, {Ref, Reply}, State0 = #{lookup_topic_request_ref := Ref}) ->
+    State = State0#{lookup_topic_request_ref := undefined},
+    erlang:demonitor(Ref, [flush]),
+    handle_lookup_topic_reply(Reply, State);
+idle(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_request_ref := Ref}) ->
+    log_error("client down; will retry connection later; reason: ~0p", [Reason], State0),
+    State = State0#{lookup_topic_request_ref := undefined},
+    try_close_socket(State),
+    ?NEXT_STATE_IDLE_RECONNECT(State);
 idle(_EventType, _Event, _State) ->
     keep_state_and_data.
 
@@ -254,12 +266,22 @@ idle(_EventType, _Event, _State) ->
 -spec connecting(gen_statem:event_type(), _EventContent, state()) ->
           handler_result().
 connecting(enter, _OldState, _State) ->
+    ?tp(pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
     keep_state_and_data;
 connecting(_, do_connect, State) ->
     refresh_urls_and_connect(State);
 connecting(info, ?SEND_REQ(_, _) = SendRequest, State0) ->
     State = enqueue_send_requests([SendRequest], State0),
     {keep_state, State};
+connecting(info, {Ref, Reply}, State0 = #{lookup_topic_request_ref := Ref}) ->
+    State = State0#{lookup_topic_request_ref := undefined},
+    erlang:demonitor(Ref, [flush]),
+    handle_lookup_topic_reply(Reply, State);
+connecting(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_request_ref := Ref}) ->
+    log_error("client down; will retry connection later; reason: ~0p", [Reason], State0),
+    State = State0#{lookup_topic_request_ref := undefined},
+    try_close_socket(State),
+    ?NEXT_STATE_IDLE_RECONNECT(State);
 connecting(info, {CloseEvent, _Sock}, State0 = #{clientid := ClientId})
   when CloseEvent =:= tcp_closed; CloseEvent =:= ssl_closed ->
     try_close_socket(State0),
@@ -299,6 +321,7 @@ connecting(cast, _EventContent, _State) ->
 -spec connected(gen_statem:event_type(), _EventContent, state()) ->
           handler_result().
 connected(enter, _OldState, State0) ->
+    ?tp(pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
     State1 = resend_sent_requests(State0),
     State = maybe_send_to_pulsar(State1),
     {keep_state, State};
@@ -311,6 +334,15 @@ connected(info, ?SEND_REQ(_, _) = SendRequest, State0 = #{batch_size := BatchSiz
     State = maybe_send_to_pulsar(State1),
     ?tp(pulsar_producer_send_req_exit, #{}),
     {keep_state, State};
+connected(info, {Ref, Reply}, State0 = #{lookup_topic_request_ref := Ref}) ->
+    State = State0#{lookup_topic_request_ref := undefined},
+    erlang:demonitor(Ref, [flush]),
+    handle_lookup_topic_reply(Reply, State);
+connected(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_request_ref := Ref}) ->
+    log_error("client down; will retry connection later; reason: ~0p", [Reason], State0),
+    State = State0#{lookup_topic_request_ref := undefined},
+    try_close_socket(State),
+    ?NEXT_STATE_IDLE_RECONNECT(State);
 connected(_EventType, {InetClose, _Sock}, State = #{ partitiontopic := Topic
                                                    , clientid := ClientId
                                                    })
@@ -379,38 +411,16 @@ refresh_urls_and_connect(State0) ->
     %% Simply looking up the topic (even from a distinct connection)
     %% will "unblock" the topic so we may send messages to it.  The
     %% producer may be started only after that.
-    #{broker_server := OldBrokerServer} = State0,
-    OldBrokerServiceURL = get(proxy_to_broker_url),
-    try lookup_topic_and_refresh_urls(State0) of
-        {ok, #{ alive_pulsar_url := AlivePulsarURL
-              , broker_service_url := NewBrokerServiceURL
-              }} ->
-            {_Transport, NewBrokerServer} = pulsar_utils:parse_url(AlivePulsarURL),
-            case {OldBrokerServer, OldBrokerServiceURL} =:= {NewBrokerServer, NewBrokerServiceURL} of
-                true ->
-                    do_connect(State0);
-                false ->
-                    %% broker changed; reconnect.
-                    log_error("pulsar broker changed: ~0p -> ~0p; reconnecting...",
-                              [ #{ broker_server => OldBrokerServer
-                                 , proxy_url => OldBrokerServiceURL
-                                 }
-                              , #{ broker_server => NewBrokerServer
-                                 , proxy_url => NewBrokerServiceURL
-                                 }
-                              ],
-                              State0),
-                    try_close_socket(State0),
-                    State = State0#{broker_server := NewBrokerServer},
-                    put(proxy_to_broker_url, NewBrokerServiceURL),
-                    ?NEXT_STATE_IDLE_RECONNECT(State)
-            end;
-        {error, _Reason} ->
-            %% try again some time later; error already logged
-            ?NEXT_STATE_IDLE_RECONNECT(State0)
+    #{ clientid := ClientId
+     , partitiontopic := PartitionTopic
+     } = State0,
+    try pulsar_client:lookup_topic_async(ClientId, PartitionTopic) of
+        {ok, LookupTopicRequestRef} ->
+            State = State0#{lookup_topic_request_ref := LookupTopicRequestRef},
+            {keep_state, State}
     catch
-        exit:{timeout, _} ->
-            log_error("timed out calling client", [], State0),
+        exit:{noproc, _} ->
+            log_error("client restarting; will retry later", [], State0),
             ?NEXT_STATE_IDLE_RECONNECT(State0)
     end.
 
@@ -668,6 +678,7 @@ enqueue_send_requests(Requests, State = #{replayq := Q}) ->
                end,
                Requests),
     NewQ = replayq:append(Q, QItems),
+    ?tp(pulsar_producer_send_requests_enqueued, #{requests => Requests}),
     State#{replayq := NewQ}.
 
 maybe_send_to_pulsar(State) ->
@@ -898,6 +909,8 @@ from_old_state_record(StateRec) ->
      , batch_size => element(11, StateRec)
      , requests => element(12, StateRec)
      , last_bin => element(13, StateRec)
+       %% new logic and field
+     , lookup_topic_request_ref => undefined
      }.
 
 -spec escape(string()) -> binary().
@@ -905,53 +918,67 @@ escape(Str) ->
     NormalizedStr = unicode:characters_to_nfd_list(Str),
     iolist_to_binary(pulsar_utils:escape_uri(NormalizedStr)).
 
--spec lookup_topic_and_refresh_urls(state()) ->
-          {ok, #{ alive_pulsar_url => string()
-                , broker_service_url => string() | undefined
-                }}
-          | {error, term()}.
-lookup_topic_and_refresh_urls(State) ->
-    #{clientid := ClientId} = State,
-    case pulsar_client_sup:find_client(ClientId) of
-        {ok, ClientPid} ->
-            do_lookup_topic(ClientPid, State);
-        {error, Reason} ->
-            log_error("client ~p not found; error: ~0p", [ClientId, Reason], State),
-            {error, Reason}
-    end.
-
-do_lookup_topic(ClientPid, State) ->
-    #{ partitiontopic := PartitionTopic
-     } = State,
-    case pulsar_client:lookup_topic(ClientPid, PartitionTopic) of
-        {ok, #{ brokerServiceUrl := _BrokerServiceURL
-              , proxy_through_service_url := _IsProxy
-              } = LookupTopicResponse} ->
-            do_refresh_urls(ClientPid, LookupTopicResponse, State);
-        {error, Reason} ->
-            log_error("error looking up pulsar topic: ~0p", [Reason], State),
-            {error, Reason}
-    end.
-
-do_refresh_urls(ClientPid,
-                _LookupTopicResponse = #{ proxy_through_service_url := true
-                                        , brokerServiceUrl := BrokerServiceURL
-                                        },
-                State) ->
-    case pulsar_client:get_alive_pulsar_url(ClientPid) of
+-spec handle_lookup_topic_reply(pulsar_client:lookup_topic_response(), state()) -> handler_result().
+handle_lookup_topic_reply({error, Error}, State) ->
+    log_error("error looking up topic: ~0p", [Error], State),
+    try_close_socket(State),
+    ?NEXT_STATE_IDLE_RECONNECT(State);
+handle_lookup_topic_reply({ok, #{ proxy_through_service_url := true
+                                , brokerServiceUrl := NewBrokerServiceURL
+                                }}, State0) ->
+    #{clientid := ClientId} = State0,
+    try pulsar_client:get_alive_pulsar_url(ClientId) of
         {ok, AlivePulsarURL} ->
-            {ok, #{ alive_pulsar_url => AlivePulsarURL
-                  , broker_service_url => BrokerServiceURL
-                  }};
+            maybe_connect(#{ broker_service_url => NewBrokerServiceURL
+                           , alive_pulsar_url => AlivePulsarURL
+                           }, State0);
         {error, Reason} ->
-            log_error("error getting pulsar alive URL: ~0p", [Reason], State),
-            {error, Reason}
+            log_error("error getting pulsar alive URL: ~0p", [Reason], State0),
+            try_close_socket(State0),
+            ?NEXT_STATE_IDLE_RECONNECT(State0)
+    catch
+        exit:{noproc, _} ->
+            log_error("client restarting; will retry later", [], State0),
+            try_close_socket(State0),
+            ?NEXT_STATE_IDLE_RECONNECT(State0);
+        exit:{timeout, _} ->
+            log_error("timeout calling client; will retry later", [], State0),
+            try_close_socket(State0),
+            ?NEXT_STATE_IDLE_RECONNECT(State0)
     end;
-do_refresh_urls(_ClientPid,
-                _LookupTopicResponse = #{ proxy_through_service_url := false
-                                        , brokerServiceUrl := BrokerServiceURL
-                                        },
-                _State) ->
-    {ok, #{ alive_pulsar_url => BrokerServiceURL
-          , broker_service_url => undefined
-          }}.
+handle_lookup_topic_reply({ok, #{ proxy_through_service_url := false
+                                , brokerServiceUrl := NewBrokerServiceURL
+                                }},
+                         State) ->
+    maybe_connect(#{ alive_pulsar_url => NewBrokerServiceURL
+                   , broker_service_url => undefined
+                   }, State).
+
+-spec maybe_connect(#{ alive_pulsar_url := string()
+                     , broker_service_url := string() | undefined
+                     }, state()) -> handler_result().
+maybe_connect(#{ broker_service_url := NewBrokerServiceURL
+               , alive_pulsar_url := AlivePulsarURL
+               }, State0) ->
+    #{broker_server := OldBrokerServer} = State0,
+    OldBrokerServiceURL = get(proxy_to_broker_url),
+    {_Transport, NewBrokerServer} = pulsar_utils:parse_url(AlivePulsarURL),
+    case {OldBrokerServer, OldBrokerServiceURL} =:= {NewBrokerServer, NewBrokerServiceURL} of
+        true ->
+            do_connect(State0);
+        false ->
+            %% broker changed; reconnect.
+            log_error("pulsar broker changed: ~0p -> ~0p; reconnecting...",
+                      [ #{ broker_server => OldBrokerServer
+                         , proxy_url => OldBrokerServiceURL
+                         }
+                      , #{ broker_server => NewBrokerServer
+                         , proxy_url => NewBrokerServiceURL
+                         }
+                      ],
+                      State0),
+            try_close_socket(State0),
+            State = State0#{broker_server := NewBrokerServer},
+            put(proxy_to_broker_url, NewBrokerServiceURL),
+            ?NEXT_STATE_IDLE_RECONNECT(State)
+    end.

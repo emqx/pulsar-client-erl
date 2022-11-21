@@ -392,7 +392,7 @@ t_pulsar_drop_expired_batch(Config) ->
     RetentionPeriodMS = 1_000,
     ProducerOpts = #{
         %% to speed up the test a bit
-        send_timeout => 5_000,
+        tcp_opts => [{send_timeout, 5_000}],
         connnect_timeout => 5_000,
         batch_size => ?BATCH_SIZE,
         strategy => random,
@@ -411,10 +411,15 @@ t_pulsar_drop_expired_batch(Config) ->
     ct:sleep(StabilizationPeriod),
 
     %% Produce messages that'll expire
+    ok = snabbkaffe:start_trace(),
     ct:pal("sending messages..."),
-    pulsar:send(Producers,
-                [#{key => <<"k">>, value => integer_to_binary(SeqNo)}
-                 || SeqNo <- lists:seq(1, 150)]),
+    {ok, {ok, _}} =
+        ?wait_async_action(
+           pulsar:send(Producers,
+                       [#{key => <<"k">>, value => integer_to_binary(SeqNo)}
+                        || SeqNo <- lists:seq(1, 150)]),
+          #{?snk_kind := pulsar_producer_send_requests_enqueued},
+          _Timeout = 35_000),
     ct:pal("waiting for retention period to expire..."),
     ct:sleep(RetentionPeriodMS * 2),
 
@@ -426,7 +431,10 @@ t_pulsar_drop_expired_batch(Config) ->
     ct:pal("waiting for producer to be connected again"),
     {_, ProducerPid} = pulsar_producers:pick_producer(Producers,
                                                       [#{key => <<"k">>, value => <<>>}]),
-    pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
+    %% for better debugging
+    ?check_trace(
+      pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 10, _Sleep = 5_000),
+      []),
     ct:pal("producer connected"),
 
     receive
@@ -493,7 +501,7 @@ t_pulsar_drop_expired_batch_resend_inflight(Config) ->
     RetentionPeriodMS = 1_000,
     ProducerOpts = #{
         %% to speed up the test a bit
-        send_timeout => 5_000,
+        tcp_opts => [{send_timeout, 5_000}],
         connnect_timeout => 5_000,
         batch_size => ?BATCH_SIZE,
         strategy => random,
@@ -825,12 +833,19 @@ fix_broker_service_url(FakePulsarHost) ->
     %% patch that so we always use toxiproxy.
     ok = meck:new(pulsar_client, [non_strict, passthrough, no_history]),
     ok = meck:expect(
-           pulsar_client, lookup_topic,
-           fun(Pid, PartitionTopic) ->
-             case meck:passthrough([Pid, PartitionTopic]) of
-               {ok, Resp} -> {ok, Resp#{brokerServiceUrl => FakePulsarHost}};
-               Error -> Error
-             end
+           pulsar_client, get_alive_pulsar_url,
+           fun(_Pid) ->
+             {ok, FakePulsarHost}
+           end),
+    ok = meck:expect(
+           pulsar_client, handle_response,
+           fun({lookupTopicResponse, Response}, State) ->
+                NewResp = {lookupTopicResponse, Response#{ brokerServiceUrlTls => FakePulsarHost
+                                                         , brokerServiceUrl => FakePulsarHost
+                                                         }},
+                meck:passthrough([NewResp, State]);
+              (Response, State) ->
+                meck:passthrough([Response, State])
            end),
     ok.
 

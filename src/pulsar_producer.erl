@@ -209,6 +209,9 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
         {SequenceId, _} ->
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
+        Messages when is_list(Messages) ->
+            %% handle 0.5
+            {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
         From ->
             gen_statem:reply(From, Resp),
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}}
@@ -239,6 +242,9 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                         Callback(Resp)
                     end,  lists:seq(1, BatchLen))
             end,
+            {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
+        Messages when is_list(Messages) ->
+            %% handle 0.5
             {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
         From ->
             gen_statem:reply(From, Resp),

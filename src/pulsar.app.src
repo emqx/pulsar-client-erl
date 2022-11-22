@@ -1,6 +1,6 @@
 {application,pulsar,
              [{description,"A Erlang client library for Apache Pulsar"},
-              {vsn,"git"},
+              {vsn,"0.6.5"},
               {modules,[]},
               {registered,[pulsar_sup]},
               {applications,[kernel,stdlib,crc32cer,murmerl3,snappyer]},

@@ -50,7 +50,7 @@
 
 send_connect_packet(Sock, Opts) ->
     Mod = tcp_module(Opts),
-    Mod:send(Sock, pulsar_protocol_frame:connect(maps:get(conn_opts, Opts, #{}))).
+    Mod:send(Sock, pulsar_protocol_frame:connect(opt(conn_opts, Opts, #{}))).
 
 send_topic_metadata_packet(Sock, Topic, RequestId, Opts) ->
     Mod = tcp_module(Opts),
@@ -145,10 +145,10 @@ get_pulsar_uri(Sock, Opts) ->
     end.
 
 connect_opts(Opts) ->
-    TcpOpts = maps:get(tcp_opts, Opts, []),
-    SslOpts = maps:get(ssl_opts, Opts, []),
-    ConnTimeout = maps:get(connect_timeout, Opts, ?CONN_TIMEOUT),
-    ConnOpts = case maps:get(enable_ssl, Opts, false) of
+    TcpOpts = opt(tcp_opts, Opts, []),
+    SslOpts = opt(ssl_opts, Opts, []),
+    ConnTimeout = opt(connect_timeout, Opts, ?CONN_TIMEOUT),
+    ConnOpts = case opt(enable_ssl, Opts, false) of
         true -> pulsar_utils:merge_opts([?DEF_TCP_OPTS, TcpOpts, SslOpts, ?INTERNAL_TCP_OPTS]);
         false -> pulsar_utils:merge_opts([?DEF_TCP_OPTS, TcpOpts, ?INTERNAL_TCP_OPTS])
     end,
@@ -174,7 +174,7 @@ message_snd_cmd(Len, ProducerId, SequenceId) when is_integer(Len) ->
     }.
 
 batch_message_cmd(Messages, Opts) ->
-    Compression = compression_type(maps:get(compression, Opts, no_compression)),
+    Compression = compression_type(opt(compression, Opts, no_compression)),
     lists:foldl(fun(#{key := Key, value := Msg}, Acc) ->
             Msg1 = maybe_compression(Msg, Compression),
             SMetadata = single_message_metadata(Key, erlang:iolist_size(Msg), Compression),
@@ -216,19 +216,19 @@ maybe_compression(Bin, _) ->
 %% =======================================================================================
 
 pulsar_scheme(Opts) ->
-    case maps:get(enable_ssl, Opts, false) of
+    case opt(enable_ssl, Opts, false) of
         false -> "pulsar";
         true -> "pulsar+ssl"
     end.
 
 tcp_module(Opts) ->
-    case maps:get(enable_ssl, Opts, false) of
+    case opt(enable_ssl, Opts, false) of
         false -> gen_tcp;
         true -> ssl
     end.
 
 inet_module(Opts) ->
-    case maps:get(enable_ssl, Opts, false) of
+    case opt(enable_ssl, Opts, false) of
         false -> inet;
         true -> ssl
     end.
@@ -239,3 +239,7 @@ tune_buffer(InetM, Sock) ->
     SndBuf = proplists:get_value(sndbuf, Opts),
     InetM:setopts(Sock, [{buffer, max(RecBuf, SndBuf)}]).
 
+opt(Key, Opts, Default) when is_list(Opts) ->
+    opt(Key, maps:from_list(Opts), Default);
+opt(Key, Opts, Default) ->
+    maps:get(Key, Opts, Default).

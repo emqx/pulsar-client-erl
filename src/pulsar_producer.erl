@@ -587,6 +587,9 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
         {_FromPID, _Alias} = OldFrom ->
             gen_statem:reply(OldFrom, {ok, Resp}),
             {keep_state, State#{requests := maps:remove(SequenceId, Reqs)}};
+        Messages when is_list(Messages) ->
+            %% handle upgrade from version 0.5
+            {keep_state, State#{requests := maps:remove(SequenceId, Reqs)}};
         ?INFLIGHT_REQ(QAckRef, FromsToMessages) ->
             ok = replayq:ack(Q, QAckRef),
             lists:foreach(

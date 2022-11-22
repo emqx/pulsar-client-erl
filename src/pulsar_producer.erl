@@ -436,7 +436,7 @@ refresh_urls_and_connect(State0) ->
             {keep_state, State, [{state_timeout, ?LOOKUP_TOPIC_TIMEOUT, lookup_topic_timeout}]}
     catch
         exit:{noproc, _} ->
-            log_error("client restarting; will retry later", [], State0),
+            log_error("client restarting; will retry to lookup topic again later", [], State0),
             ?NEXT_STATE_IDLE_RECONNECT(State0)
     end.
 
@@ -959,11 +959,11 @@ handle_lookup_topic_reply({ok, #{ proxy_through_service_url := true
             ?NEXT_STATE_IDLE_RECONNECT(State0)
     catch
         exit:{noproc, _} ->
-            log_error("client restarting; will retry later", [], State0),
+            log_error("client restarting; will retry to lookup topic later", [], State0),
             try_close_socket(State0),
             ?NEXT_STATE_IDLE_RECONNECT(State0);
         exit:{timeout, _} ->
-            log_error("timeout calling client; will retry later", [], State0),
+            log_error("timeout calling client; will retry to lookup topic later", [], State0),
             try_close_socket(State0),
             ?NEXT_STATE_IDLE_RECONNECT(State0)
     end;
@@ -989,7 +989,7 @@ maybe_connect(#{ broker_service_url := NewBrokerServiceURL
             do_connect(State0);
         false ->
             %% broker changed; reconnect.
-            log_error("pulsar broker changed: ~0p -> ~0p; reconnecting...",
+            log_info("pulsar endpoint changed from ~0p to ~0p; reconnecting...",
                       [ #{ broker_server => OldBrokerServer
                          , proxy_url => OldBrokerServiceURL
                          }

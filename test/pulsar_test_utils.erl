@@ -84,11 +84,14 @@ wait_for_state(Pid, DesiredState, Retries, Sleep) ->
     try sys:get_state(Pid, Timeout) of
         {DesiredState, _} ->
             ok;
-        _ ->
+        State ->
+            ct:pal("still not in current state;\n  current: ~p\n  process info: ~p\n  stacktrace: ~p",
+                   [State, process_info(Pid), process_info(Pid, current_stacktrace)]),
             ct:sleep(Sleep),
             wait_for_state(Pid, DesiredState, Retries - 1, Sleep)
     catch
         exit:{timeout, _} ->
+            ct:pal("timed out making sys request", []),
             ct:sleep(Sleep),
             wait_for_state(Pid, DesiredState, Retries - 1, Sleep)
     end.

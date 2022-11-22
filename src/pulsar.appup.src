@@ -2,7 +2,8 @@
 {"0.6.5",
    [
     {"0.6.4",
-     [{load_module,pulsar_socket,brutal_purge,soft_purge,[]}
+     [{load_module,pulsar_socket,brutal_purge,soft_purge,[]},
+      {load_module,pulsar_producer,brutal_purge,soft_purge,[]}
      ]},
     {"0.6.3",
      [{load_module,pulsar_socket,brutal_purge,soft_purge,[]},
@@ -55,7 +56,8 @@
       {load_module,pulsar_api,brutal_purge,soft_purge,[]}]}],
    [
     {"0.6.4",
-     [{load_module,pulsar_socket,brutal_purge,soft_purge,[]}
+     [{load_module,pulsar_socket,brutal_purge,soft_purge,[]},
+      {load_module,pulsar_producer,brutal_purge,soft_purge,[]}
      ]},
     {"0.6.3",
      [{load_module,pulsar_socket,brutal_purge,soft_purge,[]},

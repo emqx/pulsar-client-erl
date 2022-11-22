@@ -81,6 +81,7 @@
 
 -define(RECONNECT_TIMEOUT, 5_000).
 -define(LOOKUP_TOPIC_TIMEOUT, 15_000).
+-define(KEEPALIVE_PERIOD, 30_000).
 
 -define(MAX_REQ_ID, 4294836225).
 -define(MAX_SEQ_ID, 18445618199572250625).
@@ -266,6 +267,9 @@ idle(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_request
     State = State0#{lookup_topic_request_ref := undefined},
     try_close_socket(State),
     ?NEXT_STATE_IDLE_RECONNECT(State);
+idle({timeout, ping_timeout}, ping_timeout, _State) ->
+    %% not relevant in this state
+    keep_state_and_data;
 idle(_EventType, _Event, _State) ->
     keep_state_and_data.
 
@@ -306,7 +310,7 @@ connecting(info, {CloseEvent, _Sock}, State0 = #{clientid := ClientId})
         _ ->
             ?NEXT_STATE_IDLE_RECONNECT(State0)
     end;
-connecting(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
+connecting(info, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
     {Cmd, _} = pulsar_protocol_frame:parse(Bin),
     handle_response(Cmd, State);
 connecting(info, Msg, _State) ->
@@ -319,6 +323,19 @@ connecting({call, From}, {send, Messages}, State0) ->
     {keep_state, State};
 connecting({call, From}, _EventContent, _State) ->
     {keep_state_and_data, [{reply, From, {error, unknown_call}}]};
+connecting({timeout, ping_timeout}, ping_timeout, State = #{clientid := ClientId}) ->
+    log_error("ping timeout; disconnected", [], State),
+    try_close_socket(State),
+    %% NOTE: after hot-upgrade from version where clientid is
+    %% undefined, we cannot try to reconnect: we need to lookup the
+    %% broker URL again, and `pulsar_client' does that.  We just stop
+    %% and let `pulsar_producers' restart this producer.
+    case ClientId of
+        undefined ->
+            {stop, {error, no_clientid}};
+        _ ->
+            ?NEXT_STATE_IDLE_RECONNECT(State)
+    end;
 connecting(cast, {send, Messages}, State0) ->
     %% for race conditions when upgrading from previous versions only
     From = undefined,
@@ -358,10 +375,10 @@ connected(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_re
     State = State0#{lookup_topic_request_ref := undefined},
     try_close_socket(State),
     ?NEXT_STATE_IDLE_RECONNECT(State);
-connected(_EventType, {InetClose, _Sock}, State = #{ partitiontopic := Topic
-                                                   , clientid := ClientId
-                                                   })
-        when InetClose == tcp_closed; InetClose == ssl_closed ->
+connected(info, {InetClose, _Sock}, State = #{ partitiontopic := Topic
+                                             , clientid := ClientId
+                                             })
+        when InetClose =:= tcp_closed; InetClose =:= ssl_closed ->
     log_error("connection closed by peer, topic: ~p~n", [Topic], State),
     try_close_socket(State),
     %% NOTE: after hot-upgrade from version where clientid is
@@ -374,10 +391,10 @@ connected(_EventType, {InetClose, _Sock}, State = #{ partitiontopic := Topic
         _ ->
             ?NEXT_STATE_IDLE_RECONNECT(State)
     end;
-connected(_EventType, {InetError, _Sock, Reason}, State = #{ clientid := ClientId
-                                                           , partitiontopic := Topic
-                                                           })
-        when InetError == tcp_error; InetError == ssl_error ->
+connected(info, {InetError, _Sock, Reason}, State = #{ clientid := ClientId
+                                                     , partitiontopic := Topic
+                                                     })
+        when InetError =:= tcp_error; InetError =:= ssl_error ->
     log_error("connection error on topic: ~p, error: ~p~n", [Topic, Reason], State),
     try_close_socket(State),
     %% NOTE: after hot-upgrade from version where clientid is
@@ -390,12 +407,26 @@ connected(_EventType, {InetError, _Sock, Reason}, State = #{ clientid := ClientI
         _ ->
             ?NEXT_STATE_IDLE_RECONNECT(State)
     end;
-connected(_EventType, {Inet, _, Bin}, State = #{last_bin := LastBin})
-        when Inet == tcp; Inet == ssl ->
+connected(info, {Inet, _, Bin}, State = #{last_bin := LastBin})
+        when Inet =:= tcp; Inet =:= ssl ->
     parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
-connected(_EventType, ping, State = #{sock := Sock, opts := Opts}) ->
+connected(info, ping, State = #{sock := Sock, opts := Opts}) ->
     pulsar_socket:ping(Sock, Opts),
-    {keep_state, State};
+    {keep_state, State,
+     [{{timeout, ping_timeout}, 2 * ?KEEPALIVE_PERIOD + 5_000, ping_timeout}]};
+connected({timeout, ping_timeout}, ping_timeout, State = #{clientid := ClientId}) ->
+    log_error("ping timeout; disconnected", [], State),
+    try_close_socket(State),
+    %% NOTE: after hot-upgrade from version where clientid is
+    %% undefined, we cannot try to reconnect: we need to lookup the
+    %% broker URL again, and `pulsar_client' does that.  We just stop
+    %% and let `pulsar_producers' restart this producer.
+    case ClientId of
+        undefined ->
+            {stop, {error, no_clientid}};
+        _ ->
+            ?NEXT_STATE_IDLE_RECONNECT(State)
+    end;
 connected({call, From}, {send, Messages}, State) ->
     %% for race conditions when upgrading from previous versions only
     SendRequest = ?SEND_REQ(From, Messages),
@@ -524,6 +555,7 @@ parse({Cmd, <<>>}, State) ->
 parse({Cmd, LastBin}, State) ->
     State2 = case handle_response(Cmd, State) of
         keep_state_and_data -> State;
+        {keep_state_and_data, _} -> State;
         {_, State1} -> State1;
         {_, _, State1} -> State1
     end,
@@ -545,7 +577,8 @@ handle_response({producer_success, #{producer_name := ProName}}, State) ->
     {next_state, connected, State#{producer_name := ProName}};
 handle_response({pong, #{}}, _State) ->
     start_keepalive(),
-    keep_state_and_data;
+    %% cancel the ping timeout
+    {keep_state_and_data, [{{timeout, ping_timeout}, infinity, ping_timeout}]};
 handle_response({ping, #{}}, #{sock := Sock, opts := Opts}) ->
     pulsar_socket:pong(Sock, Opts),
     keep_state_and_data;
@@ -632,7 +665,7 @@ send_batch_payload(Messages, SequenceId, #{
         ProducerName, Opts).
 
 start_keepalive() ->
-    erlang:send_after(30_000, self(), ping).
+    erlang:send_after(?KEEPALIVE_PERIOD, self(), ping).
 
 next_request_id(State = #{request_id := ?MAX_REQ_ID}) ->
     State#{request_id := 1};

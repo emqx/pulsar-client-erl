@@ -12,7 +12,7 @@ services:
     tty: true
 
   toxiproxy:
-    container_name: proxy
+    container_name: toxiproxy
     image: ghcr.io/shopify/toxiproxy
     ports:
       - 8474:8474
@@ -31,8 +31,10 @@ services:
       - 8080:8080
     restart: always
     command:
-      - bin/pulsar
-      - standalone
+      - bash
+      - "-c"
+      - |
+        bin/pulsar standalone
 
   pulsar-basic-auth:
     container_name: pulsar-basic-auth

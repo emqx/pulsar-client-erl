@@ -20,7 +20,7 @@
 
 -define(TEST_SUIT_CLIENT, client_erl_suit).
 -define(BATCH_SIZE , 100).
--define(PULSAR_HOST, "pulsar://pulsar:6650").
+-define(PULSAR_HOST, "pulsar://toxiproxy:6650").
 -define(PULSAR_BASIC_AUTH_HOST, "pulsar://pulsar-basic-auth:6650").
 -define(PULSAR_TOKEN_AUTH_HOST, "pulsar://pulsar-token-auth:6650").
 
@@ -71,7 +71,7 @@ end_per_suite(_Args) ->
 
 init_per_group(resilience, Config) ->
     PulsarHost = os:getenv("PULSAR_HOST", ?PULSAR_HOST),
-    ProxyHost = os:getenv("PROXY_HOST", "proxy"),
+    ProxyHost = os:getenv("PROXY_HOST", "toxiproxy"),
     ProxyPort = list_to_integer(os:getenv("PROXY_PORT", "8474")),
     UpstreamHost = os:getenv("PROXY_PULSAR_HOST", PulsarHost),
     %% when testing locally; externally exposed port for container
@@ -419,7 +419,7 @@ t_pulsar_drop_expired_batch(Config) ->
     %% here before producing the messages to avoid it hanging during
     %% the send, at which point the check for expiration was already
     %% done...
-    pulsar_test_utils:wait_for_state(ProducerPid, idle, _Retries = 15, _Sleep = 5_000),
+    pulsar_test_utils:wait_for_state(ProducerPid, idle, _Retries1 = 20, _Sleep1 = 5_000),
 
     %% Produce messages that'll expire
     ok = snabbkaffe:start_trace(),

@@ -645,6 +645,10 @@ next_sequence_id(State = #{sequence_id := SequenceId}) ->
 log_error(Fmt, Args, #{partitiontopic := PartitionTopic}) ->
     logger:error("[pulsar-producer][~s] " ++ Fmt, [PartitionTopic | Args]).
 
+-spec log_info(string(), [term()], state()) -> ok.
+log_info(Fmt, Args, #{partitiontopic := PartitionTopic}) ->
+    logger:info("[pulsar-producer][~s] " ++ Fmt, [PartitionTopic | Args]).
+
 -spec invoke_callback(callback(), callback_input()) -> ok.
 invoke_callback(Callback, Resp) ->
     invoke_callback(Callback, Resp, _BatchLen = 1).

@@ -393,7 +393,9 @@ t_pulsar_drop_expired_batch(Config) ->
     RetentionPeriodMS = 1_000,
     ProducerOpts = #{
         %% to speed up the test a bit
-        tcp_opts => [{send_timeout, 5_000}],
+        tcp_opts => [ {send_timeout, 5_000}
+                    , {send_timeout_close, true}
+                    ],
         connnect_timeout => 5_000,
         batch_size => ?BATCH_SIZE,
         strategy => random,

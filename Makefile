@@ -9,7 +9,7 @@ compile:
 clean: distclean
 
 ct:
-	$(REBAR) ct -v
+	$(REBAR) ct -v --readable true
 
 eunit:
 	$(REBAR) as test eunit

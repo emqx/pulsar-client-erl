@@ -237,7 +237,17 @@ t_state_rec_roundtrip(_Config) ->
                           , lookup_topic_request_ref := undefined
                           },
                  pulsar_producer:from_old_state_record(
-                   pulsar_producer:to_old_state_record(StateMap))).
+                   pulsar_producer:to_old_state_record(StateMap))),
+
+    %% pulsar 0.5.x had the `opts' as a proplist instead of a map...
+    StateMap1 = StateMap#{opts => [{sndbuf,1048576}]},
+    ?assertEqual(StateMap1#{ clientid := undefined
+                           , lookup_topic_request_ref := undefined
+                           , opts => #{sndbuf => 1048576}
+                           },
+                 pulsar_producer:from_old_state_record(
+                   pulsar_producer:to_old_state_record(StateMap1))),
+    ok.
 
 t_queue_item_marshaller(_Config) ->
     Pid = spawn_link(

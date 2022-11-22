@@ -918,6 +918,12 @@ to_old_state_record(StateMap = #{}) ->
     }.
 
 from_old_state_record(StateRec) ->
+    Opts = case element(9, StateRec) of
+               List when is_list(List) ->
+                   maps:from_list(List);
+               Map ->
+                   Map
+           end,
     #{ partitiontopic => element(2, StateRec)
      , broker_server => element(3, StateRec)
        %% cannot infer the clientid here...
@@ -927,7 +933,7 @@ from_old_state_record(StateRec) ->
      , producer_id => element(6, StateRec)
      , sequence_id => element(7, StateRec)
      , producer_name => element(8, StateRec)
-     , opts => element(9, StateRec)
+     , opts => Opts
      , callback => element(10, StateRec)
      , batch_size => element(11, StateRec)
      , requests => element(12, StateRec)

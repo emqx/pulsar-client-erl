@@ -12,31 +12,37 @@ services:
     tty: true
 
   toxiproxy:
-    container_name: proxy
+    container_name: toxiproxy
     image: ghcr.io/shopify/toxiproxy
     ports:
       - 8474:8474
       - 7650:6650
     expose:
       - 8474
+    volumes:
+      - "./.ci/toxiproxy.json:/config/toxiproxy.json"
     restart: always
+    command:
+      - "-host=0.0.0.0"
+      - "-config=/config/toxiproxy.json"
 
   pulsar:
     container_name: pulsar
-    image: streamnative/pulsar:${PULSAR_TAG}
-    volumes:
-    - ./test/test_SUITE_data/standalone.conf:/pulsar/conf/standalone.conf
+    image: apachepulsar/pulsar:${PULSAR_TAG}
     ports:
       - 6650:6650
       - 8080:8080
     restart: always
     command:
-      - bin/pulsar
-      - standalone
+      - bash
+      - "-c"
+      - |
+        sed -i '/^advertisedAddress=/advertisedAddress=toxiproxy' conf/standalone.conf
+        bin/pulsar standalone -nfw -nss
 
   pulsar-basic-auth:
     container_name: pulsar-basic-auth
-    image: streamnative/pulsar:${PULSAR_TAG}
+    image: apachepulsar/pulsar:${PULSAR_TAG}
     volumes:
       - ./test/test_SUITE_data/basic_auth:/pulsar/conf/basic_auth:ro
     environment:
@@ -58,7 +64,7 @@ services:
 
   pulsar-token-auth:
     container_name: pulsar-token-auth
-    image: streamnative/pulsar:${PULSAR_TAG}
+    image: apachepulsar/pulsar:${PULSAR_TAG}
     volumes:
       - ./test/test_SUITE_data/hs256_secret.key:/pulsar/conf/hs256_secret.key:ro
     environment:

@@ -20,7 +20,7 @@
 
 -define(TEST_SUIT_CLIENT, client_erl_suit).
 -define(BATCH_SIZE , 100).
--define(PULSAR_HOST, "pulsar://pulsar:6650").
+-define(PULSAR_HOST, "pulsar://toxiproxy:6650").
 -define(PULSAR_BASIC_AUTH_HOST, "pulsar://pulsar-basic-auth:6650").
 -define(PULSAR_TOKEN_AUTH_HOST, "pulsar://pulsar-token-auth:6650").
 
@@ -62,26 +62,26 @@ groups() ->
     , {down, resilience_multi_failure_tests()}
     ].
 
-init_per_suite(Cfg) ->
+init_per_suite(Config) ->
     ct:timetrap({minutes, 3}),
-    Cfg.
+    ProxyHost = os:getenv("PROXY_HOST", "toxiproxy"),
+    ProxyPort = list_to_integer(os:getenv("PROXY_PORT", "8474")),
+    pulsar_test_utils:reset_proxy(ProxyHost, ProxyPort),
+    Config.
 
 end_per_suite(_Args) ->
     ok.
 
 init_per_group(resilience, Config) ->
     PulsarHost = os:getenv("PULSAR_HOST", ?PULSAR_HOST),
-    ProxyHost = os:getenv("PROXY_HOST", "proxy"),
+    ProxyHost = os:getenv("PROXY_HOST", "toxiproxy"),
     ProxyPort = list_to_integer(os:getenv("PROXY_PORT", "8474")),
-    UpstreamHost = os:getenv("PROXY_PULSAR_HOST", PulsarHost),
-    %% when testing locally; externally exposed port for container
-    FakePulsarPort = list_to_integer(os:getenv("PROXY_PULSAR_PORT", "6650")),
-    FakePulsarHost = pulsar_test_utils:populate_proxy(ProxyHost, ProxyPort, FakePulsarPort, UpstreamHost),
+    pulsar_test_utils:reset_proxy(ProxyHost, ProxyPort),
     {ok, _} = application:ensure_all_started(pulsar),
     [ {pulsar_host, PulsarHost}
     , {proxy_host, ProxyHost}
     , {proxy_port, ProxyPort}
-    , {fake_pulsar_host, FakePulsarHost}
+    , {fake_pulsar_host, PulsarHost}
     , {resilience_test, true}
     | Config];
 init_per_group(timeout, Config) ->
@@ -112,7 +112,6 @@ init_per_testcase(t_pulsar_token_auth, Config) ->
 init_per_testcase(_TestCase, Config) ->
     PulsarHost = os:getenv("PULSAR_HOST", ?PULSAR_HOST),
     {ok, _} = application:ensure_all_started(pulsar),
-    group_initializations(Config),
     [ {pulsar_host, PulsarHost}
     | Config].
 
@@ -122,36 +121,24 @@ end_per_testcase(TestCase, Config)
        TestCase =:= t_pulsar_drop_expired_batch ->
     ProxyHost = ?config(proxy_host, Config),
     ProxyPort = ?config(proxy_port, Config),
+    pulsar_test_utils:reset_proxy(ProxyHost, ProxyPort),
     application:stop(pulsar),
     snabbkaffe:stop(),
-    pulsar_test_utils:reset_proxy(ProxyHost, ProxyPort),
     file:del_dir_r("/tmp/replayq1"),
-    meck:unload([pulsar_client]),
     ok;
 end_per_testcase(t_pulsar_drop_expired_batch_resend_inflight, Config) ->
     ProxyHost = ?config(proxy_host, Config),
     ProxyPort = ?config(proxy_port, Config),
+    pulsar_test_utils:reset_proxy(ProxyHost, ProxyPort),
     application:stop(pulsar),
     snabbkaffe:stop(),
-    catch meck:unload([pulsar_producer, pulsar_client]),
-    pulsar_test_utils:reset_proxy(ProxyHost, ProxyPort),
+    catch meck:unload([pulsar_producer]),
     file:del_dir_r("/tmp/replayq2"),
     ok;
 end_per_testcase(_TestCase, _Config) ->
     application:stop(pulsar),
     snabbkaffe:stop(),
     ok.
-
-group_initializations(Config) ->
-    IsResilienceTest = ?config(resilience_test, Config),
-    case IsResilienceTest of
-        true ->
-            FakePulsarHost = ?config(fake_pulsar_host, Config),
-            fix_broker_service_url(FakePulsarHost),
-            ok;
-        _ ->
-            ok
-    end.
 
 %%--------------------------------------------------------------------
 %% Test cases
@@ -834,27 +821,6 @@ wait_until_consumed(ExpectedPayloads0, Timeout) ->
                     error({missing_messages, lists:sort(sets:to_list(ExpectedPayloads0))})
             end
     end.
-
-fix_broker_service_url(FakePulsarHost) ->
-    %% since the broker reports a proxy URL to itself, we need to
-    %% patch that so we always use toxiproxy.
-    ok = meck:new(pulsar_client, [non_strict, passthrough, no_history]),
-    ok = meck:expect(
-           pulsar_client, get_alive_pulsar_url,
-           fun(_Pid) ->
-             {ok, FakePulsarHost}
-           end),
-    ok = meck:expect(
-           pulsar_client, handle_response,
-           fun({lookupTopicResponse, Response}, State) ->
-                NewResp = {lookupTopicResponse, Response#{ brokerServiceUrlTls => FakePulsarHost
-                                                         , brokerServiceUrl => FakePulsarHost
-                                                         }},
-                meck:passthrough([NewResp, State]);
-              (Response, State) ->
-                meck:passthrough([Response, State])
-           end),
-    ok.
 
 %%----------------------
 %% pulsar callback

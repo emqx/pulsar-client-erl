@@ -22,7 +22,7 @@
 -include("include/pulsar_producer_internal.hrl").
 
 -define(TEST_SUIT_CLIENT, ?MODULE).
--define(DEFAULT_PULSAR_HOST, "pulsar://pulsar:6650").
+-define(DEFAULT_PULSAR_HOST, "pulsar://toxiproxy:6650").
 
 %%--------------------------------------------------------------------
 %% CT Boilerplate

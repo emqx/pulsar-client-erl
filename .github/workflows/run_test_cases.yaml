@@ -7,10 +7,11 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: false
       matrix:
         pulsar_tag:
           - 2.7.0
-          - 2.10.0.3
+          - 2.10.0
     steps:
       - name: install docker-compose
         run: |
@@ -22,8 +23,7 @@ jobs:
           PULSAR_TAG: ${{ matrix.pulsar_tag }}
         run: |
           docker-compose -f ./docker-compose.yml up -d
-          sleep 3m
-          docker exec -i pulsar sh -c "bin/pulsar-admin topics create-partitioned-topic persistent://public/default/test -p 4"
+          sleep 15
           docker exec -i erlang sh -c "make -C /pulsar_client_erl xref"
           docker exec -i erlang sh -c "make -C /pulsar_client_erl dialyzer"
           docker exec -i erlang sh -c "make -C /pulsar_client_erl eunit"

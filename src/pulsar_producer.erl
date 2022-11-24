@@ -644,13 +644,17 @@ next_sequence_id(State = #{sequence_id := ?MAX_SEQ_ID}) ->
 next_sequence_id(State = #{sequence_id := SequenceId}) ->
     State#{sequence_id := SequenceId + 1}.
 
--spec log_error(string(), [term()], state()) -> ok.
-log_error(Fmt, Args, #{partitiontopic := PartitionTopic}) ->
-    logger:error("[pulsar-producer][~s] " ++ Fmt, [PartitionTopic | Args]).
-
 -spec log_info(string(), [term()], state()) -> ok.
 log_info(Fmt, Args, #{partitiontopic := PartitionTopic}) ->
     logger:info("[pulsar-producer][~s] " ++ Fmt, [PartitionTopic | Args]).
+
+-spec log_warn(string(), [term()], state()) -> ok.
+log_warn(Fmt, Args, #{partitiontopic := PartitionTopic}) ->
+    logger:warning("[pulsar-producer][~s] " ++ Fmt, [PartitionTopic | Args]).
+
+-spec log_error(string(), [term()], state()) -> ok.
+log_error(Fmt, Args, #{partitiontopic := PartitionTopic}) ->
+    logger:error("[pulsar-producer][~s] " ++ Fmt, [PartitionTopic | Args]).
 
 -spec invoke_callback(callback(), callback_input()) -> ok.
 invoke_callback(Callback, Resp) ->
@@ -702,7 +706,21 @@ enqueue_send_requests(Requests, State = #{replayq := Q}) ->
                Requests),
     NewQ = replayq:append(Q, QItems),
     ?tp(pulsar_producer_send_requests_enqueued, #{requests => Requests}),
-    State#{replayq := NewQ}.
+    Overflow = replayq:overflow(NewQ),
+    handle_overflow(State#{replayq := NewQ}, Overflow).
+
+-spec handle_overflow(state(), integer()) -> state().
+handle_overflow(State, Overflow) when Overflow =< 0 ->
+    %% no overflow
+    State;
+handle_overflow(State0 = #{replayq := Q, callback := Callback}, Overflow) ->
+    {NewQ, QAckRef, Items0} =
+        replayq:pop(Q, #{bytes_limit => Overflow, count_limit => 999999999}),
+    ok = replayq:ack(NewQ, QAckRef),
+    log_warn("replayq dropped ~b overflowed messages", [length(Items0)], State0),
+    Items = [{From, Msgs} || ?Q_ITEM(From, _Now, Msgs) <- Items0],
+    reply_with_error(Items, Callback, {error, overflow}),
+    State0#{replayq := NewQ}.
 
 maybe_send_to_pulsar(State) ->
     #{replayq := Q} = State,
@@ -759,13 +777,18 @@ do_send_to_pulsar(State0) ->
 -spec reply_expired_messages([{gen_statem:from() | undefined, [pulsar:message()]}],
                              state()) -> ok.
 reply_expired_messages(Expired, #{callback := Callback}) ->
+    reply_with_error(Expired, Callback, {error, expired}).
+
+-spec reply_with_error([{gen_statem:from() | undefined, [pulsar:message()]}],
+                       callback(), {error, expired | overflow}) -> ok.
+reply_with_error(Items, Callback, Error) ->
     lists:foreach(
       fun({undefined, Msgs}) ->
-              invoke_callback(Callback, {error, expired}, length(Msgs));
+              invoke_callback(Callback, Error, length(Msgs));
          ({From, _Msgs}) ->
-              gen_statem:reply(From, {error, expired})
+              gen_statem:reply(From, Error)
       end,
-      Expired).
+      Items).
 
 collect_send_requests(Acc, Limit) ->
     Count = length(Acc),

@@ -21,6 +21,14 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
 
+%% is useful when iterating on the tests in a loop, to get rid of all
+%% the garbaged printed before the test itself beings.
+clear_screen() ->
+    io:format(standard_io, "\033[H\033[2J", []),
+    io:format(standard_error, "\033[H\033[2J", []),
+    io:format(standard_io, "\033[H\033[3J", []),
+    io:format(standard_error, "\033[H\033[3J", []),
+    ok.
 
 populate_proxy(ProxyHost, ProxyPort, FakePulsarPort, PulsarUrl) ->
     {_, {PulsarHost, PulsarPort}} = pulsar_utils:parse_url(PulsarUrl),

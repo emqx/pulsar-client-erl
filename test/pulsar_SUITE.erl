@@ -306,8 +306,8 @@ t_pulsar_(Strategy, Config) ->
     },
     Data = #{key => <<"pulsar">>, value => <<"hello world">>},
     {ok, Producers} = pulsar:ensure_supervised_producers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ProducerOpts),
-    %% wait server connect
-    timer:sleep(500),
+    %% wait for consumer and producer to connect
+    timer:sleep(1_000),
     {ok, Producers} = pulsar:ensure_supervised_producers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ProducerOpts),
 
 
@@ -322,6 +322,11 @@ t_pulsar_(Strategy, Config) ->
     [{_, ConsumersPid, _, _} | _] = supervisor:which_children(pulsar_consumers_sup),
     {_, _, _, _, _, _, ConsumerMap} = sys:get_state(ConsumersPid),
     [ConsumerPid | _] = maps:keys(ConsumerMap),
+    ok = snabbkaffe:start_trace(),
+    snabbkaffe:block_until(
+      ?match_n_events(2, #{?snk_kind := test_consumer_handle_message}),
+      5_000),
+    ?tp(test_consumer_handle_message, #{}),
     erlang:exit(ProducerPid, kill),
     erlang:exit(ConsumerPid, kill),
     timer:sleep(2000),
@@ -959,6 +964,7 @@ wait_until_consumed(ExpectedPayloads0, Timeout) ->
 init(_Topic, Args) ->
     {ok, Args}.
 handle_message(_Msg, _Payloads, Loop) ->
+    ?tp(test_consumer_handle_message, #{}),
     {ok, 'Individual', Loop}.
 
 producer_callback(_Args) -> ok.

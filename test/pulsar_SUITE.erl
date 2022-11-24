@@ -51,6 +51,7 @@ resilience_multi_failure_tests() ->
 
 resilience_single_failure_tests() ->
     [ t_pulsar_drop_expired_batch_resend_inflight
+    , t_overflow
     ].
 
 groups() ->
@@ -112,7 +113,9 @@ init_per_testcase(t_pulsar_token_auth, Config) ->
 init_per_testcase(_TestCase, Config) ->
     PulsarHost = os:getenv("PULSAR_HOST", ?PULSAR_HOST),
     {ok, _} = application:ensure_all_started(pulsar),
+    ReplayqDir = "/tmp/replayq" ++ integer_to_list(erlang:unique_integer()),
     [ {pulsar_host, PulsarHost}
+    , {replayq_dir, ReplayqDir}
     | Config].
 
 end_per_testcase(TestCase, Config)
@@ -121,19 +124,30 @@ end_per_testcase(TestCase, Config)
        TestCase =:= t_pulsar_drop_expired_batch ->
     ProxyHost = ?config(proxy_host, Config),
     ProxyPort = ?config(proxy_port, Config),
+    ReplayqDir = ?config(replayq_dir, Config),
     pulsar_test_utils:reset_proxy(ProxyHost, ProxyPort),
     application:stop(pulsar),
     snabbkaffe:stop(),
-    file:del_dir_r("/tmp/replayq1"),
+    file:del_dir_r(ReplayqDir),
     ok;
 end_per_testcase(t_pulsar_drop_expired_batch_resend_inflight, Config) ->
     ProxyHost = ?config(proxy_host, Config),
     ProxyPort = ?config(proxy_port, Config),
+    ReplayqDir = ?config(replayq_dir, Config),
     pulsar_test_utils:reset_proxy(ProxyHost, ProxyPort),
     application:stop(pulsar),
     snabbkaffe:stop(),
     catch meck:unload([pulsar_producer]),
-    file:del_dir_r("/tmp/replayq2"),
+    file:del_dir_r(ReplayqDir),
+    ok;
+end_per_testcase(t_overflow, Config) ->
+    ProxyHost = ?config(proxy_host, Config),
+    ProxyPort = ?config(proxy_port, Config),
+    ReplayqDir = ?config(replayq_dir, Config),
+    pulsar_test_utils:reset_proxy(ProxyHost, ProxyPort),
+    application:stop(pulsar),
+    snabbkaffe:stop(),
+    file:del_dir_r(ReplayqDir),
     ok;
 end_per_testcase(_TestCase, _Config) ->
     application:stop(pulsar),
@@ -292,8 +306,8 @@ t_pulsar_(Strategy, Config) ->
     },
     Data = #{key => <<"pulsar">>, value => <<"hello world">>},
     {ok, Producers} = pulsar:ensure_supervised_producers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ProducerOpts),
-    %% wait server connect
-    timer:sleep(500),
+    %% wait for consumer and producer to connect
+    timer:sleep(1_000),
     {ok, Producers} = pulsar:ensure_supervised_producers(?TEST_SUIT_CLIENT, "persistent://public/default/test", ProducerOpts),
 
 
@@ -308,6 +322,11 @@ t_pulsar_(Strategy, Config) ->
     [{_, ConsumersPid, _, _} | _] = supervisor:which_children(pulsar_consumers_sup),
     {_, _, _, _, _, _, ConsumerMap} = sys:get_state(ConsumersPid),
     [ConsumerPid | _] = maps:keys(ConsumerMap),
+    ok = snabbkaffe:start_trace(),
+    snabbkaffe:block_until(
+      ?match_n_events(2, #{?snk_kind := test_consumer_handle_message}),
+      5_000),
+    ?tp(test_consumer_handle_message, #{}),
     erlang:exit(ProducerPid, kill),
     erlang:exit(ConsumerPid, kill),
     timer:sleep(2000),
@@ -463,6 +482,7 @@ t_pulsar_drop_expired_batch_resend_inflight(Config) ->
     PulsarHost = ?config(fake_pulsar_host, Config),
     ProxyHost = ?config(proxy_host, Config),
     ProxyPort = ?config(proxy_port, Config),
+    ReplayqDir = ?config(replayq_dir, Config),
     FailureType = down,
     StabilizationPeriod = timer:seconds(15),
     {ok, _} = application:ensure_all_started(pulsar),
@@ -500,7 +520,7 @@ t_pulsar_drop_expired_batch_resend_inflight(Config) ->
         batch_size => ?BATCH_SIZE,
         strategy => random,
         callback => {?MODULE, echo_callback, [self()]},
-        replayq_dir => "/tmp/replayq2",
+        replayq_dir => ReplayqDir,
         replayq_seg_bytes => 20 * 1024 * 1024,
         replayq_offload_mode => false,
         replayq_max_total_bytes => 1_000_000_000,
@@ -690,6 +710,7 @@ t_pulsar_replayq_producer_restart(Config) ->
     ProxyHost = ?config(proxy_host, Config),
     ProxyPort = ?config(proxy_port, Config),
     FailureType = ?config(failure_type, Config),
+    ReplayqDir = ?config(replayq_dir, Config),
     StabilizationPeriod = timer:seconds(15),
     {ok, _} = application:ensure_all_started(pulsar),
 
@@ -713,7 +734,7 @@ t_pulsar_replayq_producer_restart(Config) ->
         batch_size => ?BATCH_SIZE,
         strategy => random,
         callback => {?MODULE, producer_callback, []},
-        replayq_dir => "/tmp/replayq1",
+        replayq_dir => ReplayqDir,
         replayq_seg_bytes => 20 * 1024 * 1024,
         replayq_offload_mode => false,
         replayq_max_total_bytes => 1_000_000_000,
@@ -798,6 +819,120 @@ t_pulsar_replayq_producer_restart(Config) ->
 
     ok.
 
+t_overflow(Config) ->
+    PulsarHost = ?config(fake_pulsar_host, Config),
+    ProxyHost = ?config(proxy_host, Config),
+    ProxyPort = ?config(proxy_port, Config),
+    ReplayqDir = ?config(replayq_dir, Config),
+    StabilizationPeriod = timer:seconds(15),
+    {ok, _} = application:ensure_all_started(pulsar),
+
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    ct:pal("started client"),
+    Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
+    ConsumerOpts = #{
+        cb_init_args => #{send_to => self()},
+        cb_module => pulsar_echo_consumer,
+        sub_type => 'Shared',
+        subscription => "pulsar_test_" ++ atom_to_list(?FUNCTION_NAME),
+        max_consumer_num => 1,
+        name => pulsar_test_replayq
+    },
+    {ok, _Consumers} = pulsar:ensure_supervised_consumers(
+                        ?TEST_SUIT_CLIENT,
+                        Topic,
+                        ConsumerOpts),
+    ct:pal("started consumer"),
+    MaxTotalBytes = 100,
+    ProducerOpts = #{
+        batch_size => ?BATCH_SIZE,
+        strategy => random,
+        callback => {?MODULE, echo_callback, [self()]},
+        replayq_dir => ReplayqDir,
+        replayq_seg_bytes => 20 * 1024 * 1024,
+        replayq_offload_mode => false,
+        replayq_max_total_bytes => MaxTotalBytes,
+        retention_period => infinity
+    },
+    {ok, Producers} = pulsar:ensure_supervised_producers(
+                        ?TEST_SUIT_CLIENT,
+                        Topic,
+                        ProducerOpts),
+    ct:pal("started producer"),
+    {_, ProducerPid} = pulsar_producers:pick_producer(Producers,
+                                                      [#{key => <<"k">>, value => <<"v">>}]),
+    pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries0 = 5, _Sleep0 = 5_000),
+    ct:pal("producer connected"),
+    ct:pal("cutting connection with pulsar"),
+    pulsar_test_utils:enable_failure(down, ProxyHost, ProxyPort),
+    ct:pal("connection cut"),
+    %% ensure that the producer noticed pulsar is down
+    pulsar_test_utils:wait_for_state(ProducerPid, idle, _Retries1 = 5, _Sleep1 = 5_000),
+    ct:pal("producer disconnected"),
+    %% `From' is `undefined' for casts
+    From = undefined,
+    Data = [#{key => <<"k">>, value => <<"a">>}],
+    NumItems = 5,
+    SampleItem = pulsar_producer:make_queue_item(From, Data),
+    ItemSize = pulsar_producer:queue_item_sizer(SampleItem),
+    ExpectedOverflow = NumItems * ItemSize - MaxTotalBytes,
+    %% pre-condition
+    true = ExpectedOverflow > 0,
+    MessagesToDrop = round(math:ceil(ExpectedOverflow / ItemSize)),
+    ct:pal("expected overflow: ~b bytes; average size per item: ~b; messages to drop: ~b",
+           [ExpectedOverflow, ItemSize, MessagesToDrop]),
+
+    ok = snabbkaffe:start_trace(),
+    ct:pal("sending messages"),
+    lists:foreach(
+      fun(N) ->
+        {ok, {ok, _}} =
+            ?wait_async_action(
+               ok = pulsar:send(Producers, [#{key => <<"k">>, value => integer_to_binary(N)}]),
+               #{?snk_kind := pulsar_producer_send_requests_enqueued},
+               10_000)
+      end,
+      lists:seq(1, NumItems)),
+    ct:pal("messages enqueued"),
+
+    ct:pal("waiting for overflow callbacks"),
+    Resps = wait_callbacks(MessagesToDrop, _Timeout2 = 10_000),
+    ?assert(lists:all(fun(R) -> R =:= {error, overflow} end, Resps),
+            #{responses => Resps}),
+
+    %% now restore the connection and check that the last enqueued
+    %% messages survived.
+    ct:pal("healing network failure"),
+    pulsar_test_utils:heal_failure(down, ProxyHost, ProxyPort),
+
+    ExpectedPayloads =
+        sets:from_list(
+          [integer_to_binary(N)
+           || N <- lists:seq(MessagesToDrop + 1, NumItems)],
+          [{version, 2}]),
+    %% pre-condition: must have at least 1
+    true = sets:size(ExpectedPayloads) > 0,
+    ct:pal("waiting for payloads to be published and consumed: ~p", [ExpectedPayloads]),
+    wait_until_consumed(ExpectedPayloads, timer:seconds(30)),
+
+    ok.
+
+wait_callbacks(N, Timeout) ->
+    wait_callbacks(N, Timeout, []).
+
+wait_callbacks(N, _Timeout, Acc) when N =< 0 ->
+    lists:reverse(Acc);
+wait_callbacks(N, Timeout, Acc) ->
+    receive
+        {produce_response, Resp} ->
+            wait_callbacks(N - 1, Timeout, [Resp | Acc])
+    after
+        Timeout ->
+            error({missing_callbacks, #{ expected_remaining => N
+                                       , so_far => Acc
+                                       }})
+    end.
+
 wait_until_produced(ExpectedSeqNo, Timeout) ->
     receive
         {sent, ExpectedSeqNo} ->
@@ -829,6 +964,7 @@ wait_until_consumed(ExpectedPayloads0, Timeout) ->
 init(_Topic, Args) ->
     {ok, Args}.
 handle_message(_Msg, _Payloads, Loop) ->
+    ?tp(test_consumer_handle_message, #{}),
     {ok, 'Individual', Loop}.
 
 producer_callback(_Args) -> ok.

@@ -38,6 +38,8 @@
         , get_alive_pulsar_url/1
         ]).
 
+-export([try_initial_connection/3]).
+
 -record(state, {sock, servers, opts, producers = #{}, request_id = 0, requests = #{}, from, last_bin = <<>>}).
 
 -export_type([lookup_topic_response/0]).
@@ -56,6 +58,7 @@
 -define(PING_INTERVAL, 30000). %% 30s
 -define(PONG_TS, {pulsar_rcvd, pong}).
 -define(PONG_TIMEOUT, ?PING_INTERVAL * 2). %% 60s
+-define(CONN_TIMEOUT, 30000).
 -define(RECONNECT_TIMEOUT, 5_000).
 
 start_link(ClientId, Servers, Opts) ->
@@ -86,12 +89,36 @@ get_alive_pulsar_url(Pid) ->
 %%--------------------------------------------------------------------
 
 init([Servers, Opts]) ->
-    State = #state{servers = Servers, opts = Opts},
-    case get_alive_sock_opts(Servers, undefined, Opts) of
-        {error, Reason} ->
-            {stop, Reason};
-        {ok, {Sock, Opts1}} ->
-            {ok, State#state{sock = Sock, opts = Opts1}}
+    process_flag(trap_exit, true),
+    ConnTimeout = maps:get(connect_timeout, Opts, ?CONN_TIMEOUT),
+    Parent = self(),
+    Pid = spawn_link(fun() -> try_initial_connection(Parent, Servers, Opts) end),
+    TRef = erlang:send_after(ConnTimeout, self(), timeout),
+    Result = wait_for_socket_and_opts(Servers, Pid, timeout),
+    _ = erlang:cancel_timer(TRef),
+    exit(Pid, kill),
+    receive
+        timeout -> ok
+    after 0 ->
+        ok
+    end,
+    receive
+        {'EXIT', Pid, _Error} -> ok
+    after 0 ->
+        ok
+    end,
+    Result.
+
+wait_for_socket_and_opts(Servers, Pid, LastError) ->
+    receive
+        {Pid, {ok, {Sock, Opts}}} ->
+            State = #state{sock = Sock, servers = Servers, opts = Opts},
+            {ok, State};
+        {Pid, {error, Error}} ->
+            wait_for_socket_and_opts(Servers, Pid, Error);
+        timeout ->
+            log_error("timed out when starting pulsar client; last error: ~p", [LastError]),
+            {stop, LastError}
     end.
 
 handle_call({get_topic_metadata, Topic, Call}, From,
@@ -180,7 +207,6 @@ handle_info({Error, Sock, Reason}, State = #state{sock = Sock})
     log_error("transport layer error: ~p", [Reason]),
     start_reconnect_timer(),
     {noreply, State#state{sock = undefined}, hibernate};
-
 handle_info({Closed, Sock}, State = #state{sock = Sock})
         when Closed == tcp_closed; Closed == ssl_closed ->
     log_error("connection closed by peer", []),
@@ -402,4 +428,18 @@ close_socket_and_flush_signals(Sock, Opts) ->
     after
         0 ->
             ok
+    end.
+
+try_initial_connection(Parent, Servers, Opts) ->
+    case get_alive_sock_opts(Servers, undefined, Opts) of
+        {error, Reason} ->
+            %% to avoid a hot restart loop leading to max restart
+            %% intensity when pulsar (or the connection to it) is
+            %% having a bad day...
+            Parent ! {self(), {error, Reason}},
+            timer:sleep(100),
+            ?MODULE:try_initial_connection(Parent, Servers, Opts);
+        {ok, {Sock, Opts1}} ->
+            pulsar_socket:controlling_process(Sock, Parent, Opts1),
+            Parent ! {self(), {ok, {Sock, Opts1}}}
     end.

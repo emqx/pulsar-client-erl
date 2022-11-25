@@ -17,6 +17,7 @@
 -export([ peername/2
         , connect/3
         , close/2
+        , controlling_process/3
         ]).
 
 -export([ send_connect_packet/2
@@ -32,6 +33,9 @@
         , getstat/2
         , get_pulsar_uri/2
         ]).
+
+%% exposed ONLY for mocking
+-export([internal_getopts/3]).
 
 -define(SEND_TIMEOUT, 60000).
 -define(CONN_TIMEOUT, 30000).
@@ -131,12 +135,21 @@ connect(Host, Port, Opts) ->
     {ConnOpts, Timeout} = connect_opts(Opts),
     case TcpMod:connect(Host, Port, ConnOpts, Timeout) of
         {ok, Sock} ->
-            tune_buffer(inet_module(Opts), Sock),
-            TcpMod:controlling_process(Sock, self()),
-            {ok, Sock};
+            case tune_buffer(inet_module(Opts), Sock) of
+                ok ->
+                    TcpMod:controlling_process(Sock, self()),
+                    {ok, Sock};
+                Error ->
+                    Error
+            end;
         {error, _} = Error ->
             Error
     end.
+
+controlling_process(Sock, Pid, Opts) ->
+    TcpMod = tcp_module(Opts),
+    TcpMod:controlling_process(Sock, Pid),
+    ok.
 
 close(Sock, Opts) ->
     try
@@ -244,11 +257,20 @@ inet_module(Opts) ->
         true -> ssl
     end.
 
+%% to allow mocking
+internal_getopts(InetM, Sock, Opts) ->
+    InetM:getopts(Sock, Opts).
+
 tune_buffer(InetM, Sock) ->
-    {ok, Opts} = InetM:getopts(Sock, [recbuf, sndbuf]),
-    RecBuf = proplists:get_value(recbuf, Opts),
-    SndBuf = proplists:get_value(sndbuf, Opts),
-    InetM:setopts(Sock, [{buffer, max(RecBuf, SndBuf)}]).
+    case ?MODULE:internal_getopts(InetM, Sock, [recbuf, sndbuf]) of
+        {ok, Opts} ->
+            RecBuf = proplists:get_value(recbuf, Opts),
+            SndBuf = proplists:get_value(sndbuf, Opts),
+            InetM:setopts(Sock, [{buffer, max(RecBuf, SndBuf)}]),
+            ok;
+        Error ->
+            Error
+    end.
 
 opt(Key, Opts, Default) when is_list(Opts) ->
     opt(Key, maps:from_list(Opts), Default);

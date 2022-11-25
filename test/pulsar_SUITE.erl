@@ -37,6 +37,7 @@ all() ->
     , t_pulsar_basic_auth
     , t_pulsar_token_auth
     , t_pulsar
+    , t_pulsar_client_tune_error
     , {group, resilience}
     ].
 
@@ -913,6 +914,29 @@ t_overflow(Config) ->
     true = sets:size(ExpectedPayloads) > 0,
     ct:pal("waiting for payloads to be published and consumed: ~p", [ExpectedPayloads]),
     wait_until_consumed(ExpectedPayloads, timer:seconds(30)),
+
+    ok.
+
+%% check that an error when tuning the socket does not make
+%% pulsar_client bring the application down...
+t_pulsar_client_tune_error(Config) ->
+    PulsarHost = ?config(pulsar_host, Config),
+    {ok, _} = application:ensure_all_started(pulsar),
+
+    %% let it start once
+    {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+
+    pulsar_test_utils:with_mock(pulsar_socket, internal_getopts,
+      fun(_InetM, _Sock, _Opts) -> {error, einval} end,
+      fun() ->
+        %% now introduce the failure and kill it; the supervisor will restart it
+        exit(ClientPid, kill),
+        ct:sleep(10_000),
+        %% should still be a registered child; if max restart
+        %% intensity is reached, will be removed.
+        ?assertMatch([_], supervisor:which_children(pulsar_client_sup)),
+        ok
+      end),
 
     ok.
 

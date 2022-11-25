@@ -103,3 +103,12 @@ wait_for_state(Pid, DesiredState, Retries, Sleep) ->
             ct:sleep(Sleep),
             wait_for_state(Pid, DesiredState, Retries - 1, Sleep)
     end.
+
+with_mock(Mod, FnName, MockedFn, Fun) ->
+    ok = meck:new(Mod, [non_strict, no_link, no_history, passthrough]),
+    ok = meck:expect(Mod, FnName, MockedFn),
+    try
+        Fun()
+    after
+        ok = meck:unload(Mod)
+    end.

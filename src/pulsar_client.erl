@@ -172,7 +172,7 @@ handle_cast(_Req, State) ->
     {noreply, State, hibernate}.
 
 
-handle_info({Transport, _, Bin}, State = #state{last_bin = LastBin})
+handle_info({Transport, Sock, Bin}, State = #state{sock = Sock, last_bin = LastBin})
         when Transport == tcp; Transport == ssl ->
     {noreply, parse_packet(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State)};
 handle_info({Error, Sock, Reason}, State = #state{sock = Sock})
@@ -332,19 +332,33 @@ do_try_connect([URI | Servers], Opts0, Res) ->
     case pulsar_socket:connect(Host, Port, Opts) of
         {ok, Sock} ->
             pulsar_socket:send_connect_packet(Sock, Opts),
-            receive
-                {Transport, _, Bin} when Transport == tcp; Transport == ssl ->
-                    case pulsar_protocol_frame:parse(Bin) of
-                        {{connected, _CommandConnected}, <<>>} ->
-                            {ok, {Sock, Opts}};
-                        {{error, CommandError}, <<>>} ->
-                            do_try_connect(Servers, Opts, Res#{{Host, Port} => CommandError})
-                    end
-            after 15000 ->
-                do_try_connect(Servers, Opts, Res#{{Host, Port} => wait_connect_response_timeout})
+            case wait_for_conn_response(Sock, Opts) of
+                {ok, Result} ->
+                    {ok, Result};
+                {error, Reason} ->
+                    ok = close_socket_and_flush_signals(Sock, Opts),
+                    do_try_connect(Servers, Opts, Res#{{Host, Port} => Reason})
             end;
         {error, Reason} ->
             do_try_connect(Servers, Opts, Res#{{Host, Port} => Reason})
+    end.
+
+wait_for_conn_response(Sock, Opts) ->
+    receive
+        {Transport, Sock, Bin} when Transport == tcp; Transport == ssl ->
+            case pulsar_protocol_frame:parse(Bin) of
+                {{connected, _CommandConnected}, <<>>} ->
+                    {ok, {Sock, Opts}};
+                {{error, CommandError}, <<>>} ->
+                    {error, CommandError}
+            end;
+        {Error, Sock, Reason} when Error == ssl_error; Error == tcp_error ->
+            {error, {Error, Reason}};
+        {Closed, Sock} when Closed == tcp_closed; Closed == ssl_closed ->
+            {error, Closed}
+    after
+        15000 ->
+            {error, wait_connect_response_timeout}
     end.
 
 next_request_id(State = #state{request_id = 65535}) ->
@@ -373,3 +387,19 @@ is_pong_longtime_no_received() ->
 
 now_ts() ->
     erlang:system_time(millisecond).
+
+%% close sockt and flush socket error and closed signals
+close_socket_and_flush_signals(Sock, Opts) ->
+    _ = pulsar_socket:close(Sock, Opts),
+    receive
+        {Transport, Sock, _} when Transport == tcp; Transport == ssl ->
+            %% race condition
+            ok;
+        {Error, Sock, _Reason} when Error == ssl_error; Error == tcp_error ->
+            ok;
+        {Closed, Sock} when Closed == tcp_closed; Closed == ssl_closed ->
+            ok
+    after
+        0 ->
+            ok
+    end.

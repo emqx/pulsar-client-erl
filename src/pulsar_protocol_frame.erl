@@ -39,7 +39,7 @@
 
 %% Use protocol version 10 to work with pulsar proxy
 -define(PROTO_VSN, 10).
--define(CLIENT_VSN, "Pulsar-Client-Erlang-v0.0.2").
+-define(CLIENT_VSN, "Pulsar-Client-Erlang-v0.7").
 
 -export ([ connect/0
          , connect/1

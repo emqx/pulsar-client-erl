@@ -92,6 +92,8 @@
 -define(INFLIGHT_REQ(QAckRef, FromsToMessages), {inflight_req, QAckRef, FromsToMessages}).
 -define(NEXT_STATE_IDLE_RECONNECT(State), {next_state, idle, State#{sock := undefined},
                                            [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]}).
+-define(buffer_overflow_discarded, buffer_overflow_discarded).
+-define(MIN_DISCARD_LOG_INTERVAL, timer:seconds(5)).
 
 -type state() :: #{
                    batch_size := non_neg_integer(),
@@ -712,15 +714,84 @@ enqueue_send_requests(Requests, State = #{replayq := Q}) ->
 -spec handle_overflow(state(), integer()) -> state().
 handle_overflow(State, Overflow) when Overflow =< 0 ->
     %% no overflow
+    ok = maybe_log_discard(State, _NumRequestsIncrement = 0),
     State;
 handle_overflow(State0 = #{replayq := Q, callback := Callback}, Overflow) ->
     {NewQ, QAckRef, Items0} =
         replayq:pop(Q, #{bytes_limit => Overflow, count_limit => 999999999}),
     ok = replayq:ack(NewQ, QAckRef),
-    log_warn("replayq dropped ~b overflowed messages", [length(Items0)], State0),
+    maybe_log_discard(State0, length(Items0)),
     Items = [{From, Msgs} || ?Q_ITEM(From, _Now, Msgs) <- Items0],
     reply_with_error(Items, Callback, {error, overflow}),
     State0#{replayq := NewQ}.
+
+maybe_log_discard(State, Increment) ->
+    Last = get_overflow_log_state(),
+    #{ count_since_last_log := CountLast
+     , total_count := TotalCount
+     } = Last,
+    case CountLast =:= TotalCount andalso Increment =:= 0 of
+        true -> %% no change
+            ok;
+        false ->
+            maybe_log_discard(State, Increment, Last)
+    end.
+
+-spec maybe_log_discard(
+        state(),
+        non_neg_integer(),
+        #{ last_log_inst => non_neg_integer()
+         , count_since_last_log => non_neg_integer()
+         , total_count => non_neg_integer()
+         }) -> ok.
+maybe_log_discard(State,
+                  Increment,
+                  #{ last_log_inst := LastInst
+                   , count_since_last_log := CountLast
+                   , total_count := TotalCount
+                   }) ->
+    NowInst = now_ts(),
+    NewTotalCount = TotalCount + Increment,
+    Delta = NewTotalCount - CountLast,
+    case NowInst - LastInst > ?MIN_DISCARD_LOG_INTERVAL of
+        true ->
+            log_warn("replayq dropped ~b overflowed messages", [Delta], State),
+            put_overflow_log_state(#{ last_log_inst => NowInst
+                                    , count_since_last_log => NewTotalCount
+                                    , total_count => NewTotalCount
+                                    });
+        false ->
+            put_overflow_log_state(#{ last_log_inst => LastInst
+                                    , count_since_last_log => CountLast
+                                    , total_count => NewTotalCount
+                                    })
+    end.
+
+-spec get_overflow_log_state() -> #{ last_log_inst => non_neg_integer()
+                                   , count_since_last_log => non_neg_integer()
+                                   , total_count => non_neg_integer()
+                                   }.
+get_overflow_log_state() ->
+    case get(?buffer_overflow_discarded) of
+        undefined ->
+            #{ last_log_inst => 0
+             , count_since_last_log => 0
+             , total_count => 0
+             };
+        Stats = #{} ->
+            Stats
+    end.
+
+-spec put_overflow_log_state(#{ last_log_inst => non_neg_integer()
+                              , count_since_last_log => non_neg_integer()
+                              , total_count => non_neg_integer()
+                              }) -> ok.
+put_overflow_log_state(#{ last_log_inst := _LastInst
+                        , count_since_last_log := _CountLast
+                        , total_count := _TotalCount
+                        } = Stats) ->
+    put(?buffer_overflow_discarded, Stats),
+    ok.
 
 maybe_send_to_pulsar(State) ->
     #{replayq := Q} = State,
@@ -1035,3 +1106,39 @@ maybe_connect(#{ broker_service_url := NewBrokerServiceURL
             put(proxy_to_broker_url, NewBrokerServiceURL),
             ?NEXT_STATE_IDLE_RECONNECT(State)
     end.
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+maybe_log_discard_test_() ->
+    [ {"no increment, empty dictionary", fun() -> maybe_log_discard(undefined, 0) end}
+    , {"fake-last-old",
+       fun() ->
+         Inst0 = now_ts() - ?MIN_DISCARD_LOG_INTERVAL - 1,
+         ok = put_overflow_log_state(#{ last_log_inst => Inst0
+                                      , count_since_last_log => 2
+                                      , total_count => 2
+                                      }),
+         ok = maybe_log_discard(#{partitiontopic => <<"partitiontopic">>}, 1),
+         Stats = get_overflow_log_state(),
+         ?assertMatch(#{count_since_last_log := 3, total_count := 3}, Stats),
+         %% greater than the minimum interval because we just logged
+         ?assert(maps:get(last_log_inst, Stats) - Inst0 > ?MIN_DISCARD_LOG_INTERVAL),
+         ok
+       end}
+    , {"fake-last-fresh",
+       fun() ->
+         Inst0 = now_ts(),
+         ok = put_overflow_log_state(#{ last_log_inst => Inst0
+                                      , count_since_last_log => 2
+                                      , total_count => 2
+                                      }),
+         ok = maybe_log_discard(#{partitiontopic => <<"partitiontopic">>}, 2),
+         Stats = get_overflow_log_state(),
+         ?assertMatch(#{count_since_last_log := 2, total_count := 4}, Stats),
+         %% less than the minimum interval because we didn't log and just accumulated
+         ?assert(maps:get(last_log_inst, Stats) - Inst0 < ?MIN_DISCARD_LOG_INTERVAL),
+         ok
+       end}
+    ].
+-endif.

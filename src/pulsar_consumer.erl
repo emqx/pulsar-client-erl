@@ -198,10 +198,10 @@ handle_response({message, Msg, Payloads}, State = #state{
             {keep_state, State}
     end;
 handle_response({close_consumer, #{}}, State = #state{partitiontopic = Topic}) ->
-    log_error("Close consumer: ~p~n", [Topic]),
+    log_error("Closed consumer: ~p~n", [Topic]),
     {stop, {shutdown, close_consumer}, State};
 handle_response(Msg, State) ->
-    log_error("Consumer Receive unknown message:~p~n", [Msg]),
+    log_error("Consumer received unknown message:~p~n", [Msg]),
     {keep_state, State}.
 
 start_keepalive() ->

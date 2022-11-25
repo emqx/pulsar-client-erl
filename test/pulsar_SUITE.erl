@@ -824,7 +824,6 @@ t_overflow(Config) ->
     ProxyHost = ?config(proxy_host, Config),
     ProxyPort = ?config(proxy_port, Config),
     ReplayqDir = ?config(replayq_dir, Config),
-    StabilizationPeriod = timer:seconds(15),
     {ok, _} = application:ensure_all_started(pulsar),
 
     {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),

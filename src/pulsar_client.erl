@@ -200,7 +200,7 @@ handle_info(ping, State = #state{sock = Sock, opts = Opts}) ->
     pulsar_socket:ping(Sock, Opts),
     {noreply, State, hibernate};
 handle_info(_Info, State) ->
-    log_error("receive unknown message: ~p", [_Info]),
+    log_error("received unknown message: ~p", [_Info]),
     {noreply, State, hibernate}.
 
 terminate(_Reason, #state{sock = undefined}) ->

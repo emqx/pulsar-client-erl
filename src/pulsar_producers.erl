@@ -40,7 +40,7 @@
                 producer_id = 0,
                 producers = #{}}).
 
--type clientid() :: binary().
+-type clientid() :: atom().
 -type topic() :: string().
 -type produce_strategy() :: roundrobin | random.
 -type producers() :: #{ client := clientid()

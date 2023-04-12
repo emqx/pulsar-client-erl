@@ -6,16 +6,20 @@
 
 ### Async Produce
 
-```
+```erlang
 {ok, Pid} = pulsar:ensure_supervised_client('client1', [{"127.0.0.1", 6650}], #{}),
 {ok, Producers} = pulsar:ensure_supervised_producers('client1', "persistent://public/default/test", #{}),
 {ok, WorkerPid} = pulsar:send(Producers, [#{key => "key", value => <<"hello">>}]),
+%% per-request callbacks can be given
+CallbackFn = fun(Caller, Response) -> Caller ! {response, Response} end.
+SendOpts = #{callback_fn => {CallbackFn, [self()]}}.
+{ok, _} = pulsar:send(Producers, [#{key => "key", value => <<"hello">>}], SendOpts),
 ok = pulsar:stop_and_delete_supervised_producers(Producers),
 ok = pulsar:stop_and_delete_supervised_client('client1').
 ```
 ### Sync Produce
 
-```
+```erlang
 {ok, Pid} = pulsar:ensure_supervised_client('client1', [{"127.0.0.1", 6650}], #{}),
 {ok, Producers} = pulsar:ensure_supervised_producers('client1', "persistent://public/default/test", #{}),
 ok = pulsar:send_sync(Producers, [#{key => "key", value => <<"hello">>}], 5000),
@@ -25,7 +29,7 @@ ok = pulsar:stop_and_delete_supervised_client('client1').
 
 ### Supervised Producers
 
-```
+```erlang
 application:ensure_all_started(pulsar).
 Client = 'client1',
 Opts = #{},

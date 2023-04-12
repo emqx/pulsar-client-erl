@@ -1,3 +1,17 @@
+# 0.8.0
+
+## Enhancements
+
+- When producing messages asynchronously, the PID of the producer that
+  was called is now returned, so it can be monitored if necessary.
+- Added support for specifying per-request callback functions to be
+  called when the send receipt is received from Pulsar.
+
+## Bug fixes
+
+- Fixed `pulsar_producers:clientid/0` typespec.  It was defined as a
+  `binary()`, but the clientid is actually an `atom()`.
+
 # 0.7.0
 
 ## Enhancements

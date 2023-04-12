@@ -38,6 +38,7 @@ all() ->
     , t_pulsar_token_auth
     , t_pulsar
     , t_pulsar_client_tune_error
+    , t_per_request_callbacks
     , {group, resilience}
     ].
 
@@ -431,6 +432,21 @@ t_pulsar_drop_expired_batch(Config) ->
     %% Produce messages that'll expire
     ok = snabbkaffe:start_trace(),
     ct:pal("sending messages..."),
+    TestPid = self(),
+    CallbackFn =
+        fun(Resp) ->
+          TestPid ! {per_request_response, Resp},
+          ok
+        end,
+    {{ok, _WorkerPid}, {ok, _}} =
+        ?wait_async_action(
+           pulsar:send(Producers,
+                       [#{key => <<"k">>, value => integer_to_binary(SeqNo)}
+                        || SeqNo <- lists:seq(1, 150)],
+                       %% test per-request callback
+                       #{callback_fn => {CallbackFn, []}}),
+          #{?snk_kind := pulsar_producer_send_requests_enqueued},
+          _Timeout1 = 35_000),
     {{ok, _WorkerPid}, {ok, _}} =
         ?wait_async_action(
            pulsar:send(Producers,
@@ -460,6 +476,13 @@ t_pulsar_drop_expired_batch(Config) ->
     end,
     receive
         {produce_response, {error, expired}} ->
+            ok
+    after
+        1_000 ->
+            error(should_have_invoked_callback)
+    end,
+    receive
+        {per_request_response, {error, expired}} ->
             ok
     after
         1_000 ->
@@ -937,6 +960,70 @@ t_pulsar_client_tune_error(Config) ->
         ?assertMatch([_], supervisor:which_children(pulsar_client_sup)),
         ok
       end),
+
+    ok.
+
+%% check that we call per request callbacks
+t_per_request_callbacks(Config) ->
+    PulsarHost = ?config(pulsar_host, Config),
+    {ok, _} = application:ensure_all_started(pulsar),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    ct:pal("started client"),
+    Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
+    ConsumerOpts = #{
+        cb_init_args => #{send_to => self()},
+        cb_module => pulsar_echo_consumer,
+        sub_type => 'Shared',
+        subscription => "pulsar_test_replayq",
+        max_consumer_num => 1,
+        name => pulsar_test_replayq
+    },
+    {ok, _Consumers} = pulsar:ensure_supervised_consumers(
+                        ?TEST_SUIT_CLIENT,
+                        Topic,
+                        ConsumerOpts),
+    ct:pal("started consumer"),
+    ProducerOpts = #{
+        batch_size => ?BATCH_SIZE,
+        strategy => random,
+        retention_period => infinity
+    },
+    {ok, Producers} = pulsar:ensure_supervised_producers(
+                        ?TEST_SUIT_CLIENT,
+                        Topic,
+                        ProducerOpts),
+    ct:pal("started producer"),
+    {_, ProducerPid} = pulsar_producers:pick_producer(Producers,
+                                                      [#{key => <<"k">>, value => <<"v">>}]),
+    pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
+    ct:pal("producer connected"),
+    TId = ets:new(results, [public, ordered_set]),
+    CallbackFn = fun(Caller, TId0, Res) ->
+                   Now = erlang:monotonic_time(),
+                   ets:insert(TId0, {Now, Res}),
+                   Caller ! {response, Res},
+                   ok
+                 end,
+    Args = [self(), TId],
+    pulsar:send(Producers,
+                [#{key => <<"k">>, value => integer_to_binary(SeqNo)}
+                 || SeqNo <- lists:seq(1, 150)],
+                #{callback_fn => {CallbackFn, Args}}),
+    receive
+        {response, Res} ->
+            ct:pal("response: ~p", [Res]),
+            ?assertMatch({ok, #{sequence_id := _}}, Res)
+    after
+        5_000 ->
+            ct:fail("no response received")
+    end,
+    receive
+        {response, _Res} ->
+            ct:fail("should have invoked the callback only once")
+    after
+        1_000 ->
+            ok
+    end,
 
     ok.
 

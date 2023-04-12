@@ -9,7 +9,7 @@
 ```
 {ok, Pid} = pulsar:ensure_supervised_client('client1', [{"127.0.0.1", 6650}], #{}),
 {ok, Producers} = pulsar:ensure_supervised_producers('client1', "persistent://public/default/test", #{}),
-ok = pulsar:send(Producers, [#{key => "key", value => <<"hello">>}]),
+{ok, WorkerPid} = pulsar:send(Producers, [#{key => "key", value => <<"hello">>}]),
 ok = pulsar:stop_and_delete_supervised_producers(Producers),
 ok = pulsar:stop_and_delete_supervised_client('client1').
 ```

@@ -125,11 +125,11 @@ callback_mode() -> [state_functions, state_enter].
 start_link(PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts) ->
     gen_statem:start_link(?MODULE, {PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts}, []).
 
--spec send(gen_statem:server_ref(), [pulsar:message()]) -> ok.
+-spec send(gen_statem:server_ref(), [pulsar:message()]) -> {ok, pid()}.
 send(Pid, Messages) ->
     From = undefined,
     erlang:send(Pid, ?SEND_REQ(From, Messages)),
-    ok.
+    {ok, Pid}.
 
 -spec send_sync(gen_statem:server_ref(), [pulsar:message()]) ->
           {ok, send_receipt()}

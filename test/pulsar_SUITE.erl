@@ -431,7 +431,7 @@ t_pulsar_drop_expired_batch(Config) ->
     %% Produce messages that'll expire
     ok = snabbkaffe:start_trace(),
     ct:pal("sending messages..."),
-    {ok, {ok, _}} =
+    {{ok, _WorkerPid}, {ok, _}} =
         ?wait_async_action(
            pulsar:send(Producers,
                        [#{key => <<"k">>, value => integer_to_binary(SeqNo)}
@@ -886,9 +886,9 @@ t_overflow(Config) ->
     ct:pal("sending messages"),
     lists:foreach(
       fun(N) ->
-        {ok, {ok, _}} =
+        {{ok, _WorkerPid}, {ok, _}} =
             ?wait_async_action(
-               ok = pulsar:send(Producers, [#{key => <<"k">>, value => integer_to_binary(N)}]),
+               pulsar:send(Producers, [#{key => <<"k">>, value => integer_to_binary(N)}]),
                #{?snk_kind := pulsar_producer_send_requests_enqueued},
                10_000)
       end,

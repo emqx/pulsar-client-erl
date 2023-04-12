@@ -143,7 +143,7 @@ t_collect_and_downgrade_send_requests(_Config) ->
 
     %% put some sync and async requests in the mailbox
     Messages = [#{key => <<"k">>, value => <<"v">>}],
-    ok = pulsar_producer:send(FakeProducer, Messages),
+    {ok, _WorkerPid} = pulsar_producer:send(FakeProducer, Messages),
     try
         pulsar_producer:send_sync(FakeProducer, Messages, 1)
     catch

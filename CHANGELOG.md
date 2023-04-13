@@ -6,6 +6,8 @@
   was called is now returned, so it can be monitored if necessary.
 - Added support for specifying per-request callback functions to be
   called when the send receipt is received from Pulsar.
+- Added support for binary URLs.  Previously, only Erlang strings
+  (lists) were allowed.
 
 ## Bug fixes
 

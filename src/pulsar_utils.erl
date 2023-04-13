@@ -35,6 +35,8 @@ hostport_from_url(URL) ->
         [_Scheme, HostPort] -> HostPort
     end.
 
+parse_url(URL) when is_binary(URL) ->
+    parse_url(binary_to_list(URL));
 parse_url(URL) when is_list(URL) ->
     case string:split(URL, "://") of
         ["pulsar+ssl", URI] -> {ssl, parse_uri(URI)};

@@ -31,3 +31,13 @@ merge_opts_test_() ->
              [{op3, 3}],
              [{op1, 1}, {op4, 4}]])))
     ].
+
+parse_url_test_() ->
+    [ ?_assertMatch({tcp, {"pulsar", 6650}}, pulsar_utils:parse_url("pulsar://pulsar:6650"))
+    , ?_assertMatch({tcp, {"pulsar", 6650}}, pulsar_utils:parse_url(<<"pulsar://pulsar:6650">>))
+    , ?_assertMatch({ssl, {"pulsar", 6651}}, pulsar_utils:parse_url("pulsar+ssl://pulsar:6651"))
+    , ?_assertMatch({ssl, {"pulsar", 6651}}, pulsar_utils:parse_url(<<"pulsar+ssl://pulsar:6651">>))
+    , ?_assertMatch({ssl, {"pulsar", 6650}}, pulsar_utils:parse_url("pulsar+ssl://pulsar"))
+    , ?_assertMatch({ssl, {"pulsar", 6650}}, pulsar_utils:parse_url(<<"pulsar+ssl://pulsar">>))
+    , ?_assertMatch({tcp, {"pulsar", 6650}}, pulsar_utils:parse_url(<<"pulsar">>))
+    ].

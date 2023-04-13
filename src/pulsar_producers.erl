@@ -19,7 +19,9 @@
 %% APIs
 -export([start_supervised/3, stop_supervised/1, start_link/3]).
 
--export ([pick_producer/2]).
+-export ([ pick_producer/2
+         , all_connected/1
+         ]).
 
 %% gen_server callbacks
 -export([ code_change/3
@@ -40,7 +42,7 @@
                 producer_id = 0,
                 producers = #{}}).
 
--type clientid() :: binary().
+-type clientid() :: atom().
 -type topic() :: string().
 -type produce_strategy() :: roundrobin | random.
 -type producers() :: #{ client := clientid()
@@ -73,6 +75,24 @@ stop_supervised(#{client := ClientId, workers := Workers}) ->
 %% @doc start pulsar_producers gen_server
 start_link(ClientId, Topic, ProducerOpts) ->
     gen_server:start_link({local, get_name(ProducerOpts)}, ?MODULE, [ClientId, Topic, ProducerOpts], []).
+
+-spec all_connected(producers()) -> boolean().
+all_connected(#{workers := WorkersTable}) ->
+    ets:foldl(
+      fun({_Partition, Pid}, Acc) ->
+              Acc andalso
+                  try pulsar_producer:get_state(Pid) of
+                      State ->
+                          State =:= connected
+                  catch
+                      exit:{noproc, _} ->
+                          false;
+                      error:timeout ->
+                          false
+                  end
+      end,
+      true,
+      WorkersTable).
 
 pick_producer(#{workers := Workers, partitions := Partitions, strategy := Strategy}, Batch) ->
     Partition = pick_partition(Partitions, Strategy, Batch),
@@ -109,6 +129,7 @@ is_alive(Pid) -> is_pid(Pid) andalso is_process_alive(Pid).
 
 lookup_producer(#{workers := Workers}, Partition) ->
     lookup_producer(Workers, Partition);
+%% legacy case???
 lookup_producer(Workers, Partition) when is_map(Workers) ->
     maps:get(Partition, Workers);
 lookup_producer(Workers, Partition) ->

@@ -21,8 +21,10 @@
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
 
 -export([ send/2
+        , send/3
         , send_sync/2
         , send_sync/3
+        , get_state/1
         ]).
 
 -export([ start_link/4
@@ -63,7 +65,7 @@
                          , any() => term()
                          }.
 -type timestamp() :: integer().
--type callback() :: undefined | mfa() | fun((map()) -> ok).
+-type callback() :: undefined | mfa() | fun((map()) -> ok) | per_request_callback().
 -type callback_input() :: {ok, send_receipt()} | {error, expired}.
 -type config() :: #{ replayq_dir := string()
                    , replayq_max_total_bytes => pos_integer()
@@ -94,6 +96,7 @@
                                            [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]}).
 -define(buffer_overflow_discarded, buffer_overflow_discarded).
 -define(MIN_DISCARD_LOG_INTERVAL, timer:seconds(5)).
+-define(PER_REQ_CALLBACK(Fn, Args), {callback, {Fn, Args}}).
 
 -type state() :: #{
                    batch_size := non_neg_integer(),
@@ -119,17 +122,28 @@
                    sock := undefined | port()
                   }.
 -type handler_result() :: gen_statem:event_handler_result(statem(), state()).
+-type per_request_callback() :: {function(), [term()]}.
+-type per_request_callback_int() :: ?PER_REQ_CALLBACK(function(), [term()]).
+-type send_opts() :: #{callback_fn => per_request_callback()}.
+-export_type([send_opts/0]).
 
 callback_mode() -> [state_functions, state_enter].
 
 start_link(PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts) ->
     gen_statem:start_link(?MODULE, {PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts}, []).
 
--spec send(gen_statem:server_ref(), [pulsar:message()]) -> ok.
+-spec send(gen_statem:server_ref(), [pulsar:message()]) -> {ok, pid()}.
 send(Pid, Messages) ->
-    From = undefined,
+    send(Pid, Messages, _Opts = #{}).
+
+-spec send(gen_statem:server_ref(), [pulsar:message()], send_opts()) -> {ok, pid()}.
+send(Pid, Messages, Opts) ->
+    From = case maps:get(callback_fn, Opts, undefined) of
+               undefined -> undefined;
+               {Fn, Args} when is_function(Fn) -> {callback, {Fn, Args}}
+           end,
     erlang:send(Pid, ?SEND_REQ(From, Messages)),
-    ok.
+    {ok, Pid}.
 
 -spec send_sync(gen_statem:server_ref(), [pulsar:message()]) ->
           {ok, send_receipt()}
@@ -168,6 +182,10 @@ send_sync(Pid, Messages, Timeout) ->
                     error(timeout)
             end
     end.
+
+-spec get_state(pid()) -> statem().
+get_state(Pid) ->
+    gen_statem:call(Pid, get_state, 5_000).
 
 %%--------------------------------------------------------------------
 %% gen_statem callback
@@ -246,6 +264,8 @@ idle({call, From}, {send, Messages}, State0) ->
     SendRequest = ?SEND_REQ(From, Messages),
     State = enqueue_send_requests([SendRequest], State0),
     {keep_state, State};
+idle({call, From}, get_state, _State) ->
+    {keep_state_and_data, [{reply, From, ?FUNCTION_NAME}]};
 idle({call, From}, _EventContent, _State) ->
     {keep_state_and_data, [{reply, From, {error, unknown_call}}]};
 idle(cast, {send, Messages}, State0) ->
@@ -319,6 +339,8 @@ connecting({call, From}, {send, Messages}, State0) ->
     SendRequest = ?SEND_REQ(From, Messages),
     State = enqueue_send_requests([SendRequest], State0),
     {keep_state, State};
+connecting({call, From}, get_state, _State) ->
+    {keep_state_and_data, [{reply, From, ?FUNCTION_NAME}]};
 connecting({call, From}, _EventContent, _State) ->
     {keep_state_and_data, [{reply, From, {error, unknown_call}}]};
 connecting(cast, {send, Messages}, State0) ->
@@ -403,6 +425,8 @@ connected({call, From}, {send, Messages}, State) ->
     SendRequest = ?SEND_REQ(From, Messages),
     self() ! SendRequest,
     {keep_state, State};
+connected({call, From}, get_state, _State) ->
+    {keep_state_and_data, [{reply, From, ?FUNCTION_NAME}]};
 connected({call, From}, _EventContent, _State) ->
     {keep_state_and_data, [{reply, From, {error, unknown_call}}]};
 connected(cast, {send, Messages}, State) ->
@@ -599,6 +623,11 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                    BatchLen = length(Messages),
                    _ = invoke_callback(Callback, {ok, Resp}, BatchLen),
                    ok;
+                 ({?PER_REQ_CALLBACK(Fn, Args), {_TS, _Messages}}) ->
+                   %% No need to count the messages, as we invoke
+                   %% per-request callbacks once for the whole batch.
+                   _ = invoke_callback({Fn, Args}, {ok, Resp}),
+                   ok;
                  ({From, {_TS, _Messages}}) ->
                    gen_statem:reply(From, {ok, Resp})
               end,
@@ -674,7 +703,11 @@ invoke_callback(Callback, Resp, BatchLen) when is_function(Callback, 1) ->
     lists:foreach(
       fun(_) ->
         Callback(Resp)
-      end,  lists:seq(1, BatchLen)).
+      end,  lists:seq(1, BatchLen));
+invoke_callback({Fn, Args}, Resp, _BatchLen) when is_function(Fn), is_list(Args) ->
+    %% for per-request callbacks, we invoke it only once, regardless
+    %% of how many messages were sent.
+    apply(Fn, Args ++ [Resp]).
 
 queue_item_sizer(?Q_ITEM(_CallId, _Ts, _Batch) = Item) ->
     erlang:external_size(Item).
@@ -845,17 +878,23 @@ do_send_to_pulsar(State0) ->
             maybe_send_to_pulsar(State)
     end.
 
--spec reply_expired_messages([{gen_statem:from() | undefined, [pulsar:message()]}],
+-spec reply_expired_messages([{gen_statem:from() | per_request_callback_int() | undefined,
+                               [pulsar:message()]}],
                              state()) -> ok.
 reply_expired_messages(Expired, #{callback := Callback}) ->
     reply_with_error(Expired, Callback, {error, expired}).
 
--spec reply_with_error([{gen_statem:from() | undefined, [pulsar:message()]}],
+-spec reply_with_error([{gen_statem:from() | per_request_callback_int() | undefined,
+                         [pulsar:message()]}],
                        callback(), {error, expired | overflow}) -> ok.
 reply_with_error(Items, Callback, Error) ->
     lists:foreach(
       fun({undefined, Msgs}) ->
               invoke_callback(Callback, Error, length(Msgs));
+         ({?PER_REQ_CALLBACK(Fn, Args), _Msgs}) ->
+              %% No need to count the messages, as we invoke
+              %% per-request callbacks once for the whole batch.
+              invoke_callback({Fn, Args}, Error);
          ({From, _Msgs}) ->
               gen_statem:reply(From, Error)
       end,

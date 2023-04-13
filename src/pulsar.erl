@@ -33,6 +33,7 @@
 
 %% Messaging APIs
 -export([ send/2
+        , send/3
         , send_sync/2
         , send_sync/3
         ]).
@@ -62,12 +63,17 @@ ensure_supervised_consumers(ClientId, Topic, Opts) ->
 stop_and_delete_supervised_consumers(Consumers) ->
     pulsar_consumers:stop_supervised(Consumers).
 
--spec send(pulsar_producers:producers(), [message()]) -> ok | {error, term()}.
+-spec send(pulsar_producers:producers(), [message()]) -> {ok, pid()} | {error, term()}.
 send(Producers, Batch) ->
+    send(Producers, Batch, _SendOpts = #{}).
+
+-spec send(pulsar_producers:producers(), [message()], pulsar_producer:send_opts()) ->
+          {ok, pid()} | {error, term()}.
+send(Producers, Batch, SendOpts) ->
     case pulsar_producers:pick_producer(Producers, Batch) of
         {error, Reason} -> {error, Reason};
         {_Partition, ProducerPid} ->
-            pulsar_producer:send(ProducerPid, Batch)
+            pulsar_producer:send(ProducerPid, Batch, SendOpts)
     end.
 
 -spec send_sync(pulsar_producers:producers(), [message()]) -> {ok, _Response} | {error, term()}.

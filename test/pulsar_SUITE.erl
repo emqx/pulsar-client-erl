@@ -328,6 +328,7 @@ t_pulsar_(Strategy, Config) ->
     snabbkaffe:block_until(
       ?match_n_events(2, #{?snk_kind := test_consumer_handle_message}),
       5_000),
+    ?assertEqual(connected, pulsar_consumer:get_state(ConsumerPid)),
     ?tp(test_consumer_handle_message, #{}),
     erlang:exit(ProducerPid, kill),
     erlang:exit(ConsumerPid, kill),
@@ -418,6 +419,7 @@ t_pulsar_drop_expired_batch(Config) ->
     {_, ProducerPid} = pulsar_producers:pick_producer(Producers,
                                                       [#{key => <<"k">>, value => <<>>}]),
     pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 15, _Sleep = 5_000),
+    ?assertEqual(connected, pulsar_producer:get_state(ProducerPid)),
 
     ct:pal("cutting connection with pulsar..."),
     pulsar_test_utils:enable_failure(FailureType, ProxyHost, ProxyPort),

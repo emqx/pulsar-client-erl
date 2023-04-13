@@ -19,6 +19,7 @@
         , idle/3
         , connecting/3
         , connected/3
+        , get_state/1
         ]).
 
 -export([ callback_mode/0
@@ -28,6 +29,8 @@
         , format_status/1
         , format_status/2
         ]).
+
+-type statem() :: idle | connecting | connected.
 
 callback_mode() -> [state_functions].
 
@@ -48,6 +51,10 @@ callback_mode() -> [state_functions].
 
 start_link(PartitionTopic, Server, ProxyToBrokerUrl, ConsumerOpts) ->
     gen_statem:start_link(?MODULE, [PartitionTopic, Server, ProxyToBrokerUrl, ConsumerOpts], []).
+
+-spec get_state(pid()) -> statem().
+get_state(Pid) ->
+    gen_statem:call(Pid, get_state, 5_000).
 
 %%--------------------------------------------------------------------
 %% gen_server callback
@@ -70,6 +77,8 @@ init([PartitionTopic, Server, ProxyToBrokerUrl, ConsumerOpts]) ->
 
 idle(_, do_connect, State) ->
     do_connect(State);
+idle({call, From}, get_state, _State) ->
+    {keep_state_and_data, [{reply, From, ?FUNCTION_NAME}]};
 idle({call, _From}, _Event, _State) ->
     keep_state_and_data;
 idle(cast, _Event, _State) ->
@@ -82,6 +91,8 @@ connecting(_, do_connect, State) ->
 connecting(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
     {Cmd, _} = pulsar_protocol_frame:parse(Bin),
     handle_response(Cmd, State);
+connecting({call, From}, get_state, _State) ->
+    {keep_state_and_data, [{reply, From, ?FUNCTION_NAME}]};
 connecting(info, {InetClose, _Sock}, State = #state{partitiontopic = Topic})
         when InetClose == tcp_closed; InetClose == ssl_closed ->
     log_error("tcp closed on topic: ~p~n", [Topic]),
@@ -93,6 +104,8 @@ connecting(info, Msg, _State) ->
 
 connected(_, do_connect, _State) ->
     keep_state_and_data;
+connected({call, From}, get_state, _State) ->
+    {keep_state_and_data, [{reply, From, ?FUNCTION_NAME}]};
 connected(_EventType, {InetClose, Sock}, State = #state{sock = Sock, partitiontopic = Topic})
         when InetClose == tcp_closed; InetClose == ssl_closed ->
     log_error("tcp closed on topic: ~p~n", [Topic]),

@@ -17,6 +17,7 @@
 
 %% APIs
 -export([start_supervised/3, stop_supervised/1, start_link/3]).
+-export([all_connected/1]).
 
 %% gen_server callbacks
 -export([ code_change/3
@@ -36,6 +37,11 @@
                 consumer_id = 0,
                 consumers = #{}}).
 
+-type consumers() :: #{ client := atom()
+                      , topic := binary()
+                      , consumer_opts := map()
+                      }.
+
 -define(T_RETRY_START, 5000).
 
 %% @doc Start supervised consumer.
@@ -45,6 +51,20 @@ start_supervised(ClientId, Topic, ConsumerOpts) ->
 
 stop_supervised(#{client := ClientId, name := Name}) ->
     pulsar_consumers_sup:ensure_absence(ClientId, Name).
+
+-spec all_connected(consumers()) -> boolean().
+all_connected(#{name := Name}) ->
+    try
+      ConsumerToPartitionTopicMap = gen_server:call(Name, get_consumers, 5_000),
+      lists:all(
+        fun(Pid) ->
+          connected =:= pulsar_consumer:get_state(Pid)
+        end,
+        maps:keys(ConsumerToPartitionTopicMap))
+    catch
+        _:_ ->
+            false
+    end.
 
 %% @doc start pulsar_consumers gen_server
 start_link(ClientId, Topic, ConsumerOpts) ->
@@ -56,6 +76,8 @@ init([ClientId, Topic, ConsumerOpts]) ->
                 client_id = ClientId,
                 consumer_opts = ConsumerOpts}, 0}.
 
+handle_call(get_consumers, _From, State = #state{consumers = Consumers}) ->
+    {reply, Consumers, State};
 handle_call(_Call, _From, State) ->
     {reply, {error, unknown_call}, State}.
 

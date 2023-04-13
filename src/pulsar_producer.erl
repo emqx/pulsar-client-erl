@@ -24,6 +24,7 @@
         , send/3
         , send_sync/2
         , send_sync/3
+        , get_state/1
         ]).
 
 -export([ start_link/4
@@ -182,6 +183,10 @@ send_sync(Pid, Messages, Timeout) ->
             end
     end.
 
+-spec get_state(pid()) -> statem().
+get_state(Pid) ->
+    gen_statem:call(Pid, get_state, 5_000).
+
 %%--------------------------------------------------------------------
 %% gen_statem callback
 %%--------------------------------------------------------------------
@@ -259,6 +264,8 @@ idle({call, From}, {send, Messages}, State0) ->
     SendRequest = ?SEND_REQ(From, Messages),
     State = enqueue_send_requests([SendRequest], State0),
     {keep_state, State};
+idle({call, From}, get_state, _State) ->
+    {keep_state_and_data, [{reply, From, ?FUNCTION_NAME}]};
 idle({call, From}, _EventContent, _State) ->
     {keep_state_and_data, [{reply, From, {error, unknown_call}}]};
 idle(cast, {send, Messages}, State0) ->
@@ -332,6 +339,8 @@ connecting({call, From}, {send, Messages}, State0) ->
     SendRequest = ?SEND_REQ(From, Messages),
     State = enqueue_send_requests([SendRequest], State0),
     {keep_state, State};
+connecting({call, From}, get_state, _State) ->
+    {keep_state_and_data, [{reply, From, ?FUNCTION_NAME}]};
 connecting({call, From}, _EventContent, _State) ->
     {keep_state_and_data, [{reply, From, {error, unknown_call}}]};
 connecting(cast, {send, Messages}, State0) ->
@@ -416,6 +425,8 @@ connected({call, From}, {send, Messages}, State) ->
     SendRequest = ?SEND_REQ(From, Messages),
     self() ! SendRequest,
     {keep_state, State};
+connected({call, From}, get_state, _State) ->
+    {keep_state_and_data, [{reply, From, ?FUNCTION_NAME}]};
 connected({call, From}, _EventContent, _State) ->
     {keep_state_and_data, [{reply, From, {error, unknown_call}}]};
 connected(cast, {send, Messages}, State) ->

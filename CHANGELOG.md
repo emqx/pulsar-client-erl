@@ -8,6 +8,9 @@
   called when the send receipt is received from Pulsar.
 - Added support for binary URLs.  Previously, only Erlang strings
   (lists) were allowed.
+- Added support for checking if all consumers or producers are in the
+  connected state.  Since connection is asynchronous, it might be
+  useful to use this API for health checking.
 
 ## Bug fixes
 

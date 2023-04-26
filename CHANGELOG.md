@@ -1,3 +1,11 @@
+# 0.8.1
+
+## Bug fixes
+
+- Fixed `pulsar_{producers,consumers}:all_connected/1` to return
+  `false` when there are no producer/consumer pids registered.
+  [#56](https://github.com/emqx/pulsar-client-erl/pull/56)
+
 # 0.8.0
 
 ## Enhancements

@@ -5,6 +5,7 @@
 
 init(Topic, Args) ->
     SendTo = maps:get(send_to, Args),
+    SendTo ! {consumer_started, #{topic => Topic}},
     {ok, #{topic => Topic, send_to => SendTo}}.
 
 handle_message(Message, Payloads, State) ->

@@ -56,11 +56,13 @@ stop_supervised(#{client := ClientId, name := Name}) ->
 all_connected(#{name := Name}) ->
     try
       ConsumerToPartitionTopicMap = gen_server:call(Name, get_consumers, 5_000),
-      lists:all(
-        fun(Pid) ->
-          connected =:= pulsar_consumer:get_state(Pid)
-        end,
-        maps:keys(ConsumerToPartitionTopicMap))
+      NumConsumers = map_size(ConsumerToPartitionTopicMap),
+      (NumConsumers =/= 0) andalso
+          lists:all(
+            fun(Pid) ->
+                    connected =:= pulsar_consumer:get_state(Pid)
+            end,
+            maps:keys(ConsumerToPartitionTopicMap))
     catch
         _:_ ->
             false

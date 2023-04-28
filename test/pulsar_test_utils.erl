@@ -91,6 +91,7 @@ wait_for_state(Pid, DesiredState, Retries, Sleep) ->
     Timeout = timer:seconds(11),
     try sys:get_state(Pid, Timeout) of
         {DesiredState, _} ->
+            ct:pal("~p reached desired ~p state", [Pid, DesiredState]),
             ok;
         State ->
             ct:pal("still not in current state;\n  current: ~p\n  process info: ~p\n  stacktrace: ~p",

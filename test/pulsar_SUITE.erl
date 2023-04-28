@@ -39,6 +39,8 @@ all() ->
     , t_pulsar
     , t_pulsar_client_tune_error
     , t_per_request_callbacks
+    , t_producers_all_connected
+    , t_consumers_all_connected
     , {group, resilience}
     ].
 
@@ -1028,6 +1030,95 @@ t_per_request_callbacks(Config) ->
     end,
 
     ok.
+
+t_producers_all_connected(Config) ->
+    PulsarHost = ?config(pulsar_host, Config),
+    {ok, _} = application:ensure_all_started(pulsar),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    ct:pal("started client"),
+    Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
+    ProducerOpts = #{
+        batch_size => ?BATCH_SIZE,
+        strategy => random,
+        retention_period => infinity
+    },
+    {ok, Producers} = pulsar:ensure_supervised_producers(
+                        ?TEST_SUIT_CLIENT,
+                        Topic,
+                        ProducerOpts),
+    ct:pal("started producers"),
+    ProducerPids = pulsar_relup:producer_pids(),
+    lists:foreach(
+     fun(ProducerPid) ->
+       pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000)
+     end,
+     ProducerPids),
+    ?assert(pulsar_producers:all_connected(Producers)),
+    %% If we kill all producers, the empty list should indicate that
+    %% they are not connected.
+    Refs = maps:from_list([{monitor(process, P), true} || P <- ProducerPids]),
+    lists:foreach(fun(P) -> exit(P, kill) end, ProducerPids),
+    wait_until_all_dead(Refs, 5_000),
+    ?assertNot(pulsar_producers:all_connected(Producers)),
+    ok.
+
+t_consumers_all_connected(Config) ->
+    PulsarHost = ?config(pulsar_host, Config),
+    {ok, _} = application:ensure_all_started(pulsar),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    ct:pal("started client"),
+    Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
+    ConsumerOpts = #{
+        cb_init_args => #{send_to => self()},
+        cb_module => pulsar_echo_consumer,
+        sub_type => 'Shared',
+        subscription => "pulsar_test_all_connected",
+        max_consumer_num => 1,
+        name => pulsar_test_replayq
+    },
+    {ok, Consumers} = pulsar:ensure_supervised_consumers(
+                        ?TEST_SUIT_CLIENT,
+                        Topic,
+                        ConsumerOpts),
+    ct:pal("started consumers"),
+    receive {consumer_started, _} -> ok
+    after 1_000 -> ct:fail("consumers didn't really start")
+    end,
+    ConsumerPids =
+        [P || {_Name, PS, _Type, _Mods} <- supervisor:which_children(pulsar_consumers_sup),
+              P <- element(2, process_info(PS, links)),
+              case proc_lib:initial_call(P) of
+                  {pulsar_consumer, init, _} -> true;
+                  _ -> false
+              end],
+    lists:foreach(
+     fun(ConsumerPid) ->
+       pulsar_test_utils:wait_for_state(ConsumerPid, connected, _Retries = 5, _Sleep = 5_000)
+     end,
+     ConsumerPids),
+    ?assert(pulsar_consumers:all_connected(Consumers)),
+    %% If we kill all producers, the empty list should indicate that
+    %% they are not connected.
+    Refs = maps:from_list([{monitor(process, P), true} || P <- ConsumerPids]),
+    lists:foreach(fun(P) -> exit(P, kill) end, ConsumerPids),
+    wait_until_all_dead(Refs, 5_000),
+    ?assertNot(pulsar_consumers:all_connected(Consumers)),
+    ok.
+
+wait_until_all_dead(Refs, _Timeout) when map_size(Refs) =:= 0 ->
+    ct:pal("all pids dead"),
+    ok;
+wait_until_all_dead(Refs, Timeout) ->
+    receive
+        {'DOWN', Ref, process, _, _} when is_map_key(Ref, Refs) ->
+            ct:pal("pid with ref ~p died", [Ref]),
+            RemainingRefs = maps:remove(Ref, Refs),
+            wait_until_all_dead(RemainingRefs, Timeout)
+    after
+        Timeout ->
+            ct:pal("remaning pids: ~p", [maps:values(Refs)]),
+            ct:fail("timeout waiting for pid deaths")
+    end.
 
 wait_callbacks(N, Timeout) ->
     wait_callbacks(N, Timeout, []).

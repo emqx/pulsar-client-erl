@@ -78,21 +78,23 @@ start_link(ClientId, Topic, ProducerOpts) ->
 
 -spec all_connected(producers()) -> boolean().
 all_connected(#{workers := WorkersTable}) ->
-    ets:foldl(
-      fun({_Partition, Pid}, Acc) ->
-              Acc andalso
-                  try pulsar_producer:get_state(Pid) of
-                      State ->
-                          State =:= connected
-                  catch
-                      exit:{noproc, _} ->
-                          false;
-                      error:timeout ->
-                          false
-                  end
-      end,
-      true,
-      WorkersTable).
+    NumWorkers = ets:info(WorkersTable, size),
+    (NumWorkers =/= 0) andalso
+        ets:foldl(
+          fun({_Partition, Pid}, Acc) ->
+                  Acc andalso
+                      try pulsar_producer:get_state(Pid) of
+                          State ->
+                              State =:= connected
+                      catch
+                          exit:{noproc, _} ->
+                              false;
+                          error:timeout ->
+                              false
+                      end
+          end,
+          true,
+          WorkersTable).
 
 pick_producer(#{workers := Workers, partitions := Partitions, strategy := Strategy}, Batch) ->
     Partition = pick_partition(Partitions, Strategy, Batch),

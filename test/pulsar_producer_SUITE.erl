@@ -148,8 +148,8 @@ t_code_change_replayq(Config) ->
     ?assert(is_tuple(State1), #{state_after => State1}),
     ?assertEqual(state, element(1, State1)),
     %% state record has 1 element more (the record name), but also has
-    %% three fields less (`replayq', `clientid', `lookup_topic_request_ref').
-    ?assertEqual(OriginalSize, tuple_size(State1) + 2),
+    %% three fields less (`replayq', `clientid', `lookup_topic_request_ref', `parent_pid').
+    ?assertEqual(OriginalSize, tuple_size(State1) + 3),
     Opts1 = element(9, State1),
     ?assertNot(maps:is_key(replayq, Opts1)),
     ?assertNot(maps:is_key(retention_period, Opts1)),
@@ -224,6 +224,7 @@ t_state_rec_roundtrip(_Config) ->
                                 , last_bin
                                 , lookup_topic_request_ref
                                 , opts
+                                , parent_pid
                                 , partitiontopic
                                 , producer_id
                                 , producer_name
@@ -232,9 +233,11 @@ t_state_rec_roundtrip(_Config) ->
                                 , sequence_id
                                 , sock
                                 ]]),
-    %% clientid and lookup_topic_request_ref is not preserved
+    %% `clientid', `lookup_topic_request_ref', `parent_pid' are not preserved
+    FakePid = self(),
     ?assertEqual(StateMap#{ clientid := undefined
                           , lookup_topic_request_ref := undefined
+                          , parent_pid := FakePid
                           },
                  pulsar_producer:from_old_state_record(
                    pulsar_producer:to_old_state_record(StateMap))),
@@ -244,6 +247,7 @@ t_state_rec_roundtrip(_Config) ->
     ?assertEqual(StateMap1#{ clientid := undefined
                            , lookup_topic_request_ref := undefined
                            , opts => #{sndbuf => 1048576}
+                           , parent_pid => FakePid
                            },
                  pulsar_producer:from_old_state_record(
                    pulsar_producer:to_old_state_record(StateMap1))),

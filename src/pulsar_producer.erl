@@ -1,4 +1,4 @@
-%% Copyright (c) 2013-2019 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2013-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@
         , get_state/1
         ]).
 
--export([ start_link/4
+-export([ start_link/5
         , idle/3
         , connecting/3
         , connected/3
@@ -108,6 +108,7 @@
                    last_bin := binary(),
                    lookup_topic_request_ref := reference() | undefined,
                    opts := map(),
+                   parent_pid := pid(),
                    partitiontopic := string(),
                    producer_id := integer(),
                    producer_name := atom(),
@@ -129,8 +130,8 @@
 
 callback_mode() -> [state_functions, state_enter].
 
-start_link(PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts) ->
-    gen_statem:start_link(?MODULE, {PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts}, []).
+start_link(PartitionTopic, Server, ProxyToBrokerUrl, ParentPid, ProducerOpts) ->
+    gen_statem:start_link(?MODULE, {PartitionTopic, Server, ProxyToBrokerUrl, ParentPid, ProducerOpts}, []).
 
 -spec send(gen_statem:server_ref(), [pulsar:message()]) -> {ok, pid()}.
 send(Pid, Messages) ->
@@ -191,9 +192,9 @@ get_state(Pid) ->
 %% gen_statem callback
 %%--------------------------------------------------------------------
 
--spec init({string(), string(), string() | undefined, config()}) ->
+-spec init({string(), string(), string() | undefined, pid(), config()}) ->
           gen_statem:init_result(statem(), state()).
-init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
+init({PartitionTopic, Server, ProxyToBrokerUrl, ParentPid, ProducerOpts0}) ->
     process_flag(trap_exit, true),
     {Transport, BrokerServer} = pulsar_utils:parse_url(Server),
     ProducerID = maps:get(producer_id, ProducerOpts0),
@@ -232,6 +233,7 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
         last_bin => <<>>,
         lookup_topic_request_ref => undefined,
         opts => pulsar_utils:maybe_enable_ssl_opts(Transport, ProducerOpts),
+        parent_pid => ParentPid,
         partitiontopic => PartitionTopic,
         producer_id => ProducerID,
         producer_name => maps:get(producer_name, ProducerOpts, pulsar_producer),
@@ -248,8 +250,9 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
 %% idle state
 -spec idle(gen_statem:event_type(), _EventContent, state()) ->
           handler_result().
-idle(enter, _OldState, _State) ->
+idle(enter, _OldState, _State = #{parent_pid := ParentPid}) ->
     ?tp(debug, pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
+    notify_state_change(ParentPid, ?FUNCTION_NAME),
     keep_state_and_data;
 idle(internal, do_connect, State) ->
     refresh_urls_and_connect(State);
@@ -283,6 +286,9 @@ idle(info, {Ref, Reply}, State0 = #{lookup_topic_request_ref := Ref}) ->
     State = State0#{lookup_topic_request_ref := undefined},
     erlang:demonitor(Ref, [flush]),
     handle_lookup_topic_reply(Reply, State);
+idle(info, {'EXIT', ParentPid, Reason}, State0 = #{parent_pid := ParentPid}) ->
+    log_error("parent died; shutting down; reason: ~0p", [Reason], State0),
+    {stop, {error, parent_died}};
 idle(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_request_ref := Ref}) ->
     log_error("client down; will retry connection later; reason: ~0p", [Reason], State0),
     State = State0#{lookup_topic_request_ref := undefined},
@@ -294,8 +300,9 @@ idle(_EventType, _Event, _State) ->
 %% connecting state
 -spec connecting(gen_statem:event_type(), _EventContent, state()) ->
           handler_result().
-connecting(enter, _OldState, _State) ->
+connecting(enter, _OldState, _State = #{parent_pid := ParentPid}) ->
     ?tp(debug, pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
+    notify_state_change(ParentPid, ?FUNCTION_NAME),
     keep_state_and_data;
 connecting(state_timeout, do_connect, State) ->
     refresh_urls_and_connect(State);
@@ -310,6 +317,9 @@ connecting(info, {Ref, Reply}, State0 = #{lookup_topic_request_ref := Ref}) ->
     State = State0#{lookup_topic_request_ref := undefined},
     erlang:demonitor(Ref, [flush]),
     handle_lookup_topic_reply(Reply, State);
+connecting(info, {'EXIT', ParentPid, Reason}, State0 = #{parent_pid := ParentPid}) ->
+    log_error("parent died; shutting down; reason: ~0p", [Reason], State0),
+    {stop, {error, parent_died}};
 connecting(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_request_ref := Ref}) ->
     log_error("client down; will retry connection later; reason: ~0p", [Reason], State0),
     State = State0#{lookup_topic_request_ref := undefined},
@@ -355,8 +365,9 @@ connecting(cast, _EventContent, _State) ->
 %% connected state
 -spec connected(gen_statem:event_type(), _EventContent, state()) ->
           handler_result().
-connected(enter, _OldState, State0) ->
+connected(enter, _OldState, State0 = #{parent_pid := ParentPid}) ->
     ?tp(debug, pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
+    notify_state_change(ParentPid, ?FUNCTION_NAME),
     State1 = resend_sent_requests(State0),
     State = maybe_send_to_pulsar(State1),
     {keep_state, State};
@@ -377,6 +388,9 @@ connected(info, {Ref, Reply}, State0 = #{lookup_topic_request_ref := Ref}) ->
     State = State0#{lookup_topic_request_ref := undefined},
     erlang:demonitor(Ref, [flush]),
     handle_lookup_topic_reply(Reply, State);
+connected(info, {'EXIT', ParentPid, Reason}, State0 = #{parent_pid := ParentPid}) ->
+    log_error("parent died; shutting down; reason: ~0p", [Reason], State0),
+    {stop, {error, parent_died}};
 connected(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_request_ref := Ref}) ->
     log_error("client down; will retry connection later; reason: ~0p", [Reason], State0),
     State = State0#{lookup_topic_request_ref := undefined},
@@ -1063,6 +1077,8 @@ from_old_state_record(StateRec) ->
      , clientid => undefined
      , sock => element(4, StateRec)
      , request_id => element(5, StateRec)
+       %% cannot infer the parent pid here... using self() to please dialyzer
+     , parent_pid => self()
      , producer_id => element(6, StateRec)
      , sequence_id => element(7, StateRec)
      , producer_name => element(8, StateRec)
@@ -1145,6 +1161,12 @@ maybe_connect(#{ broker_service_url := NewBrokerServiceURL
             put(proxy_to_broker_url, NewBrokerServiceURL),
             ?NEXT_STATE_IDLE_RECONNECT(State)
     end.
+
+-spec notify_state_change(pid(), statem()) -> ok.
+notify_state_change(ParentPid, ProducerState) ->
+    ProducerPid = self(),
+    ParentPid ! {producer_state_change, ProducerPid, ProducerState},
+    ok.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

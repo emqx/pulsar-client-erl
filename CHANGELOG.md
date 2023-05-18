@@ -1,3 +1,10 @@
+# 0.8.2
+
+## Enhancements
+
+- Made `pulsar_producers:all_connected/1` more performant when
+  producers are under heavy throughput.
+
 # 0.8.1
 
 ## Bug fixes

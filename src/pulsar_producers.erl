@@ -1,4 +1,4 @@
-%% Copyright (c) 2013-2019 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2013-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -55,6 +55,7 @@
 -export_type([producers/0]).
 
 -define(T_RETRY_START, 5000).
+-define(PRODUCER_STATE_INDEX, 3).
 
 %% @doc Start supervised producers.
 -spec start_supervised(clientid(), topic(), map()) -> {ok, producers()}.
@@ -81,17 +82,8 @@ all_connected(#{workers := WorkersTable}) ->
     NumWorkers = ets:info(WorkersTable, size),
     (NumWorkers =/= 0) andalso
         ets:foldl(
-          fun({_Partition, Pid}, Acc) ->
-                  Acc andalso
-                      try pulsar_producer:get_state(Pid) of
-                          State ->
-                              State =:= connected
-                      catch
-                          exit:{noproc, _} ->
-                              false;
-                          error:timeout ->
-                              false
-                      end
+          fun({_Partition, _ProducerPid, ProducerState}, Acc) ->
+            Acc andalso ProducerState =:= connected
           end,
           true,
           WorkersTable).
@@ -131,12 +123,9 @@ is_alive(Pid) -> is_pid(Pid) andalso is_process_alive(Pid).
 
 lookup_producer(#{workers := Workers}, Partition) ->
     lookup_producer(Workers, Partition);
-%% legacy case???
-lookup_producer(Workers, Partition) when is_map(Workers) ->
-    maps:get(Partition, Workers);
 lookup_producer(Workers, Partition) ->
     case ets:lookup(Workers, Partition) of
-        [{Partition, Pid}] -> Pid;
+        [{Partition, ProducerPid, _ProducerState}] -> ProducerPid;
         _ -> undefined
     end.
 
@@ -161,7 +150,6 @@ init([ClientId, Topic, ProducerOpts]) ->
 
 handle_call(get_workers, _From, State = #state{workers = Workers, partitions = Partitions}) ->
     {reply, {Partitions, Workers}, State};
-
 handle_call(_Call, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
@@ -188,7 +176,6 @@ handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
         {error, Reason} ->
             {stop, {shutdown, Reason}, State}
     end;
-
 handle_info({'EXIT', Pid, Error}, State = #state{workers = Workers, producers = Producers}) ->
     log_error("Received EXIT from ~p, error: ~p", [Pid, Error]),
     case maps:get(Pid, Producers, undefined) of
@@ -201,7 +188,6 @@ handle_info({'EXIT', Pid, Error}, State = #state{workers = Workers, producers = 
             restart_producer_later(Partition, PartitionTopic),
             {noreply, State#state{producers = maps:remove(Pid, Producers)}}
     end;
-
 handle_info({restart_producer, Partition, PartitionTopic}, State = #state{client_id = ClientId}) ->
     case pulsar_client_sup:find_client(ClientId) of
         {ok, Pid} ->
@@ -209,7 +195,12 @@ handle_info({restart_producer, Partition, PartitionTopic}, State = #state{client
         {error, Reason} ->
             {stop, {shutdown, Reason}, State}
     end;
-
+handle_info({producer_state_change, ProducerPid, ProducerState},
+            State = #state{producers = Producers, workers = WorkersTable})
+  when is_map_key(ProducerPid, Producers) ->
+    #{ProducerPid := {Partition, _PartitionTopic}} = Producers,
+    true = ets:update_element(WorkersTable, Partition, {?PRODUCER_STATE_INDEX, ProducerState}),
+    {noreply, State};
 handle_info(_Info, State) ->
     log_error("Receive unknown message:~p~n", [_Info]),
     {noreply, State}.
@@ -288,11 +279,13 @@ do_start_producer(#state{
     ProducerOpts = ProducerOpts0#{ producer_id => NextID
                                  , clientid => ClientId
                                  },
-    {ok, Producer} = pulsar_producer:start_link(PartitionTopic,
-        AlivePulsarURL, ProxyToBrokerURL, ProducerOpts),
-    ets:insert(Workers, {Partition, Producer}),
+    ParentPid = self(),
+    {ok, ProducerPid} = pulsar_producer:start_link(PartitionTopic,
+        AlivePulsarURL, ProxyToBrokerURL, ParentPid, ProducerOpts),
+    ProducerState = idle,
+    ets:insert(Workers, {Partition, ProducerPid, ProducerState}),
     State#state{
-        producers = maps:put(Producer, {Partition, PartitionTopic}, Producers),
+        producers = maps:put(ProducerPid, {Partition, PartitionTopic}, Producers),
         producer_id = NextID
     }.
 

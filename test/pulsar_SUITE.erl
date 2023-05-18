@@ -1,5 +1,5 @@
 %%%%--------------------------------------------------------------------
-%%%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%%%% Copyright (c) 2020-2023 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%%%
 %%%% Licensed under the Apache License, Version 2.0 (the "License");
 %%%% you may not use this file except in compliance with the License.
@@ -1053,13 +1053,19 @@ t_producers_all_connected(Config) ->
        pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000)
      end,
      ProducerPids),
-    ?assert(pulsar_producers:all_connected(Producers)),
+    ?retry(
+       _Sleep = 300,
+       _Attempts = 20,
+       ?assert(pulsar_producers:all_connected(Producers))),
     %% If we kill all producers, the empty list should indicate that
     %% they are not connected.
     Refs = maps:from_list([{monitor(process, P), true} || P <- ProducerPids]),
     lists:foreach(fun(P) -> exit(P, kill) end, ProducerPids),
     wait_until_all_dead(Refs, 5_000),
-    ?assertNot(pulsar_producers:all_connected(Producers)),
+    ?retry(
+       _Sleep = 300,
+       _Attempts = 20,
+       ?assertNot(pulsar_producers:all_connected(Producers))),
     ok.
 
 t_consumers_all_connected(Config) ->

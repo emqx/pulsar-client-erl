@@ -27,7 +27,7 @@
         , get_state/1
         ]).
 
--export([ start_link/5
+-export([ start_link/4
         , idle/3
         , connecting/3
         , connected/3
@@ -98,6 +98,7 @@
 -define(MIN_DISCARD_LOG_INTERVAL, timer:seconds(5)).
 -define(PER_REQ_CALLBACK(Fn, Args), {callback, {Fn, Args}}).
 
+-type state_observer_callback() :: {function(), [term()]}.
 -type state() :: #{
                    batch_size := non_neg_integer(),
                    broker_server := {binary(), pos_integer()},
@@ -108,7 +109,7 @@
                    last_bin := binary(),
                    lookup_topic_request_ref := reference() | undefined,
                    opts := map(),
-                   parent_pid := pid(),
+                   parent_pid := undefined | pid(),
                    partitiontopic := string(),
                    producer_id := integer(),
                    producer_name := atom(),
@@ -120,6 +121,7 @@
                                         [{gen_statem:from() | undefined,
                                           {timestamp(), [pulsar:message()]}}])},
                    sequence_id := sequence_id(),
+                   state_observer_callback := undefined | state_observer_callback(),
                    sock := undefined | port()
                   }.
 -type handler_result() :: gen_statem:event_handler_result(statem(), state()).
@@ -130,8 +132,8 @@
 
 callback_mode() -> [state_functions, state_enter].
 
-start_link(PartitionTopic, Server, ProxyToBrokerUrl, ParentPid, ProducerOpts) ->
-    gen_statem:start_link(?MODULE, {PartitionTopic, Server, ProxyToBrokerUrl, ParentPid, ProducerOpts}, []).
+start_link(PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts) ->
+    gen_statem:start_link(?MODULE, {PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts}, []).
 
 -spec send(gen_statem:server_ref(), [pulsar:message()]) -> {ok, pid()}.
 send(Pid, Messages) ->
@@ -192,9 +194,9 @@ get_state(Pid) ->
 %% gen_statem callback
 %%--------------------------------------------------------------------
 
--spec init({string(), string(), string() | undefined, pid(), config()}) ->
+-spec init({string(), string(), string() | undefined, config()}) ->
           gen_statem:init_result(statem(), state()).
-init({PartitionTopic, Server, ProxyToBrokerUrl, ParentPid, ProducerOpts0}) ->
+init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
     process_flag(trap_exit, true),
     {Transport, BrokerServer} = pulsar_utils:parse_url(Server),
     ProducerID = maps:get(producer_id, ProducerOpts0),
@@ -225,6 +227,8 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ParentPid, ProducerOpts0}) ->
                                 , replayq_max_total_bytes
                                 ],
                                 ProducerOpts1),
+    StateObserverCallback = maps:get(state_observer_callback, ProducerOpts0, undefined),
+    ParentPid = maps:get(parent_pid, ProducerOpts, undefined),
     State = #{
         batch_size => maps:get(batch_size, ProducerOpts, 0),
         broker_server => BrokerServer,
@@ -241,6 +245,7 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ParentPid, ProducerOpts0}) ->
         request_id => 1,
         requests => #{},
         sequence_id => 1,
+        state_observer_callback => StateObserverCallback,
         sock => undefined
     },
     %% use process dict to avoid the trouble of relup
@@ -250,9 +255,9 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ParentPid, ProducerOpts0}) ->
 %% idle state
 -spec idle(gen_statem:event_type(), _EventContent, state()) ->
           handler_result().
-idle(enter, _OldState, _State = #{parent_pid := ParentPid}) ->
+idle(enter, _OldState, _State = #{state_observer_callback := StateObserverCallback}) ->
     ?tp(debug, pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
-    notify_state_change(ParentPid, ?FUNCTION_NAME),
+    notify_state_change(StateObserverCallback, ?FUNCTION_NAME),
     keep_state_and_data;
 idle(internal, do_connect, State) ->
     refresh_urls_and_connect(State);
@@ -286,9 +291,8 @@ idle(info, {Ref, Reply}, State0 = #{lookup_topic_request_ref := Ref}) ->
     State = State0#{lookup_topic_request_ref := undefined},
     erlang:demonitor(Ref, [flush]),
     handle_lookup_topic_reply(Reply, State);
-idle(info, {'EXIT', ParentPid, Reason}, State0 = #{parent_pid := ParentPid}) ->
-    log_error("parent died; shutting down; reason: ~0p", [Reason], State0),
-    {stop, {error, parent_died}};
+idle(info, {'EXIT', ParentPid, Reason}, #{parent_pid := ParentPid}) when is_pid(ParentPid) ->
+    {stop, Reason};
 idle(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_request_ref := Ref}) ->
     log_error("client down; will retry connection later; reason: ~0p", [Reason], State0),
     State = State0#{lookup_topic_request_ref := undefined},
@@ -300,9 +304,9 @@ idle(_EventType, _Event, _State) ->
 %% connecting state
 -spec connecting(gen_statem:event_type(), _EventContent, state()) ->
           handler_result().
-connecting(enter, _OldState, _State = #{parent_pid := ParentPid}) ->
+connecting(enter, _OldState, _State = #{state_observer_callback := StateObserverCallback}) ->
     ?tp(debug, pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
-    notify_state_change(ParentPid, ?FUNCTION_NAME),
+    notify_state_change(StateObserverCallback, ?FUNCTION_NAME),
     keep_state_and_data;
 connecting(state_timeout, do_connect, State) ->
     refresh_urls_and_connect(State);
@@ -317,9 +321,8 @@ connecting(info, {Ref, Reply}, State0 = #{lookup_topic_request_ref := Ref}) ->
     State = State0#{lookup_topic_request_ref := undefined},
     erlang:demonitor(Ref, [flush]),
     handle_lookup_topic_reply(Reply, State);
-connecting(info, {'EXIT', ParentPid, Reason}, State0 = #{parent_pid := ParentPid}) ->
-    log_error("parent died; shutting down; reason: ~0p", [Reason], State0),
-    {stop, {error, parent_died}};
+connecting(info, {'EXIT', ParentPid, Reason}, #{parent_pid := ParentPid}) when is_pid(ParentPid) ->
+    {stop, Reason};
 connecting(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_request_ref := Ref}) ->
     log_error("client down; will retry connection later; reason: ~0p", [Reason], State0),
     State = State0#{lookup_topic_request_ref := undefined},
@@ -365,9 +368,9 @@ connecting(cast, _EventContent, _State) ->
 %% connected state
 -spec connected(gen_statem:event_type(), _EventContent, state()) ->
           handler_result().
-connected(enter, _OldState, State0 = #{parent_pid := ParentPid}) ->
+connected(enter, _OldState, State0 = #{state_observer_callback := StateObserverCallback}) ->
     ?tp(debug, pulsar_producer_state_enter, #{state => ?FUNCTION_NAME, previous => _OldState}),
-    notify_state_change(ParentPid, ?FUNCTION_NAME),
+    notify_state_change(StateObserverCallback, ?FUNCTION_NAME),
     State1 = resend_sent_requests(State0),
     State = maybe_send_to_pulsar(State1),
     {keep_state, State};
@@ -388,7 +391,7 @@ connected(info, {Ref, Reply}, State0 = #{lookup_topic_request_ref := Ref}) ->
     State = State0#{lookup_topic_request_ref := undefined},
     erlang:demonitor(Ref, [flush]),
     handle_lookup_topic_reply(Reply, State);
-connected(info, {'EXIT', ParentPid, Reason}, State0 = #{parent_pid := ParentPid}) ->
+connected(info, {'EXIT', ParentPid, Reason}, #{parent_pid := ParentPid}) when is_pid(ParentPid) ->
     {stop, Reason};
 connected(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_request_ref := Ref}) ->
     log_error("client down; will retry connection later; reason: ~0p", [Reason], State0),
@@ -1076,11 +1079,12 @@ from_old_state_record(StateRec) ->
      , clientid => undefined
      , sock => element(4, StateRec)
      , request_id => element(5, StateRec)
-       %% cannot infer the parent pid here... using self() to please dialyzer
-     , parent_pid => self()
+       %% cannot infer the parent pid here...
+     , parent_pid => undefined
      , producer_id => element(6, StateRec)
      , sequence_id => element(7, StateRec)
      , producer_name => element(8, StateRec)
+     , state_observer_callback => undefined
      , opts => Opts
      , callback => element(10, StateRec)
      , batch_size => element(11, StateRec)
@@ -1161,10 +1165,11 @@ maybe_connect(#{ broker_service_url := NewBrokerServiceURL
             ?NEXT_STATE_IDLE_RECONNECT(State)
     end.
 
--spec notify_state_change(pid(), statem()) -> ok.
-notify_state_change(ParentPid, ProducerState) ->
-    ProducerPid = self(),
-    ParentPid ! {producer_state_change, ProducerPid, ProducerState},
+-spec notify_state_change(undefined | state_observer_callback(), statem()) -> ok.
+notify_state_change(undefined, _ProducerState) ->
+    ok;
+notify_state_change({Fun, Args}, ProducerState) ->
+    _ = apply(Fun, [ProducerState | Args]),
     ok.
 
 -ifdef(TEST).

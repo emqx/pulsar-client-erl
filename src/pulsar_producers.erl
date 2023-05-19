@@ -34,6 +34,8 @@
         , format_status/2
         ]).
 
+-export([report_status/2]).
+
 -record(state, {topic,
                 client_id,
                 workers,
@@ -276,12 +278,15 @@ do_start_producer(#state{
                 {ok, URL} = pulsar_client:get_alive_pulsar_url(Pid),
                 {URL, BrokerServiceURL}
         end,
+    ParentPid = self(),
+    StateObserverCallback = {fun ?MODULE:report_status/2, [ParentPid]},
     ProducerOpts = ProducerOpts0#{ producer_id => NextID
                                  , clientid => ClientId
+                                 , state_observer_callback => StateObserverCallback
+                                 , parent_id => ParentPid
                                  },
-    ParentPid = self(),
     {ok, ProducerPid} = pulsar_producer:start_link(PartitionTopic,
-        AlivePulsarURL, ProxyToBrokerURL, ParentPid, ProducerOpts),
+        AlivePulsarURL, ProxyToBrokerURL, ProducerOpts),
     ProducerState = idle,
     ets:insert(Workers, {Partition, ProducerPid, ProducerState}),
     State#state{
@@ -292,3 +297,9 @@ do_start_producer(#state{
 next_producer_id(?MAX_PRODUCER_ID) -> 0;
 next_producer_id(ProducerID) ->
     ProducerID + 1.
+
+%% Called by `pulsar_producer' when there's a state change.
+report_status(ProducerState, ParentPid) ->
+    ProducerPid = self(),
+    ParentPid ! {producer_state_change, ProducerPid, ProducerState},
+    ok.

@@ -29,6 +29,18 @@ jobs:
           docker exec -i erlang sh -c "make eunit"
           docker exec -i erlang sh -c "make ct"
           docker exec -i erlang sh -c "make cover"
+      - name: get container logs on failure
+        if: failure()
+        run: |
+          echo "============== pulsar-begin =============="
+          docker logs pulsar
+          echo "============== pulsar-end =============="
+          echo "============== pulsar-basic-auth-begin =============="
+          docker logs pulsar-basic-auth
+          echo "============== pulsar-basic-auth-end =============="
+          echo "============== pulsar-token-auth-begin =============="
+          docker logs pulsar-token-auth
+          echo "============== pulsar-token-auth-end =============="
       - name: make coveralls
         if: ${{github.event_name != 'pull_request' && matrix.pulsar_tag == '2.10.0.3'}}
         env:

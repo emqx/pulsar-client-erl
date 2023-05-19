@@ -4,6 +4,8 @@
 
 - Made `pulsar_producers:all_connected/1` more performant when
   producers are under heavy throughput.
+- Made `pulsar_client` fail fast when an authentication error is
+  detected.
 
 # 0.8.1
 

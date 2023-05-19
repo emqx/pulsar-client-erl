@@ -115,10 +115,30 @@ wait_for_socket_and_opts(Servers, Pid, LastError) ->
             State = #state{sock = Sock, servers = Servers, opts = Opts},
             {ok, State};
         {Pid, {error, Error}} ->
-            wait_for_socket_and_opts(Servers, Pid, Error);
+            case contains_authn_error(Error) of
+                true ->
+                    log_error("authentication error starting pulsar client: ~p", [Error]),
+                    {stop, Error};
+                false ->
+                    wait_for_socket_and_opts(Servers, Pid, Error)
+            end;
         timeout ->
             log_error("timed out when starting pulsar client; last error: ~p", [LastError]),
             {stop, LastError}
+    end.
+
+contains_authn_error(BrokerToErrorMap) ->
+    Iter = maps:iterator(BrokerToErrorMap),
+    do_contains_authn_error(Iter).
+
+do_contains_authn_error(Iter) ->
+    case maps:next(Iter) of
+        {_HostAndPort, #{error := 'AuthenticationError'}, _NIter} ->
+            true;
+        {_HostAndPort, _Error, NIter} ->
+            do_contains_authn_error(NIter);
+        none ->
+            false
     end.
 
 handle_call({get_topic_metadata, Topic, Call}, From,

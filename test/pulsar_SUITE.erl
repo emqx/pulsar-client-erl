@@ -191,7 +191,30 @@ t_pulsar_client(Config) ->
 
 t_pulsar_basic_auth(Config) ->
     PulsarHost = ?config(pulsar_host, Config),
-    ConnOpts = #{ auth_data => <<"super:secretpass">>
+    %% avoid inter-testcase flakiness
+    ok = pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT),
+    {Pid0, Ref} = spawn_monitor(fun() ->
+      Res = pulsar:ensure_supervised_client(
+              ?TEST_SUIT_CLIENT,
+              [PulsarHost],
+              #{conn_opts => #{ auth_data => <<"wrong:credentials">>
+                              , auth_method_name => <<"basic">>
+                              }}),
+      error(Res)
+    end),
+    %% Should fail fast if there is an authn error.
+    receive
+        {'DOWN', Ref, process, Pid0, Reason} ->
+            ?assertMatch({{error, {#{}, _}}, _}, Reason),
+            {{error, {BrokerErrorMap, _}}, _} = Reason,
+            ?assertMatch([#{error := 'AuthenticationError'}], maps:values(BrokerErrorMap)),
+            ok
+    after
+        700 ->
+            ct:fail("authentication error took too long")
+    end,
+
+    ConnOpts = #{ auth_data => <<"superuser:admin">>
                 , auth_method_name => <<"basic">>
                 },
     {ok, _ClientPid} = pulsar:ensure_supervised_client(
@@ -238,6 +261,29 @@ t_pulsar_basic_auth(Config) ->
 
 t_pulsar_token_auth(Config) ->
     PulsarHost = ?config(pulsar_host, Config),
+    %% avoid inter-testcase flakiness
+    ok = pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT),
+    {Pid0, Ref} = spawn_monitor(fun() ->
+      Res = pulsar:ensure_supervised_client(
+              ?TEST_SUIT_CLIENT,
+              [PulsarHost],
+              #{conn_opts => #{ auth_data => <<"wrong_token">>
+                              , auth_method_name => <<"token">>
+                              }}),
+      error(Res)
+    end),
+    %% Should fail fast if there is an authn error.
+    receive
+        {'DOWN', Ref, process, Pid0, Reason} ->
+            ?assertMatch({{error, {#{}, _}}, _}, Reason),
+            {{error, {BrokerErrorMap, _}}, _} = Reason,
+            ?assertMatch([#{error := 'AuthenticationError'}], maps:values(BrokerErrorMap)),
+            ok
+    after
+        700 ->
+            ct:fail("authentication error took too long")
+    end,
+
     ConnOpts = #{ auth_data => <<"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0LXVzZXIifQ.RVPrnEzgEG-iKfpUWKryC39JgWdFXs7MJMUWnHA4ZSg">>
                 , auth_method_name => <<"token">>
                 },

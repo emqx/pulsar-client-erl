@@ -389,8 +389,7 @@ connected(info, {Ref, Reply}, State0 = #{lookup_topic_request_ref := Ref}) ->
     erlang:demonitor(Ref, [flush]),
     handle_lookup_topic_reply(Reply, State);
 connected(info, {'EXIT', ParentPid, Reason}, State0 = #{parent_pid := ParentPid}) ->
-    log_error("parent died; shutting down; reason: ~0p", [Reason], State0),
-    {stop, {error, parent_died}};
+    {stop, Reason};
 connected(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_request_ref := Ref}) ->
     log_error("client down; will retry connection later; reason: ~0p", [Reason], State0),
     State = State0#{lookup_topic_request_ref := undefined},

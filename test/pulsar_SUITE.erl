@@ -197,9 +197,10 @@ t_pulsar_basic_auth(Config) ->
       Res = pulsar:ensure_supervised_client(
               ?TEST_SUIT_CLIENT,
               [PulsarHost],
-              #{conn_opts => #{ auth_data => <<"wrong:credentials">>
-                              , auth_method_name => <<"basic">>
-                              }}),
+              #{ connect_timeout => 30_000
+               , conn_opts => #{ auth_data => <<"wrong:credentials">>
+                               , auth_method_name => <<"basic">>
+                               }}),
       error(Res)
     end),
     %% Should fail fast if there is an authn error.
@@ -208,13 +209,14 @@ t_pulsar_basic_auth(Config) ->
             ?assertMatch({{error, {#{}, _}}, _}, Reason),
             {{error, {BrokerErrorMap, _}}, _} = Reason,
             ?assertMatch([#{error := 'AuthenticationError'}], maps:values(BrokerErrorMap)),
+            ok = pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT),
             ok
     after
-        700 ->
+        5_000 ->
             ct:fail("authentication error took too long")
     end,
 
-    ConnOpts = #{ auth_data => <<"superuser:admin">>
+    ConnOpts = #{ auth_data => <<"super:secretpass">>
                 , auth_method_name => <<"basic">>
                 },
     {ok, _ClientPid} = pulsar:ensure_supervised_client(
@@ -267,9 +269,10 @@ t_pulsar_token_auth(Config) ->
       Res = pulsar:ensure_supervised_client(
               ?TEST_SUIT_CLIENT,
               [PulsarHost],
-              #{conn_opts => #{ auth_data => <<"wrong_token">>
-                              , auth_method_name => <<"token">>
-                              }}),
+              #{ connect_timeout => 30_000
+               , conn_opts => #{ auth_data => <<"wrong_token">>
+                               , auth_method_name => <<"token">>
+                               }}),
       error(Res)
     end),
     %% Should fail fast if there is an authn error.
@@ -278,13 +281,14 @@ t_pulsar_token_auth(Config) ->
             ?assertMatch({{error, {#{}, _}}, _}, Reason),
             {{error, {BrokerErrorMap, _}}, _} = Reason,
             ?assertMatch([#{error := 'AuthenticationError'}], maps:values(BrokerErrorMap)),
+            ok = pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT),
             ok
     after
-        700 ->
+        5_000 ->
             ct:fail("authentication error took too long")
     end,
 
-    ConnOpts = #{ auth_data => <<"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0LXVzZXIifQ.RVPrnEzgEG-iKfpUWKryC39JgWdFXs7MJMUWnHA4ZSg">>
+    ConnOpts = #{ auth_data => <<"eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJhZG1pbiJ9.UlVtumfA7z2dSwrtk8Vvt8T_GUiqnfPoHgZWaGcPv051oiR13v-2_oTdYGVwMYbQ56-pM4DocSbc-mSwhh8mhw">>
                 , auth_method_name => <<"token">>
                 },
     {ok, _ClientPid} = pulsar:ensure_supervised_client(

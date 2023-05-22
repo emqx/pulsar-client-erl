@@ -24,15 +24,27 @@ jobs:
         run: |
           docker-compose -f ./docker-compose.yml up -d
           sleep 15
-          docker exec -i erlang sh -c "make -C /pulsar_client_erl xref"
-          docker exec -i erlang sh -c "make -C /pulsar_client_erl dialyzer"
-          docker exec -i erlang sh -c "make -C /pulsar_client_erl eunit"
-          docker exec -i erlang sh -c "make -C /pulsar_client_erl ct"
-          docker exec -i erlang sh -c "make -C /pulsar_client_erl cover"
+          docker exec -i erlang sh -c "make xref"
+          docker exec -i erlang sh -c "make dialyzer"
+          docker exec -i erlang sh -c "make eunit"
+          docker exec -i erlang sh -c "make ct"
+          docker exec -i erlang sh -c "make cover"
+      - name: get container logs on failure
+        if: failure()
+        run: |
+          echo "============== pulsar-begin =============="
+          docker logs pulsar
+          echo "============== pulsar-end =============="
+          echo "============== pulsar-basic-auth-begin =============="
+          docker logs pulsar-basic-auth
+          echo "============== pulsar-basic-auth-end =============="
+          echo "============== pulsar-token-auth-begin =============="
+          docker logs pulsar-token-auth
+          echo "============== pulsar-token-auth-end =============="
       - name: make coveralls
         if: ${{github.event_name != 'pull_request' && matrix.pulsar_tag == '2.10.0.3'}}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           printenv | grep "^GITHUB_" > envvars
-          docker exec --env-file envvars -i erlang sh -c "make -C /pulsar_client_erl coveralls"
+          docker exec --env-file envvars -i erlang sh -c "make coveralls"

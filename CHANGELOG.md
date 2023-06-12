@@ -1,3 +1,11 @@
+# 0.8.3
+
+## Bug fixes
+
+- Fixed `case_clause` error in `pulsar_producer` that could be caused
+  by a connection failure to the Pulsar brokers depending on timing
+  and the precise state of the state machine.
+
 # 0.8.2
 
 ## Enhancements

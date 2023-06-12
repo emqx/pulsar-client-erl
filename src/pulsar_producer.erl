@@ -566,8 +566,9 @@ parse({Cmd, <<>>}, State) ->
 parse({Cmd, LastBin}, State) ->
     State2 = case handle_response(Cmd, State) of
         keep_state_and_data -> State;
-        {_, State1} -> State1;
-        {_, _, State1} -> State1
+        {_, State1 = #{}} -> State1;
+        {_, _NextState, State1 = #{}} -> State1;
+        {_, _NextState, State1 = #{}, _Actions} -> State1
     end,
     parse(pulsar_protocol_frame:parse(LastBin), State2).
 

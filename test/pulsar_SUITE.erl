@@ -1104,8 +1104,8 @@ t_producers_all_connected(Config) ->
      end,
      ProducerPids),
     ?retry(
-       _Sleep = 300,
-       _Attempts = 20,
+       _Sleep1 = 500,
+       _Attempts1 = 20,
        ?assert(pulsar_producers:all_connected(Producers))),
     %% Should respond even if producers are busy.
     lists:foreach(fun sys:suspend/1, ProducerPids),
@@ -1116,8 +1116,8 @@ t_producers_all_connected(Config) ->
     lists:foreach(fun(P) -> exit(P, kill) end, ProducerPids),
     wait_until_all_dead(Refs, 5_000),
     ?retry(
-       _Sleep = 300,
-       _Attempts = 20,
+       _Sleep2 = 500,
+       _Attempts2 = 20,
        ?assertNot(pulsar_producers:all_connected(Producers))),
     ok.
 

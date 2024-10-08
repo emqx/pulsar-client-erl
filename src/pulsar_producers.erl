@@ -173,10 +173,10 @@ handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
                     {noreply, NewState#state{partitions = length(PartitionTopics)}};
                 {error, Reason} ->
                     log_error("get topic metatdata failed: ~p", [Reason]),
-                    {stop, {shutdown, Reason}, State}
+                    {stop, {failed_to_get_metadata, Reason}, State}
             end;
         {error, Reason} ->
-            {stop, {shutdown, Reason}, State}
+            {stop, {client_not_found, Reason}, State}
     end;
 handle_info({'EXIT', Pid, Error}, State = #state{workers = Workers, producers = Producers}) ->
     log_error("Received EXIT from ~p, error: ~p", [Pid, Error]),
@@ -195,7 +195,7 @@ handle_info({restart_producer, Partition, PartitionTopic}, State = #state{client
         {ok, Pid} ->
             {noreply, start_producer(Pid, Partition, PartitionTopic, State)};
         {error, Reason} ->
-            {stop, {shutdown, Reason}, State}
+            {stop, {client_not_found, Reason}, State}
     end;
 handle_info({producer_state_change, ProducerPid, ProducerState},
             State = #state{producers = Producers, workers = WorkersTable})

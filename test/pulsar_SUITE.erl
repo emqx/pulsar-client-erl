@@ -56,6 +56,7 @@ resilience_multi_failure_tests() ->
 resilience_single_failure_tests() ->
     [ t_pulsar_drop_expired_batch_resend_inflight
     , t_overflow
+    , t_client_down_producers_restart
     ].
 
 groups() ->
@@ -1078,6 +1079,81 @@ t_per_request_callbacks(Config) ->
         1_000 ->
             ok
     end,
+
+    ok.
+
+%% Checks that we restart producers if the client is down while producers attempt to use
+%% it.
+t_client_down_producers_restart(Config) ->
+    PulsarHost = ?config(pulsar_host, Config),
+    ProxyHost = ?config(proxy_host, Config),
+    ProxyPort = ?config(proxy_port, Config),
+    {ok, _} = pulsar_test_utils:reset_proxy(ProxyHost, ProxyPort),
+    {ok, _} = application:ensure_all_started(pulsar),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
+    ProducersName = ?FUNCTION_NAME,
+    ProducerOpts = #{
+        name => ProducersName,
+        batch_size => ?BATCH_SIZE,
+        strategy => random,
+        retention_period => infinity
+    },
+    {ok, Producers} = pulsar:ensure_supervised_producers(
+                        ?TEST_SUIT_CLIENT,
+                        Topic,
+                        ProducerOpts),
+    Batch = [#{key => <<"k">>, value => <<"v">>}],
+    %% pre-condition: everything is fine initially
+    ?assertMatch({_, P} when is_pid(P), pulsar_producers:pick_producer(Producers, Batch)),
+    %% Now, pulsar becomes unresponsive while `pulsar_producers' is trying to get topic
+    %% metadata from it.  It'll timeout and make producers shutdown.
+    pulsar_test_utils:enable_failure(down, ProxyHost, ProxyPort),
+    ProducersPid0 = whereis(ProducersName),
+    ?assert(is_pid(ProducersPid0)),
+    MRef0 = monitor(process, ProducersPid0),
+    ProducersPid0 ! timeout,
+    CallTimeout = 30_000,
+    receive
+        {'DOWN', MRef0, process, ProducersPid0, Reason0} ->
+            ct:pal("shutdown reason: ~p", [Reason0]),
+            ok
+    after
+        CallTimeout + 3_000 ->
+            ct:fail("producers didn't shut down")
+    end,
+    %% ... then, they should eventually restart.
+    pulsar_test_utils:heal_failure(down, ProxyHost, ProxyPort),
+    ct:sleep(500),
+    ProducersPid1 = whereis(ProducersName),
+    ?assert(is_pid(ProducersPid1)),
+    ?assertNotEqual(ProducersPid0, ProducersPid1),
+    ?assert(is_process_alive(ProducersPid1)),
+    ?assertMatch({_, P} when is_pid(P), pulsar_producers:pick_producer(Producers, Batch)),
+
+    %% Alternatively: if the client happens to be restarting while `pulsar_producers' to
+    %% reach the client, it also shuts down.
+    pulsar_test_utils:with_mock(pulsar_client_sup, find_client,
+      fun(_ClientId) -> {error, undefined} end,
+      fun() ->
+        MRef1 = monitor(process, ProducersPid1),
+        ProducersPid1 ! timeout,
+        receive
+            {'DOWN', MRef1, process, ProducersPid1, Reason1} ->
+                ct:pal("shutdown reason: ~p", [Reason1]),
+                ok
+        after
+            CallTimeout + 3_000 ->
+                ct:fail("producers didn't shut down")
+        end
+      end
+    ),
+    ct:sleep(500),
+    ProducersPid2 = whereis(ProducersName),
+    ?assert(is_pid(ProducersPid2)),
+    ?assertNotEqual(ProducersPid1, ProducersPid2),
+    ?assert(is_process_alive(ProducersPid2)),
+    ?assertMatch({_, P} when is_pid(P), pulsar_producers:pick_producer(Producers, Batch)),
 
     ok.
 

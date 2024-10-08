@@ -1,3 +1,17 @@
+# 0.8.5
+
+## Bug fixes
+
+- Fixed an issue where `pulsar_producers` would stop and not restart if it encountered
+  problems when trying to reach `pulsar_client`.
+
+# 0.8.4
+
+## Bug fixes
+
+- Fixed an issue where a producer process might've end up stuck with a closed connection
+  while it believed to be in the `connected` state.
+
 # 0.8.3
 
 ## Bug fixes

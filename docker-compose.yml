@@ -3,7 +3,7 @@ version: '3'
 services:
   erlang:
     container_name: erlang
-    image: erlang:24.3.4.2
+    image: erlang:26.2.5.2
     volumes:
       - ./:/pulsar_client_erl
     working_dir: /pulsar_client_erl

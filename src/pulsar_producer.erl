@@ -340,6 +340,8 @@ connecting(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_r
     State = State0#{lookup_topic_request_ref := undefined},
     try_close_socket(State),
     ?NEXT_STATE_IDLE_RECONNECT(State);
+connecting(info, {'EXIT', Sock, Reason}, State) when is_port(Sock) ->
+    handle_socket_close(connecting, Sock, Reason, State);
 connecting(info, {C, Sock}, State) when C =:= tcp_closed; C =:= ssl_closed ->
     handle_socket_close(connecting, Sock, closed, State);
 connecting(info, {E, Sock, Reason}, State) when E =:= tcp_error; E =:= ssl_error ->
@@ -403,6 +405,8 @@ connected(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_re
     State = State0#{lookup_topic_request_ref := undefined},
     try_close_socket(State),
     ?NEXT_STATE_IDLE_RECONNECT(State);
+connected(info, {'EXIT', Sock, Reason}, State) when is_port(Sock) ->
+    handle_socket_close(connected, Sock, Reason, State);
 connected(_EventType, {C, Sock}, State) when C =:= tcp_closed; C =:= ssl_closed ->
     handle_socket_close(connected, Sock, closed, State);
 connected(_EventType, {E, Sock, Reason}, State) when E =:= tcp_error; E =:= ssl_error ->
@@ -436,6 +440,7 @@ connected(_EventType, EventContent, State) ->
     handle_response(EventContent, State).
 
 handle_socket_close(StateName, Sock, Reason, #{sock := Sock} = State) ->
+    ?tp("pulsar_socket_close", #{sock => Sock, reason => Reason}),
     log_error("connection_closed at_state: ~p, reason: ~p", [StateName, Reason], State),
     try_close_socket(State),
     %% NOTE: after hot-upgrade from version where clientid is

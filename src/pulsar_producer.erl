@@ -1109,6 +1109,7 @@ handle_lookup_topic_reply({ok, #{ proxy_through_service_url := true
                                 }}, State0) ->
     #{clientid := ClientId} = State0,
     ?tp(debug, pulsar_producer_lookup_alive_pulsar_url, #{}),
+    logger:debug("[pulsar-producer] received topic lookup reply: ~0p", [#{proxy_through_service_url => true, broker_service_url => NewBrokerServiceURL}]),
     try pulsar_client:get_alive_pulsar_url(ClientId) of
         {ok, AlivePulsarURL} ->
             maybe_connect(#{ broker_service_url => NewBrokerServiceURL
@@ -1132,6 +1133,7 @@ handle_lookup_topic_reply({ok, #{ proxy_through_service_url := false
                                 , brokerServiceUrl := NewBrokerServiceURL
                                 }},
                          State) ->
+    logger:debug("[pulsar-producer] received topic lookup reply: ~0p", [#{proxy_through_service_url => false, broker_service_url => NewBrokerServiceURL}]),
     maybe_connect(#{ alive_pulsar_url => NewBrokerServiceURL
                    , broker_service_url => undefined
                    }, State).
@@ -1147,6 +1149,7 @@ maybe_connect(#{ broker_service_url := NewBrokerServiceURL
     {_Transport, NewBrokerServer} = pulsar_utils:parse_url(AlivePulsarURL),
     case {OldBrokerServer, OldBrokerServiceURL} =:= {NewBrokerServer, NewBrokerServiceURL} of
         true ->
+            logger:debug("[pulsar-producer] connecting to ~0p", [#{broker_server => NewBrokerServer, service_url => NewBrokerServiceURL}]),
             do_connect(State0);
         false ->
             %% broker changed; reconnect.

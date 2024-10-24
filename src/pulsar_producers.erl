@@ -243,7 +243,11 @@ create_partition_topic(Topic, Partitions) ->
 
 get_name(ProducerOpts) -> maps:get(name, ProducerOpts, ?MODULE).
 
-log_error(Fmt, Args) -> logger:error("[pulsar_producers] " ++ Fmt, Args).
+log_error(Fmt, Args) ->
+    do_log(error, Fmt, Args).
+
+do_log(Level, Fmt, Args) ->
+    logger:log(Level, "[pulsar_producers] " ++ Fmt, Args, #{domain => [pulsar, producers]}).
 
 start_producer(Pid, Partition, PartitionTopic, State) ->
     try

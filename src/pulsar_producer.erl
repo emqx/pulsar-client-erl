@@ -351,8 +351,8 @@ connecting(info, ?SOCK_ERR(Sock, Reason), State) ->
 connecting(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
     {Cmd, _} = pulsar_protocol_frame:parse(Bin),
     handle_response(Cmd, State);
-connecting(info, Msg, _State) ->
-    logger:info("[pulsar-producer][connecting] unknown message received ~p~n  ~p", [Msg, _State]),
+connecting(info, Msg, State) ->
+    log_info("[connecting] unknown message received ~p~n  ~p", [Msg, State], State),
     keep_state_and_data;
 connecting({call, From}, {send, Messages}, State0) ->
     %% for race conditions when upgrading from previous versions only
@@ -691,17 +691,27 @@ next_sequence_id(State = #{sequence_id := ?MAX_SEQ_ID}) ->
 next_sequence_id(State = #{sequence_id := SequenceId}) ->
     State#{sequence_id := SequenceId + 1}.
 
+-spec log_debug(string(), [term()], state()) -> ok.
+log_debug(Fmt, Args, State) ->
+    do_log(debug, Fmt, Args, State).
+
 -spec log_info(string(), [term()], state()) -> ok.
-log_info(Fmt, Args, #{partitiontopic := PartitionTopic}) ->
-    logger:info("[pulsar-producer][~s] " ++ Fmt, [PartitionTopic | Args]).
+log_info(Fmt, Args, State) ->
+    do_log(info, Fmt, Args, State).
 
 -spec log_warn(string(), [term()], state()) -> ok.
-log_warn(Fmt, Args, #{partitiontopic := PartitionTopic}) ->
-    logger:warning("[pulsar-producer][~s] " ++ Fmt, [PartitionTopic | Args]).
+log_warn(Fmt, Args, State) ->
+    do_log(warning, Fmt, Args, State).
 
 -spec log_error(string(), [term()], state()) -> ok.
-log_error(Fmt, Args, #{partitiontopic := PartitionTopic}) ->
-    logger:error("[pulsar-producer][~s] " ++ Fmt, [PartitionTopic | Args]).
+log_error(Fmt, Args, State) ->
+    do_log(error, Fmt, Args, State).
+
+-spec do_log(atom(), string(), [term()], state()) -> ok.
+do_log(Level, Format, Args, State) ->
+    #{partitiontopic := PartitionTopic} = State,
+    logger:log(Level, "[pulsar-producer][~s] " ++ Format,
+               [PartitionTopic | Args], #{domain => [pulsar, producer]}).
 
 -spec invoke_callback(callback(), callback_input()) -> ok.
 invoke_callback(Callback, Resp) ->
@@ -1109,7 +1119,7 @@ handle_lookup_topic_reply({ok, #{ proxy_through_service_url := true
                                 }}, State0) ->
     #{clientid := ClientId} = State0,
     ?tp(debug, pulsar_producer_lookup_alive_pulsar_url, #{}),
-    logger:debug("[pulsar-producer] received topic lookup reply: ~0p", [#{proxy_through_service_url => true, broker_service_url => NewBrokerServiceURL}]),
+    log_debug("received topic lookup reply: ~0p", [#{proxy_through_service_url => true, broker_service_url => NewBrokerServiceURL}], State0),
     try pulsar_client:get_alive_pulsar_url(ClientId) of
         {ok, AlivePulsarURL} ->
             maybe_connect(#{ broker_service_url => NewBrokerServiceURL
@@ -1133,7 +1143,7 @@ handle_lookup_topic_reply({ok, #{ proxy_through_service_url := false
                                 , brokerServiceUrl := NewBrokerServiceURL
                                 }},
                          State) ->
-    logger:debug("[pulsar-producer] received topic lookup reply: ~0p", [#{proxy_through_service_url => false, broker_service_url => NewBrokerServiceURL}]),
+    log_debug("received topic lookup reply: ~0p", [#{proxy_through_service_url => false, broker_service_url => NewBrokerServiceURL}], State),
     maybe_connect(#{ alive_pulsar_url => NewBrokerServiceURL
                    , broker_service_url => undefined
                    }, State).
@@ -1149,7 +1159,7 @@ maybe_connect(#{ broker_service_url := NewBrokerServiceURL
     {_Transport, NewBrokerServer} = pulsar_utils:parse_url(AlivePulsarURL),
     case {OldBrokerServer, OldBrokerServiceURL} =:= {NewBrokerServer, NewBrokerServiceURL} of
         true ->
-            logger:debug("[pulsar-producer] connecting to ~0p", [#{broker_server => NewBrokerServer, service_url => NewBrokerServiceURL}]),
+            log_debug("connecting to ~0p", [#{broker_server => NewBrokerServer, service_url => NewBrokerServiceURL}], State0),
             do_connect(State0);
         false ->
             %% broker changed; reconnect.

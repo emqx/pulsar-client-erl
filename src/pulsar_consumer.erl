@@ -99,7 +99,7 @@ connecting(info, {InetClose, _Sock}, State = #state{partitiontopic = Topic})
     {next_state, idle, State#state{sock = undefined},
      [{state_timeout, 5_000, do_connect}]};
 connecting(info, Msg, _State) ->
-    logger:info("[pulsar-consumer][connecting] unknown message received ~p", [Msg]),
+    log_info("[connecting] unknown message received ~p", [Msg]),
     keep_state_and_data.
 
 connected(_, do_connect, _State) ->
@@ -244,4 +244,11 @@ next_request_id(State = #state{request_id = ?MAX_QUE_ID}) ->
 next_request_id(State = #state{request_id = RequestId}) ->
     State#state{request_id = RequestId+1}.
 
-log_error(Fmt, Args) -> logger:error("[pulsar-consumer] " ++ Fmt, Args).
+log_error(Fmt, Args) ->
+    do_log(error, Fmt, Args).
+
+log_info(Fmt, Args) ->
+    do_log(info, Fmt, Args).
+
+do_log(Level, Fmt, Args) ->
+    logger:log(Level, "[pulsar-consumer]" ++ Fmt , Args, #{domain => [pulsar, consumer]}).

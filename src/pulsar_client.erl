@@ -412,7 +412,11 @@ next_request_id(State = #state{request_id = 65535}) ->
 next_request_id(State = #state{request_id = RequestId}) ->
     State#state{request_id = RequestId+1}.
 
-log_error(Fmt, Args) -> logger:error("[pulsar-client] " ++ Fmt, Args).
+log_error(Fmt, Args) ->
+    do_log(error, Fmt, Args).
+
+do_log(Level, Fmt, Args) ->
+    logger:log(Level, "[pulsar-client] " ++ Fmt, Args, #{domain => [pulsar, client]}).
 
 %% we use the same ping workflow as it attempts the connection
 start_reconnect_timer() ->

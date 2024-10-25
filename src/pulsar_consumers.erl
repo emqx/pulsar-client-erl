@@ -173,7 +173,11 @@ create_partition_topic(Topic, Partitions) ->
 
 get_name(ConsumerOpts) -> maps:get(name, ConsumerOpts, ?MODULE).
 
-log_error(Fmt, Args) -> logger:error(Fmt, Args).
+log_error(Fmt, Args) ->
+    do_log(error, Fmt, Args).
+
+do_log(Level, Fmt, Args) ->
+    logger:log(Level, Fmt, Args, #{domain => [pulsar, consumers]}).
 
 start_consumer(Pid, PartitionTopic, #state{consumer_opts = ConsumerOpts} = State) ->
     try

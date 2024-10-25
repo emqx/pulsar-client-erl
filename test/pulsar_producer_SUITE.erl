@@ -20,6 +20,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
+-include_lib("snabbkaffe/include/snabbkaffe.hrl").
 
 -define(TEST_SUIT_CLIENT, ?MODULE).
 -define(DEFAULT_PULSAR_HOST, "pulsar://toxiproxy:6650").
@@ -33,6 +34,7 @@ all() ->
     , t_code_change_requests
     , t_state_rec_roundtrip
     , t_queue_item_marshaller
+    , t_port_exit
     ].
 
 init_per_suite(Config) ->
@@ -43,7 +45,10 @@ end_per_suite(_Config) ->
     ok = application:stop(pulsar),
     ok.
 
-init_per_testcase(t_code_change_replayq, Config) ->
+init_per_testcase(TestCase, Config) when
+    TestCase =:= t_code_change_replayq;
+    TestCase =:= t_port_exit
+->
     PulsarHost = os:getenv("PULSAR_HOST", ?DEFAULT_PULSAR_HOST),
     {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     TestPID = self(),
@@ -77,7 +82,10 @@ init_per_testcase(t_code_change_replayq, Config) ->
 init_per_testcase(_TestCase, Config) ->
     Config.
 
-end_per_testcase(t_code_change_replayq, Config) ->
+end_per_testcase(TestCase, Config) when
+    TestCase =:= t_code_change_replayq;
+    TestCase =:= t_port_exit
+->
     Producers = ?config(producers, Config),
     pulsar:stop_and_delete_supervised_producers(Producers),
     pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT),
@@ -287,4 +295,26 @@ t_queue_item_marshaller(_Config) ->
     ?assertNot(is_binary(QueueItem2)),
     ?assertNotEqual(QueueItem0, QueueItem2),
     ?assertMatch({undefined, _, _}, QueueItem2),
+    ok.
+
+t_port_exit(Config) ->
+    ProducerPid = ?config(producer_pid, Config),
+    pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
+    {_, #{sock := Sock}} = sys:get_state(ProducerPid),
+    true = is_port(Sock),
+    ?check_trace(
+       #{timetrap => 2_000},
+       begin
+           {_, {ok, _}} =
+               ?wait_async_action(
+                  exit(Sock, die),
+                  #{?snk_kind := "pulsar_socket_close"}
+                 ),
+           ok
+       end,
+       fun(Trace) ->
+           ?assertMatch([#{reason := die}], ?of_kind("pulsar_socket_close", Trace)),
+           ok
+       end
+      ),
     ok.

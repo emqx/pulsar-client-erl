@@ -1,6 +1,7 @@
 # 1.0.0
 
 - Removed support for hot upgrades.
+- Added `telemetry` support.
 
 # 0.8.5
 

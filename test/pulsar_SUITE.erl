@@ -69,6 +69,7 @@ groups() ->
     ].
 
 init_per_suite(Config) ->
+    pulsar_test_utils:clear_screen(),
     ct:timetrap({minutes, 3}),
     ProxyHost = os:getenv("PROXY_HOST", "toxiproxy"),
     ProxyPort = list_to_integer(os:getenv("PROXY_PORT", "8474")),
@@ -134,6 +135,7 @@ end_per_testcase(TestCase, Config)
     application:stop(pulsar),
     snabbkaffe:stop(),
     file:del_dir_r(ReplayqDir),
+    pulsar_test_utils:uninstall_event_logging(),
     ok;
 end_per_testcase(t_pulsar_drop_expired_batch_resend_inflight, Config) ->
     ProxyHost = ?config(proxy_host, Config),
@@ -144,6 +146,7 @@ end_per_testcase(t_pulsar_drop_expired_batch_resend_inflight, Config) ->
     snabbkaffe:stop(),
     catch meck:unload([pulsar_producer]),
     file:del_dir_r(ReplayqDir),
+    pulsar_test_utils:uninstall_event_logging(),
     ok;
 end_per_testcase(t_overflow, Config) ->
     ProxyHost = ?config(proxy_host, Config),
@@ -153,10 +156,12 @@ end_per_testcase(t_overflow, Config) ->
     application:stop(pulsar),
     snabbkaffe:stop(),
     file:del_dir_r(ReplayqDir),
+    pulsar_test_utils:uninstall_event_logging(),
     ok;
 end_per_testcase(_TestCase, _Config) ->
     application:stop(pulsar),
     snabbkaffe:stop(),
+    pulsar_test_utils:uninstall_event_logging(),
     ok.
 
 %%--------------------------------------------------------------------
@@ -565,6 +570,7 @@ t_pulsar_drop_expired_batch_resend_inflight(Config) ->
     FailureType = down,
     StabilizationPeriod = timer:seconds(15),
     {ok, _} = application:ensure_all_started(pulsar),
+    Tab = pulsar_test_utils:install_event_logging(),
 
     {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ct:pal("started client"),
@@ -613,7 +619,15 @@ t_pulsar_drop_expired_batch_resend_inflight(Config) ->
     {_, ProducerPid} = pulsar_producers:pick_producer(Producers,
                                                       [#{key => <<"k">>, value => <<>>}]),
     pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
-
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing])),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing_bytes])),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, inflight])),
 
     %% 1. produce some messages and, while we are processing them,
     %% simulate a disconnect message to change state to `idle'.
@@ -643,7 +657,6 @@ t_pulsar_drop_expired_batch_resend_inflight(Config) ->
          ?block_until(#{?snk_kind := pulsar_producer_send_req_exit}),
          ct:sleep(RetentionPeriodMS * 2),
 
-
          ct:pal("healing failure..."),
          pulsar_test_utils:heal_failure(FailureType, ProxyHost, ProxyPort),
          ct:pal("failure healed"),
@@ -653,6 +666,18 @@ t_pulsar_drop_expired_batch_resend_inflight(Config) ->
                                                            [#{key => <<"k">>, value => <<>>}]),
          pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
          ct:pal("producer connected"),
+         ?assertMatch(
+            #{metrics_data := #{gauge_set := 0}},
+            pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing])),
+         ?assertMatch(
+            #{metrics_data := #{gauge_set := 0}},
+            pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing_bytes])),
+         ?retry(100, 10, ?assertMatch(
+            #{metrics_data := #{gauge_set := N}} when N > 0,
+            pulsar_test_utils:get_latest_event(Tab, [pulsar, inflight]))),
+         ?assertMatch(
+            #{metrics_data := #{reason := expired}},
+            pulsar_test_utils:get_latest_event(Tab, [pulsar, dropped])),
 
          %% we can't assert that the messages have been expired, as
          %% the produce request might have succeeded in Pulsar's side,
@@ -792,6 +817,7 @@ t_pulsar_replayq_producer_restart(Config) ->
     ReplayqDir = ?config(replayq_dir, Config),
     StabilizationPeriod = timer:seconds(15),
     {ok, _} = application:ensure_all_started(pulsar),
+    Tab = pulsar_test_utils:install_event_logging(),
 
     {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ct:pal("started client"),
@@ -828,6 +854,15 @@ t_pulsar_replayq_producer_restart(Config) ->
                                                       [#{key => <<"k">>, value => <<"v">>}]),
     pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
     ct:pal("producer connected"),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing])),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing_bytes])),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, inflight])),
 
     TestPid = self(),
     ProduceInterval = 100,
@@ -873,7 +908,27 @@ t_pulsar_replayq_producer_restart(Config) ->
     ct:pal("produced ~b messages in total", [TotalProduced]),
     %% give it some time for the producer to enqueue them before
     %% killing it.
-    ct:sleep(5_000),
+    ct:sleep(1_000),
+    %% When using the `timeout' toxic, the requests will more likely be inflight than
+    %% queued.
+    #{metrics_data := #{gauge_set := Queuing1}} =
+        pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing]),
+    #{metrics_data := #{gauge_set := QueuingBytes1}} =
+        pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing_bytes]),
+    #{metrics_data := #{gauge_set := Inflight1}} =
+        pulsar_test_utils:get_latest_event(Tab, [pulsar, inflight]),
+    Metrics1 = #{queuing => Queuing1, queuing_bytes => QueuingBytes1, inflight => Inflight1},
+    case FailureType of
+        down ->
+            ?assert(Queuing1 > 0, Metrics1),
+            ?assert(QueuingBytes1 > 0, Metrics1),
+            ?assert(Inflight1 > 0, Metrics1);
+        timeout ->
+            ?assertEqual(0, Queuing1, Metrics1),
+            ?assertEqual(0, QueuingBytes1, Metrics1),
+            ?assert(Inflight1 > 0, Metrics1)
+    end,
+
     Ref = monitor(process, ProducerPid),
     exit(ProducerPid, kill),
     receive
@@ -883,18 +938,37 @@ t_pulsar_replayq_producer_restart(Config) ->
         500 ->
             error(producer_still_alive)
     end,
+    %% After producer is restarted, should re-set gauges.
+    ct:sleep(300),
+    #{metrics_data := #{gauge_set := Queuing2}} =
+        pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing]),
+    #{metrics_data := #{gauge_set := QueuingBytes2}} =
+        pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing_bytes]),
+    #{metrics_data := #{gauge_set := Inflight2}} =
+        pulsar_test_utils:get_latest_event(Tab, [pulsar, inflight]),
+    Metrics2 = #{queuing => Queuing2, queuing_bytes => QueuingBytes2, inflight => Inflight2},
+    ?assertEqual(Metrics1, Metrics2),
 
     %% reestablish connection and wait until producer catches up
     ct:pal("reestablishing connection with pulsar..."),
     pulsar_test_utils:heal_failure(FailureType, ProxyHost, ProxyPort),
     ct:pal("connection reestablished"),
-    timer:sleep(StabilizationPeriod),
 
     ExpectedPayloads = sets:from_list([integer_to_binary(N) || N <- lists:seq(1, TotalProduced)],
                                       [{version, 2}]),
     wait_until_consumed(ExpectedPayloads, timer:seconds(30)),
 
     ct:pal("all ~b expected messages were received", [TotalProduced]),
+
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing])),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing_bytes])),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, inflight])),
 
     ok.
 
@@ -904,6 +978,7 @@ t_overflow(Config) ->
     ProxyPort = ?config(proxy_port, Config),
     ReplayqDir = ?config(replayq_dir, Config),
     {ok, _} = application:ensure_all_started(pulsar),
+    Tab = pulsar_test_utils:install_event_logging(),
 
     {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ct:pal("started client"),
@@ -941,6 +1016,16 @@ t_overflow(Config) ->
                                                       [#{key => <<"k">>, value => <<"v">>}]),
     pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries0 = 5, _Sleep0 = 5_000),
     ct:pal("producer connected"),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing])),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing_bytes])),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, inflight])),
+
     ct:pal("cutting connection with pulsar"),
     pulsar_test_utils:enable_failure(down, ProxyHost, ProxyPort),
     ct:pal("connection cut"),
@@ -957,6 +1042,8 @@ t_overflow(Config) ->
     %% pre-condition
     true = ExpectedOverflow > 0,
     MessagesToDrop = round(math:ceil(ExpectedOverflow / ItemSize)),
+    MessagesToKeep = NumItems - MessagesToDrop,
+    BytesToKeep = MessagesToKeep * ItemSize,
     ct:pal("expected overflow: ~b bytes; average size per item: ~b; messages to drop: ~b",
            [ExpectedOverflow, ItemSize, MessagesToDrop]),
 
@@ -972,6 +1059,19 @@ t_overflow(Config) ->
       end,
       lists:seq(1, NumItems)),
     ct:pal("messages enqueued"),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := MessagesToKeep}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing])),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := BytesToKeep}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing_bytes]),
+       #{max_total_bytes => MaxTotalBytes}),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, inflight])),
+    ?assertMatch(
+       #{metrics_data := #{reason := queue_full}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, dropped])),
 
     ct:pal("waiting for overflow callbacks"),
     Resps = wait_callbacks(MessagesToDrop, _Timeout2 = 10_000),
@@ -992,6 +1092,16 @@ t_overflow(Config) ->
     true = sets:size(ExpectedPayloads) > 0,
     ct:pal("waiting for payloads to be published and consumed: ~p", [ExpectedPayloads]),
     wait_until_consumed(ExpectedPayloads, timer:seconds(30)),
+
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing])),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, queuing_bytes])),
+    ?assertMatch(
+       #{metrics_data := #{gauge_set := 0}},
+       pulsar_test_utils:get_latest_event(Tab, [pulsar, inflight])),
 
     ok.
 

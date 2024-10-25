@@ -86,7 +86,7 @@
 -define(DEFAULT_REPLAYQ_LIMIT, 2_000_000_000).
 -define(DEFAULT_MAX_BATCH_BYTES, 1_000_000).
 -define(Q_ITEM(From, Ts, Messages), {From, Ts, Messages}).
--define(INFLIGHT_REQ(QAckRef, FromsToMessages), {inflight_req, QAckRef, FromsToMessages}).
+-define(INFLIGHT_REQ(QAckRef, FromsToMessages, BatchSize), {inflight_req, QAckRef, FromsToMessages, BatchSize}).
 -define(NEXT_STATE_IDLE_RECONNECT(State), {next_state, idle, State#{sock := undefined},
                                            [{state_timeout, ?RECONNECT_TIMEOUT, do_connect}]}).
 -define(buffer_overflow_discarded, buffer_overflow_discarded).
@@ -111,6 +111,7 @@
                    broker_server := {binary(), pos_integer()},
                    callback := undefined | mfa() | fun((map()) -> ok),
                    clientid := atom(),
+                   inflight_calls := non_neg_integer(),
                    last_bin := binary(),
                    lookup_topic_request_ref := reference() | undefined,
                    opts := map(),
@@ -120,15 +121,19 @@
                    producer_name := atom(),
                    proxy_to_broker_url := undefined | string(),
                    replayq := replayq:q(),
+                   replayq_offload_mode := boolean(),
                    request_id := integer(),
                    requests := #{sequence_id() =>
                                      ?INFLIGHT_REQ(
-                                       replayq:ack_ref(),
+                                        replayq:ack_ref(),
                                         [{gen_statem:from() | undefined,
-                                          {timestamp(), [pulsar:message()]}}])},
+                                          {timestamp(), [pulsar:message()]}}],
+                                        _BatchSize :: non_neg_integer()
+                                       )},
                    sequence_id := sequence_id(),
                    state_observer_callback := undefined | state_observer_callback(),
-                   sock := undefined | port()
+                   sock := undefined | port(),
+                   telemetry_metadata := map()
                   }.
 -type handler_result() :: gen_statem:event_handler_result(statem(), state()).
 -type per_request_callback() :: {function(), [term()]}.
@@ -206,6 +211,7 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
     process_flag(trap_exit, true),
     {Transport, BrokerServer} = pulsar_utils:parse_url(Server),
     ProducerID = maps:get(producer_id, ProducerOpts0),
+    Offload = maps:get(replayq_offload_mode, ProducerOpts0, false),
     ReplayqCfg0 =
         case maps:get(replayq_dir, ProducerOpts0, false) of
             false ->
@@ -214,7 +220,6 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
                 PartitionTopicPath = escape(PartitionTopic),
                 Dir = filename:join([BaseDir, PartitionTopicPath]),
                 SegBytes = maps:get(replayq_seg_bytes, ProducerOpts0, ?DEFAULT_REPLAYQ_SEG_BYTES),
-                Offload = maps:get(replayq_offload_mode, ProducerOpts0, false),
                 #{dir => Dir, seg_bytes => SegBytes, offload => Offload}
         end,
     MaxTotalBytes = maps:get(replayq_max_total_bytes, ProducerOpts0, ?DEFAULT_REPLAYQ_LIMIT),
@@ -235,11 +240,14 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
                                 ProducerOpts1),
     StateObserverCallback = maps:get(state_observer_callback, ProducerOpts0, undefined),
     ParentPid = maps:get(parent_pid, ProducerOpts, undefined),
+    TelemetryMetadata0 = maps:get(telemetry_metadata, ProducerOpts0, #{}),
+    TelemetryMetadata = maps:put(partition_topic, PartitionTopic, TelemetryMetadata0),
     State = #{
         batch_size => maps:get(batch_size, ProducerOpts, 0),
         broker_server => BrokerServer,
         callback => maps:get(callback, ProducerOpts, undefined),
         clientid => maps:get(clientid, ProducerOpts),
+        inflight_calls => 0,
         last_bin => <<>>,
         lookup_topic_request_ref => undefined,
         opts => pulsar_utils:maybe_enable_ssl_opts(Transport, ProducerOpts),
@@ -249,12 +257,17 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
         producer_name => maps:get(producer_name, ProducerOpts, pulsar_producer),
         proxy_to_broker_url => ProxyToBrokerUrl,
         replayq => Q,
+        replayq_offload_mode => Offload,
         request_id => 1,
         requests => #{},
         sequence_id => 1,
         state_observer_callback => StateObserverCallback,
-        sock => undefined
+        sock => undefined,
+        telemetry_metadata => TelemetryMetadata
     },
+    pulsar_metrics:inflight_set(State, 0),
+    pulsar_metrics:queuing_set(State, replayq:count(Q)),
+    pulsar_metrics:queuing_bytes_set(State, replayq:bytes(Q)),
     {ok, idle, State, [{next_event, internal, do_connect}]}.
 
 %% idle state
@@ -475,9 +488,32 @@ censor_secrets(Data0 = #{opts := Opts0 = #{conn_opts := ConnOpts0 = #{auth_data 
 censor_secrets(Data) ->
     Data.
 
-terminate(_Reason, _StateName, _State = #{replayq := Q}) ->
+terminate(_Reason, _StateName, State = #{replayq := Q}) ->
     ok = replayq:close(Q),
+    ok = clear_gauges(State, Q),
     ok.
+
+clear_gauges(State, Q) ->
+    pulsar_metrics:inflight_set(State, 0),
+    maybe_reset_queuing(State, Q),
+    ok.
+
+maybe_reset_queuing(State, Q) ->
+    case {replayq:count(Q), is_replayq_durable(State, Q)} of
+        {0, _} ->
+            pulsar_metrics:queuing_set(State, 0),
+            pulsar_metrics:queuing_bytes_set(State, 0);
+        {_, false} ->
+            pulsar_metrics:queuing_set(State, 0),
+            pulsar_metrics:queuing_bytes_set(State, 0);
+        {_, _} ->
+            ok
+    end.
+
+is_replayq_durable(#{replayq_offload_mode := true}, _Q) ->
+    false;
+is_replayq_durable(_, Q) ->
+    not replayq:is_mem_only(Q).
 
 parse({incomplete, Bin}, State) ->
     {keep_state, State#{last_bin := Bin}};
@@ -517,15 +553,18 @@ handle_response({close_producer, #{}}, State = #{ partitiontopic := Topic
     log_error("Close producer: ~p~n", [Topic], State),
     try_close_socket(State),
     ?NEXT_STATE_IDLE_RECONNECT(State);
-handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
-                State = #{callback := Callback, requests := Reqs,
-                          replayq := Q}) ->
+handle_response({send_receipt, Resp = #{sequence_id := SequenceId}}, State) ->
+    #{ callback := Callback
+     , inflight_calls := InflightCalls0
+     , requests := Reqs
+     , replayq := Q
+     } = State,
     ?tp(pulsar_producer_recv_send_receipt, #{receipt => Resp}),
     case maps:get(SequenceId, Reqs, undefined) of
         undefined ->
             _ = invoke_callback(Callback, {ok, Resp}),
             {keep_state, State};
-        ?INFLIGHT_REQ(QAckRef, FromsToMessages) ->
+        ?INFLIGHT_REQ(QAckRef, FromsToMessages, BatchSize) ->
             ok = replayq:ack(Q, QAckRef),
             lists:foreach(
               fun({undefined, {_TS, Messages}}) ->
@@ -541,7 +580,11 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                    gen_statem:reply(From, {ok, Resp})
               end,
               FromsToMessages),
-            {keep_state, State#{requests := maps:remove(SequenceId, Reqs)}}
+            InflightCalls = InflightCalls0 - BatchSize,
+            pulsar_metrics:inflight_set(State, InflightCalls),
+            {keep_state, State#{ requests := maps:remove(SequenceId, Reqs)
+                               , inflight_calls := InflightCalls
+                               }}
     end;
 handle_response({error, #{error := Error, message := Msg}}, State) ->
     log_error("Response error:~p, msg:~p~n", [Error, Msg], State),
@@ -649,6 +692,8 @@ enqueue_send_requests(Requests, State = #{replayq := Q}) ->
                end,
                Requests),
     NewQ = replayq:append(Q, QItems),
+    pulsar_metrics:queuing_set(State, replayq:count(NewQ)),
+    pulsar_metrics:queuing_bytes_set(State, replayq:bytes(NewQ)),
     ?tp(pulsar_producer_send_requests_enqueued, #{requests => Requests}),
     Overflow = replayq:overflow(NewQ),
     handle_overflow(State#{replayq := NewQ}, Overflow).
@@ -665,6 +710,10 @@ handle_overflow(State0 = #{replayq := Q, callback := Callback}, Overflow) ->
     maybe_log_discard(State0, length(Items0)),
     Items = [{From, Msgs} || ?Q_ITEM(From, _Now, Msgs) <- Items0],
     reply_with_error(Items, Callback, {error, overflow}),
+    NumMsgs = length([1 || {_, Msgs} <- Items, _ <- Msgs]),
+    pulsar_metrics:dropped_queue_full_inc(State0, NumMsgs),
+    pulsar_metrics:queuing_set(State0, replayq:count(NewQ)),
+    pulsar_metrics:queuing_bytes_set(State0, replayq:bytes(NewQ)),
     State0#{replayq := NewQ}.
 
 maybe_log_discard(State, Increment) ->
@@ -746,6 +795,7 @@ maybe_send_to_pulsar(State) ->
 
 do_send_to_pulsar(State0) ->
     #{ batch_size := BatchSize
+     , inflight_calls := InflightCalls0
      , sequence_id := SequenceId
      , requests := Requests0
      , replayq := Q
@@ -756,6 +806,8 @@ do_send_to_pulsar(State0) ->
                                              , bytes_limit => MaxBatchBytes
                                              }),
     State1 = State0#{replayq := NewQ},
+    pulsar_metrics:queuing_set(State0, replayq:count(NewQ)),
+    pulsar_metrics:queuing_bytes_set(State0, replayq:bytes(NewQ)),
     RetentionPeriod = maps:get(retention_period, ProducerOpts, infinity),
     Now = now_ts(),
     {Expired, FromsToMessages} =
@@ -771,18 +823,22 @@ do_send_to_pulsar(State0) ->
          {[], []},
          Items),
     reply_expired_messages(Expired, State1),
+    pulsar_metrics:dropped_inc(State1, length(Expired)),
     case FromsToMessages of
         [] ->
             %% all expired, immediately ack replayq batch and continue
             ok = replayq:ack(Q, QAckRef),
             maybe_send_to_pulsar(State1);
         [_ | _] ->
-            send_batch_payload([Msg || {_From, {_Timestamp, Msgs}} <-
-                                           FromsToMessages,
-                                       Msg <- Msgs],
-                               SequenceId, State0),
-            Requests = Requests0#{SequenceId => ?INFLIGHT_REQ(QAckRef, FromsToMessages)},
-            State2 = State1#{requests := Requests},
+            FinalBatch = [Msg || {_From, {_Timestamp, Msgs}} <-
+                                     FromsToMessages,
+                                 Msg <- Msgs],
+            FinalBatchSize = length(FinalBatch),
+            send_batch_payload(FinalBatch, SequenceId, State0),
+            Requests = Requests0#{SequenceId => ?INFLIGHT_REQ(QAckRef, FromsToMessages, FinalBatchSize)},
+            InflightCalls = InflightCalls0 + FinalBatchSize,
+            pulsar_metrics:inflight_set(State1, InflightCalls),
+            State2 = State1#{requests := Requests, inflight_calls := InflightCalls},
             State = next_sequence_id(State2),
             maybe_send_to_pulsar(State)
     end.
@@ -832,15 +888,16 @@ try_close_socket(#{sock := Sock, opts := Opts}) ->
 
 resend_sent_requests(State) ->
     ?tp(pulsar_producer_resend_sent_requests_enter, #{}),
-    #{ requests := Requests0
+    #{ inflight_calls := InflightCalls0
+     , requests := Requests0
      , replayq := Q
      , opts := ProducerOpts
      } = State,
     Now = now_ts(),
     RetentionPeriod = maps:get(retention_period, ProducerOpts, infinity),
-    Requests =
+    {Requests, Dropped} =
         maps:fold(
-          fun(SequenceId, ?INFLIGHT_REQ(QAckRef, FromsToMessages), Acc) ->
+          fun(SequenceId, ?INFLIGHT_REQ(QAckRef, FromsToMessages, _BatchSize), {AccIn, DroppedAcc}) ->
                {Messages, Expired} =
                   lists:partition(
                     fun({_From, {Ts, _Msgs}}) ->
@@ -852,21 +909,26 @@ resend_sent_requests(State) ->
                    reply_expired_messages([{From, Msgs}], State)
                  end,
                  Expired),
-               case Messages of
+               Dropped = length(Expired),
+               Acc = case Messages of
                    [] ->
                        ?tp(pulsar_producer_resend_all_expired, #{}),
                        ok = replayq:ack(Q, QAckRef),
-                       Acc;
+                       AccIn;
                    [_ | _] ->
                        send_batch_payload([Msg || {_From, {_Ts, Msgs}} <- Messages,
                                                   Msg <- Msgs],
                                           SequenceId, State),
-                       Acc#{SequenceId => ?INFLIGHT_REQ(QAckRef, Messages)}
-               end
+                       AccIn#{SequenceId => ?INFLIGHT_REQ(QAckRef, Messages, length(Messages))}
+               end,
+               {Acc, DroppedAcc + Dropped}
           end,
-          #{},
+          {#{}, 0},
           Requests0),
-    State#{requests := Requests}.
+    InflightCalls = InflightCalls0 - Dropped,
+    pulsar_metrics:dropped_inc(State, Dropped),
+    pulsar_metrics:inflight_set(State, InflightCalls),
+    State#{requests := Requests, inflight_calls := InflightCalls}.
 
 is_batch_expired(_Timestamp, infinity = _RetentionPeriod, _Now) ->
     false;

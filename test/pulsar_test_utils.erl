@@ -21,14 +21,24 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
 
-%% is useful when iterating on the tests in a loop, to get rid of all
-%% the garbaged printed before the test itself beings.
+%% Useful when iterating on the tests in a loop, to get rid of all the garbaged printed
+%% before the test itself beings.
+%% Only actually does anything if the environment variable `CLEAR_SCREEN' is set to `true'
+%% and only clears the screen the screen the first time it's encountered, so it's harmless
+%% otherwise.
 clear_screen() ->
-    io:format(standard_io, "\033[H\033[2J", []),
-    io:format(standard_error, "\033[H\033[2J", []),
-    io:format(standard_io, "\033[H\033[3J", []),
-    io:format(standard_error, "\033[H\033[3J", []),
-    ok.
+    Key = {?MODULE, clear_screen},
+    case {os:getenv("CLEAR_SCREEN"), persistent_term:get(Key, false)} of
+        {"true", false} ->
+            io:format(standard_io, "\033[H\033[2J", []),
+            io:format(standard_error, "\033[H\033[2J", []),
+            io:format(standard_io, "\033[H\033[3J", []),
+            io:format(standard_error, "\033[H\033[3J", []),
+            persistent_term:put(Key, true),
+            ok;
+        _ ->
+            ok
+    end.
 
 populate_proxy(ProxyHost, ProxyPort, FakePulsarPort, PulsarUrl) ->
     {_, {PulsarHost, PulsarPort}} = pulsar_utils:parse_url(PulsarUrl),
@@ -122,3 +132,99 @@ producer_pids() ->
               {pulsar_producer, init, _} -> true;
               _ -> false
           end].
+
+get_latest_event(EventRecordTable, EventId) ->
+    case get_latest_events(EventRecordTable, EventId) of
+        [Last | _] ->
+            Last;
+        _ ->
+            none
+    end.
+
+get_latest_events(EventRecordTable, EventId) ->
+    case ets:lookup(EventRecordTable, EventId) of
+        [{_, Events}] ->
+            Events;
+        _ ->
+            []
+    end.
+
+get_current_counter(EventRecordTable, EventId) ->
+    lists:foldl(
+      fun({_, #{counter_inc := Delta}}, Acc) ->
+              Acc + Delta
+      end,
+      0,
+      get_latest_event(EventRecordTable, EventId)
+     ).
+
+handle_telemetry_event(
+    EventId,
+    MetricsData,
+    MetaData,
+    #{record_table := EventRecordTable}
+) ->
+    case EventRecordTable =/= none of
+        true ->
+            do_handle_telemetry_event(EventRecordTable, EventId, MetricsData, MetaData);
+        false ->
+            ok
+    end.
+
+do_handle_telemetry_event(EventRecordTable, EventId, MetricsData, MetaData) ->
+    try
+        PastEvents = case ets:lookup(EventRecordTable, EventId) of
+                         [] -> [];
+                         [{_EventId, PE}] -> PE
+                     end,
+        NewEventList = [ #{metrics_data => MetricsData,
+                           meta_data => MetaData} | PastEvents],
+        ets:insert(EventRecordTable, {EventId, NewEventList})
+    catch
+        error:badarg:Stacktrace ->
+            ct:pal("<<< error handling telemetry event >>>\n[event id]: ~p\n[metrics data]: ~p\n[meta data]: ~p\n\nStacktrace:\n  ~p\n",
+                   [EventId, MetricsData, MetaData, Stacktrace])
+    end.
+
+get_telemetry_seq(Table, EventId) ->
+    case ets:lookup(Table, EventId) of
+       [] -> [];
+       [{_, Events}] ->
+            lists:reverse(
+              [case Data of
+                   #{counter_inc := Val} ->
+                       Val;
+                   #{gauge_set := Val} ->
+                       Val;
+                   #{gauge_shift := Val} ->
+                       Val
+               end
+               || #{metrics_data := Data} <- Events])
+    end.
+
+telemetry_id() ->
+    <<"test-telemetry-handler">>.
+
+uninstall_event_logging() ->
+    telemetry:detach(telemetry_id()).
+
+install_event_logging() ->
+    EventsTable = ets:new(telemetry_events, [public]),
+    ok = application:ensure_started(telemetry),
+    telemetry:attach_many(
+        %% unique handler id
+        telemetry_id(),
+        telemetry_events(),
+        fun ?MODULE:handle_telemetry_event/4,
+        #{record_table => EventsTable}
+    ),
+    timer:sleep(100),
+    EventsTable.
+
+telemetry_events() ->
+    [
+      [pulsar, dropped],
+      [pulsar, queuing],
+      [pulsar, queuing_bytes],
+      [pulsar, inflight]
+    ].

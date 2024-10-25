@@ -113,3 +113,12 @@ with_mock(Mod, FnName, MockedFn, Fun) ->
     after
         ok = meck:unload(Mod)
     end.
+
+-spec producer_pids() -> [pid()].
+producer_pids() ->
+    [P || {_Name, PS, _Type, _Mods} <- supervisor:which_children(pulsar_producers_sup),
+          P <- element(2, process_info(PS, links)),
+          case proc_lib:initial_call(P) of
+              {pulsar_producer, init, _} -> true;
+              _ -> false
+          end].

@@ -1,3 +1,7 @@
+# 1.0.0
+
+- Removed support for hot upgrades.
+
 # 0.8.5
 
 ## Bug fixes

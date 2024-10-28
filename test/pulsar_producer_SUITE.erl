@@ -30,10 +30,7 @@
 %%--------------------------------------------------------------------
 
 all() ->
-    [ t_code_change_replayq
-    , t_code_change_requests
-    , t_state_rec_roundtrip
-    , t_queue_item_marshaller
+    [ t_queue_item_marshaller
     , t_port_exit
     ].
 
@@ -46,7 +43,6 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_testcase(TestCase, Config) when
-    TestCase =:= t_code_change_replayq;
     TestCase =:= t_port_exit
 ->
     PulsarHost = os:getenv("PULSAR_HOST", ?DEFAULT_PULSAR_HOST),
@@ -83,7 +79,6 @@ init_per_testcase(_TestCase, Config) ->
     Config.
 
 end_per_testcase(TestCase, Config) when
-    TestCase =:= t_code_change_replayq;
     TestCase =:= t_port_exit
 ->
     Producers = ?config(producers, Config),
@@ -111,158 +106,6 @@ drain_messages(ExpectedN, Acc) ->
 %%--------------------------------------------------------------------
 %% Testcases
 %%--------------------------------------------------------------------
-
-t_code_change_replayq(Config) ->
-    ProducerPid = ?config(producer_pid, Config),
-
-    %% wait producer to be connected for this test to avoid race
-    %% conditions with looking up topic...
-    pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
-
-    {_StatemState0, State0} = sys:get_state(ProducerPid),
-
-    ?assert(is_map(State0)),
-    ?assertMatch(
-       #{ replayq := #{ config := _
-                      , sizer := _
-                      , stats := _
-                      }
-        },
-       State0),
-    #{replayq := Q, opts := Opts0} = State0,
-    ?assertNot(replayq:is_mem_only(Q)),
-    ?assertMatch(#{retention_period := 1_000}, Opts0),
-    OriginalSize = map_size(State0),
-    %% FIXME: another way to check if open?
-    #{w_cur := #{fd := {_, _, #{pid := ReplayQPID}}}} = Q,
-
-    %% check downgrade has no replayq, and replayq is closed.
-    ct:pal("suspending producer"),
-    ok = sys:suspend(ProducerPid),
-    ExtraDown = #{from_version => {0, 7, 0}, to_version => {0, 6, 4}},
-    %% make some requests to downgrade
-    ct:pal("sending messages while suspended"),
-    Messages = [#{key => <<"key">>, value => <<"value">>}],
-    pulsar_producer:send(ProducerPid, Messages),
-    try
-        pulsar_producer:send_sync(ProducerPid, Messages, 1)
-    catch
-        error:timeout -> ok
-    end,
-    ct:pal("changing producer code (down)"),
-    ok = sys:change_code(ProducerPid, pulsar_producer, {down, unused_vsn}, ExtraDown),
-    %% ok = sys:resume(ProducerPid),
-    {_StatemState1, State1} = sys:get_state(ProducerPid),
-    ?assert(is_tuple(State1), #{state_after => State1}),
-    ?assertEqual(state, element(1, State1)),
-    %% state record has 1 element more (the record name), but also has
-    %% less fields (`replayq', `clientid', `lookup_topic_request_ref',
-    %% `parent_pid', `state_observer_callback').
-    ?assertEqual(OriginalSize, tuple_size(State1) + 4),
-    Opts1 = element(9, State1),
-    ?assertNot(maps:is_key(replayq, Opts1)),
-    ?assertNot(maps:is_key(retention_period, Opts1)),
-    %% replayq should be already closed
-    ?assertNot(is_process_alive(ReplayQPID)),
-
-    %% check upgrade has replayq and retention_period.
-    %% ok = sys:suspend(ProducerPid),
-    ExtraUp = #{from_version => {0, 6, 4}, to_version => {0, 7, 0}},
-    ct:pal("changing producer code (up)"),
-    ok = sys:change_code(ProducerPid, pulsar_producer, unused_vsn, ExtraUp),
-    ct:pal("resuming producer"),
-    ok = sys:resume(ProducerPid),
-    {_StatemState2, State2} = sys:get_state(ProducerPid),
-    ?assert(is_map(State2), #{state_after => State2}),
-    ?assertEqual(OriginalSize, map_size(State2)),
-
-    ?assertMatch(
-       #{ replayq := #{ config := _
-                      , sizer := _
-                      , stats := _
-                      }
-          %% cannot infer clientid...
-        , clientid := undefined
-        },
-       State2),
-    #{replayq := Q2, opts := Opts2} = State2,
-    ?assertMatch(#{retention_period := infinity}, Opts2),
-    %% new replayq is mem-only, since we can't configure it.
-    ?assert(replayq:is_mem_only(Q2)),
-
-    %% one sync, one async
-    ct:pal("waiting for messages..."),
-    drain_messages(_Expected = 2, _Acc = []),
-    %% assert that async callback was called only once
-    Counter = ?config(async_counter, Config),
-    ?assertEqual(1, counters:get(Counter, 1)),
-
-    ok.
-
-t_code_change_requests(_Config) ->
-    %% new format:
-    %% {replayq:ack_ref(), [gen_statem:from()], [{timestamp(), [pulsar:message()]}]}
-    SequenceId = 1,
-    AckRef = {1,1},
-    From0 = {self(), erlang:make_ref()},
-    From1 = undefined,
-    Timestamp0 = erlang:system_time(millisecond),
-    Messages0 = [#{key => <<"k1">>, value => <<"v1">>},
-                 #{key => <<"k2">>, value => <<"v2">>}],
-    Timestamp1 = erlang:system_time(millisecond),
-    Messages1 = [#{key => <<"k3">>, value => <<"v3">>}],
-    FromsToMessages = [{From0, {Timestamp0, Messages0}},
-                       {From1, {Timestamp1, Messages1}}],
-    Request = {inflight_req, AckRef, FromsToMessages},
-    Requests0 = #{SequenceId => Request},
-
-    Requests1 = pulsar_producer:code_change_requests_down(Requests0),
-    %% old format
-    ExpectedBatchLen = length(Messages0 ++ Messages1),
-    ?assertEqual(#{SequenceId => {SequenceId, ExpectedBatchLen}}, Requests1),
-
-    ok.
-
-t_state_rec_roundtrip(_Config) ->
-    StateMap =
-        maps:from_list([{K, erlang:make_ref()}
-                        || K <- [ batch_size
-                                , broker_server
-                                , callback
-                                , clientid
-                                , last_bin
-                                , lookup_topic_request_ref
-                                , opts
-                                , parent_pid
-                                , partitiontopic
-                                , producer_id
-                                , producer_name
-                                , request_id
-                                , requests
-                                , sequence_id
-                                , state_observer_callback
-                                , sock
-                                ]]),
-    %% `clientid', `lookup_topic_request_ref', `parent_pid' are not preserved
-    ?assertEqual(StateMap#{ clientid := undefined
-                          , lookup_topic_request_ref := undefined
-                          , parent_pid := undefined
-                          , state_observer_callback := undefined
-                          },
-                 pulsar_producer:from_old_state_record(
-                   pulsar_producer:to_old_state_record(StateMap))),
-
-    %% pulsar 0.5.x had the `opts' as a proplist instead of a map...
-    StateMap1 = StateMap#{opts => [{sndbuf,1048576}]},
-    ?assertEqual(StateMap1#{ clientid := undefined
-                           , lookup_topic_request_ref := undefined
-                           , opts => #{sndbuf => 1048576}
-                           , parent_pid => undefined
-                          , state_observer_callback := undefined
-                           },
-                 pulsar_producer:from_old_state_record(
-                   pulsar_producer:to_old_state_record(StateMap1))),
-    ok.
 
 t_queue_item_marshaller(_Config) ->
     Pid = spawn_link(

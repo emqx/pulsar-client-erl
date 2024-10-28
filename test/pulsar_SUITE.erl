@@ -1173,7 +1173,7 @@ t_producers_all_connected(Config) ->
                         Topic,
                         ProducerOpts),
     ct:pal("started producers"),
-    ProducerPids = pulsar_relup:producer_pids(),
+    ProducerPids = pulsar_test_utils:producer_pids(),
     lists:foreach(
      fun(ProducerPid) ->
        pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000)

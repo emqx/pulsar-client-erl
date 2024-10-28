@@ -37,7 +37,6 @@
 -export([ callback_mode/0
         , init/1
         , terminate/3
-        , code_change/4
         , format_status/1
         , format_status/2
         ]).
@@ -49,11 +48,7 @@
 
 %% for testing only
 -ifdef(TEST).
--export([ code_change_requests_down/1
-        , from_old_state_record/1
-        , to_old_state_record/1
-        , make_queue_item/2
-        ]).
+-export([make_queue_item/2]).
 -endif.
 
 -type statem() :: idle | connecting | connected.
@@ -115,8 +110,6 @@
                    batch_size := non_neg_integer(),
                    broker_server := {binary(), pos_integer()},
                    callback := undefined | mfa() | fun((map()) -> ok),
-                   %% Note: clientid might be undefined if
-                   %% hot-upgraded from version without it.
                    clientid := atom(),
                    last_bin := binary(),
                    lookup_topic_request_ref := reference() | undefined,
@@ -125,6 +118,7 @@
                    partitiontopic := string(),
                    producer_id := integer(),
                    producer_name := atom(),
+                   proxy_to_broker_url := undefined | string(),
                    replayq := replayq:q(),
                    request_id := integer(),
                    requests := #{sequence_id() =>
@@ -253,6 +247,7 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
         partitiontopic => PartitionTopic,
         producer_id => ProducerID,
         producer_name => maps:get(producer_name, ProducerOpts, pulsar_producer),
+        proxy_to_broker_url => ProxyToBrokerUrl,
         replayq => Q,
         request_id => 1,
         requests => #{},
@@ -260,8 +255,6 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
         state_observer_callback => StateObserverCallback,
         sock => undefined
     },
-    %% use process dict to avoid the trouble of relup
-    put(proxy_to_broker_url, ProxyToBrokerUrl),
     {ok, idle, State, [{next_event, internal, do_connect}]}.
 
 %% idle state
@@ -279,21 +272,10 @@ idle(state_timeout, lookup_topic_timeout, State0) ->
     log_error("timed out waiting for lookup topic response", [], State0),
     State = State0#{lookup_topic_request_ref := undefined},
     ?NEXT_STATE_IDLE_RECONNECT(State);
-idle({call, From}, {send, Messages}, State0) ->
-    %% for race conditions when upgrading from previous versions only
-    SendRequest = ?SEND_REQ(From, Messages),
-    State = enqueue_send_requests([SendRequest], State0),
-    {keep_state, State};
 idle({call, From}, get_state, _State) ->
     {keep_state_and_data, [{reply, From, ?FUNCTION_NAME}]};
 idle({call, From}, _EventContent, _State) ->
     {keep_state_and_data, [{reply, From, {error, unknown_call}}]};
-idle(cast, {send, Messages}, State0) ->
-    %% for race conditions when upgrading from previous versions only
-    From = undefined,
-    SendRequest = ?SEND_REQ(From, Messages),
-    State = enqueue_send_requests([SendRequest], State0),
-    {keep_state, State};
 idle(cast, _EventContent, _State) ->
     keep_state_and_data;
 idle(info, ?SEND_REQ(_, _) = SendRequest, State0) ->
@@ -354,21 +336,10 @@ connecting(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
 connecting(info, Msg, State) ->
     log_info("[connecting] unknown message received ~p~n  ~p", [Msg, State], State),
     keep_state_and_data;
-connecting({call, From}, {send, Messages}, State0) ->
-    %% for race conditions when upgrading from previous versions only
-    SendRequest = ?SEND_REQ(From, Messages),
-    State = enqueue_send_requests([SendRequest], State0),
-    {keep_state, State};
 connecting({call, From}, get_state, _State) ->
     {keep_state_and_data, [{reply, From, ?FUNCTION_NAME}]};
 connecting({call, From}, _EventContent, _State) ->
     {keep_state_and_data, [{reply, From, {error, unknown_call}}]};
-connecting(cast, {send, Messages}, State0) ->
-    %% for race conditions when upgrading from previous versions only
-    From = undefined,
-    SendRequest = ?SEND_REQ(From, Messages),
-    State = enqueue_send_requests([SendRequest], State0),
-    {keep_state, State};
 connecting(cast, _EventContent, _State) ->
    keep_state_and_data.
 
@@ -419,21 +390,10 @@ connected(_EventType, {Inet, _, Bin}, State = #{last_bin := LastBin})
 connected(_EventType, ping, State = #{sock := Sock, opts := Opts}) ->
     ?POORMAN(Sock, pulsar_socket:ping(Sock, Opts)),
     {keep_state, State};
-connected({call, From}, {send, Messages}, State) ->
-    %% for race conditions when upgrading from previous versions only
-    SendRequest = ?SEND_REQ(From, Messages),
-    self() ! SendRequest,
-    {keep_state, State};
 connected({call, From}, get_state, _State) ->
     {keep_state_and_data, [{reply, From, ?FUNCTION_NAME}]};
 connected({call, From}, _EventContent, _State) ->
     {keep_state_and_data, [{reply, From, {error, unknown_call}}]};
-connected(cast, {send, Messages}, State) ->
-    %% for race conditions when upgrading from previous versions only
-    From = undefined,
-    SendRequest = ?SEND_REQ(From, Messages),
-    self() ! SendRequest,
-    {keep_state, State};
 connected(cast, _EventContent, _State) ->
     keep_state_and_data;
 connected(_EventType, EventContent, State) ->
@@ -443,16 +403,7 @@ handle_socket_close(StateName, Sock, Reason, #{sock := Sock} = State) ->
     ?tp("pulsar_socket_close", #{sock => Sock, reason => Reason}),
     log_error("connection_closed at_state: ~p, reason: ~p", [StateName, Reason], State),
     try_close_socket(State),
-    %% NOTE: after hot-upgrade from version where clientid is
-    %% undefined, we cannot try to reconnect: we need to lookup the
-    %% broker URL again, and `pulsar_client' does that.  We just stop
-    %% and let `pulsar_producers' restart this producer.
-    case maps:get(clientid, State, undefined) of
-        undefined ->
-            {stop, {error, no_clientid}};
-        _ ->
-            ?NEXT_STATE_IDLE_RECONNECT(State)
-    end;
+    ?NEXT_STATE_IDLE_RECONNECT(State);
 handle_socket_close(_StateName, _Sock, _Reason, _State) ->
     %% stale close event
     keep_state_and_data.
@@ -484,10 +435,14 @@ refresh_urls_and_connect(State0) ->
     end.
 
 -spec do_connect(state()) -> handler_result().
-do_connect(State = #{opts := Opts, broker_server := {Host, Port}}) ->
+do_connect(State) ->
+    #{ broker_server := {Host, Port}
+     , opts := Opts
+     , proxy_to_broker_url := ProxyToBrokerUrl
+     } = State,
     try pulsar_socket:connect(Host, Port, Opts) of
         {ok, Sock} ->
-            Opts1 = pulsar_utils:maybe_add_proxy_to_broker_url_opts(Opts, erlang:get(proxy_to_broker_url)),
+            Opts1 = pulsar_utils:maybe_add_proxy_to_broker_url_opts(Opts, ProxyToBrokerUrl),
             ?POORMAN(Sock, pulsar_socket:send_connect_packet(Sock, Opts1)),
             {next_state, connecting, State#{sock := Sock}};
         {error, Reason} ->
@@ -519,41 +474,6 @@ censor_secrets(Data0 = #{opts := Opts0 = #{conn_opts := ConnOpts0 = #{auth_data 
     Data0#{opts := Opts0#{conn_opts := ConnOpts0#{auth_data := "******"}}};
 censor_secrets(Data) ->
     Data.
-
-code_change({down, _ToVsn}, State, Data, Extra) when is_map(Data) ->
-    #{to_version := ToVsn} = Extra,
-    case pulsar_relup:is_before_replayq(ToVsn) of
-        true ->
-            do_code_change_down_replayq(State, Data, Extra);
-        false ->
-            {ok, State, Data}
-    end;
-code_change({down, _Vsn}, State, Data, _Extra) ->
-    {ok, State, Data};
-code_change(_ToVsn, State, DataRec, Extra) when is_tuple(DataRec) ->
-    #{to_version := ToVsn} = Extra,
-    case pulsar_relup:is_before_replayq(ToVsn) of
-        true ->
-            {ok, State, DataRec};
-        false ->
-            do_code_change_up_replayq(State, DataRec, Extra)
-    end;
-code_change(_ToVsn, State, Data, _Extra) ->
-    {ok, State, Data}.
-
-do_code_change_down_replayq(State, Data0, _Extra) ->
-    downgrade_buffered_send_requests(Data0),
-    Data1 = ensure_replayq_absent(Data0),
-    Requests0 = maps:get(requests, Data0),
-    Requests = code_change_requests_down(Requests0),
-    DataMap = Data1#{requests := Requests},
-    DataRec = to_old_state_record(DataMap),
-    {ok, State, DataRec}.
-
-do_code_change_up_replayq(State, DataRec, _Extra) ->
-    Data0 = from_old_state_record(DataRec),
-    Data = ensure_replayq_present(Data0),
-    {ok, State, Data}.
 
 terminate(_Reason, _StateName, _State = #{replayq := Q}) ->
     ok = replayq:close(Q),
@@ -592,21 +512,11 @@ handle_response({pong, #{}}, _State) ->
 handle_response({ping, #{}}, #{sock := Sock, opts := Opts}) ->
     ?POORMAN(Sock, pulsar_socket:pong(Sock, Opts)),
     keep_state_and_data;
-handle_response({close_producer, #{}}, State = #{ clientid := ClientId
-                                                , partitiontopic := Topic
+handle_response({close_producer, #{}}, State = #{ partitiontopic := Topic
                                                 }) ->
     log_error("Close producer: ~p~n", [Topic], State),
     try_close_socket(State),
-    %% NOTE: after hot-upgrade from version where clientid is
-    %% undefined, we cannot try to reconnect: we need to lookup the
-    %% broker URL again, and `pulsar_client' does that.  We just stop
-    %% and let `pulsar_producers' restart this producer.
-    case ClientId of
-        undefined ->
-            {stop, {error, no_clientid}};
-        _ ->
-            ?NEXT_STATE_IDLE_RECONNECT(State)
-    end;
+    ?NEXT_STATE_IDLE_RECONNECT(State);
 handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
                 State = #{callback := Callback, requests := Reqs,
                           replayq := Q}) ->
@@ -615,24 +525,6 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
         undefined ->
             _ = invoke_callback(Callback, {ok, Resp}),
             {keep_state, State};
-        %% impossible case!?!??
-        %% SequenceId ->
-        %%     _ = invoke_callback(Callback, {ok, Resp}),
-        %%     {keep_state, State#state{requests = maps:remove(SequenceId, Reqs)}};
-
-        %% State transferred from hot-upgrade; it doesn't have enough
-        %% info to migrate to the new format.
-        {SequenceId, BatchLen} ->
-            _ = invoke_callback(Callback, {ok, Resp}, BatchLen),
-            {keep_state, State#{requests := maps:remove(SequenceId, Reqs)}};
-        %% State transferred from hot-upgrade; it doesn't have enough
-        %% info to migrate to the new format.
-        {_FromPID, _Alias} = OldFrom ->
-            gen_statem:reply(OldFrom, {ok, Resp}),
-            {keep_state, State#{requests := maps:remove(SequenceId, Reqs)}};
-        Messages when is_list(Messages) ->
-            %% handle upgrade from version 0.5
-            {keep_state, State#{requests := maps:remove(SequenceId, Reqs)}};
         ?INFLIGHT_REQ(QAckRef, FromsToMessages) ->
             ok = replayq:ack(Q, QAckRef),
             lists:foreach(
@@ -651,19 +543,10 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}},
               FromsToMessages),
             {keep_state, State#{requests := maps:remove(SequenceId, Reqs)}}
     end;
-handle_response({error, #{error := Error, message := Msg}}, State = #{clientid := ClientId}) ->
+handle_response({error, #{error := Error, message := Msg}}, State) ->
     log_error("Response error:~p, msg:~p~n", [Error, Msg], State),
     try_close_socket(State),
-    %% NOTE: after hot-upgrade from version where clientid is
-    %% undefined, we cannot try to reconnect: we need to lookup the
-    %% broker URL again, and `pulsar_client' does that.  We just stop
-    %% and let `pulsar_producers' restart this producer.
-    case ClientId of
-        undefined ->
-            {stop, {error, no_clientid}};
-        _ ->
-            ?NEXT_STATE_IDLE_RECONNECT(State)
-    end;
+    ?NEXT_STATE_IDLE_RECONNECT(State);
 handle_response(Msg, State) ->
     log_error("Receive unknown message:~p~n", [Msg], State),
     keep_state_and_data.
@@ -979,12 +862,7 @@ resend_sent_requests(State) ->
                                                   Msg <- Msgs],
                                           SequenceId, State),
                        Acc#{SequenceId => ?INFLIGHT_REQ(QAckRef, Messages)}
-               end;
-             (SequenceId, Req = {_SequenceId1, _BatchLen}, Acc) ->
-               %% this clause is when one hot-upgrades from a version
-               %% without replayq.  we don't have enough info to
-               %% resend nor expire.
-               Acc#{SequenceId => Req}
+               end
           end,
           #{},
           Requests0),
@@ -994,115 +872,6 @@ is_batch_expired(_Timestamp, infinity = _RetentionPeriod, _Now) ->
     false;
 is_batch_expired(Timestamp, RetentionPeriod, Now) ->
     Timestamp =< Now - RetentionPeriod.
-
--spec ensure_replayq_present(map()) -> state().
-ensure_replayq_present(Data = #{opts := ProducerOpts0}) ->
-    RetentionPeriod = maps:get(retention_period, ProducerOpts0, infinity),
-    MaxTotalBytes = maps:get(replayq_max_total_bytes, ProducerOpts0, ?DEFAULT_REPLAYQ_LIMIT),
-    ReplayqCfg = #{ mem_only => true
-                  , sizer => fun ?MODULE:queue_item_sizer/1
-                  , marshaller => fun ?MODULE:queue_item_marshaller/1
-                  , max_total_bytes => MaxTotalBytes
-                  },
-    Q = replayq:open(ReplayqCfg),
-    ProducerOpts = ProducerOpts0#{retention_period => RetentionPeriod},
-    Data#{opts := ProducerOpts, replayq => Q}.
-
--spec ensure_replayq_absent(state()) -> map().
-ensure_replayq_absent(Data0) ->
-    Data = case maps:take(replayq, Data0) of
-        {Q, Data1 = #{opts := ProducerOpts0}} ->
-            _ = replayq:close(Q),
-            ProducerOpts = maps:without([retention_period, replayq], ProducerOpts0),
-            Data1#{opts := ProducerOpts};
-        error ->
-            Data0
-    end,
-    Data.
-
-code_change_requests_down(Requests) ->
-    maps:map(
-      fun(SequenceId, ?INFLIGHT_REQ(_QAckRef, FromsToMessages)) ->
-        lists:foldl(
-         fun({_From, {_Ts, Messages}}, {_SequenceId, BatchLen}) ->
-           {SequenceId, BatchLen + length(Messages)}
-         end,
-         {SequenceId, 0},
-         FromsToMessages)
-      end,
-      Requests).
-
-%% when downgrading to a previous version before replayq, there may be
-%% some `?SEND_REQ' messages in the mailbox that'll be unknown to the
-%% old code.  We attempt to convert them to call/casts to avoid losing
-%% them.  Calls might still be lost if the downgrade + processing the
-%% message afterwards takes longer than the call timeout.
-downgrade_buffered_send_requests(#{replayq := Q}) ->
-    {NewQ, QAckRef, BufferedItems} = replayq:pop(Q, #{count_limit => 10_000}),
-    replayq:ack(NewQ, QAckRef),
-    lists:foreach(
-      fun(?Q_ITEM(_From = undefined, _Timestamp, Messages)) ->
-              self() ! {'$gen_cast', {send, Messages}};
-         (?Q_ITEM(From, _Timestamp, Messages)) ->
-              self() ! {'$gen_call', From, {send, Messages}}
-      end,
-      BufferedItems).
-
-%% -record(state, {partitiontopic,
-%%                 broker_server,
-%%                 sock,
-%%                 request_id = 1,
-%%                 producer_id = 1,
-%%                 sequence_id = 1,
-%%                 producer_name,
-%%                 opts = #{},
-%%                 callback,
-%%                 batch_size = 0,
-%%                 requests = #{},
-%%                 last_bin = <<>>}).
-to_old_state_record(StateMap = #{}) ->
-    { state
-    , maps:get(partitiontopic, StateMap)
-    , maps:get(broker_server, StateMap)
-    , maps:get(sock, StateMap)
-    , maps:get(request_id, StateMap)
-    , maps:get(producer_id, StateMap)
-    , maps:get(sequence_id, StateMap)
-    , maps:get(producer_name, StateMap)
-    , maps:get(opts, StateMap)
-    , maps:get(callback, StateMap)
-    , maps:get(batch_size, StateMap)
-    , maps:get(requests, StateMap)
-    , maps:get(last_bin, StateMap)
-    }.
-
-from_old_state_record(StateRec) ->
-    Opts = case element(9, StateRec) of
-               List when is_list(List) ->
-                   maps:from_list(List);
-               Map ->
-                   Map
-           end,
-    #{ partitiontopic => element(2, StateRec)
-     , broker_server => element(3, StateRec)
-       %% cannot infer the clientid here...
-     , clientid => undefined
-     , sock => element(4, StateRec)
-     , request_id => element(5, StateRec)
-       %% cannot infer the parent pid here...
-     , parent_pid => undefined
-     , producer_id => element(6, StateRec)
-     , sequence_id => element(7, StateRec)
-     , producer_name => element(8, StateRec)
-     , state_observer_callback => undefined
-     , opts => Opts
-     , callback => element(10, StateRec)
-     , batch_size => element(11, StateRec)
-     , requests => element(12, StateRec)
-     , last_bin => element(13, StateRec)
-       %% new logic and field
-     , lookup_topic_request_ref => undefined
-     }.
 
 -spec escape(string()) -> binary().
 escape(Str) ->
@@ -1143,7 +912,9 @@ handle_lookup_topic_reply({ok, #{ proxy_through_service_url := false
                                 , brokerServiceUrl := NewBrokerServiceURL
                                 }},
                          State) ->
-    log_debug("received topic lookup reply: ~0p", [#{proxy_through_service_url => false, broker_service_url => NewBrokerServiceURL}], State),
+    log_debug("received topic lookup reply: ~0p",
+              [#{proxy_through_service_url => false,
+                 broker_service_url => NewBrokerServiceURL}], State),
     maybe_connect(#{ alive_pulsar_url => NewBrokerServiceURL
                    , broker_service_url => undefined
                    }, State).
@@ -1154,12 +925,15 @@ handle_lookup_topic_reply({ok, #{ proxy_through_service_url := false
 maybe_connect(#{ broker_service_url := NewBrokerServiceURL
                , alive_pulsar_url := AlivePulsarURL
                }, State0) ->
-    #{broker_server := OldBrokerServer} = State0,
-    OldBrokerServiceURL = get(proxy_to_broker_url),
+    #{ broker_server := OldBrokerServer
+     , proxy_to_broker_url := OldBrokerServiceURL
+     } = State0,
     {_Transport, NewBrokerServer} = pulsar_utils:parse_url(AlivePulsarURL),
     case {OldBrokerServer, OldBrokerServiceURL} =:= {NewBrokerServer, NewBrokerServiceURL} of
         true ->
-            log_debug("connecting to ~0p", [#{broker_server => NewBrokerServer, service_url => NewBrokerServiceURL}], State0),
+            log_debug("connecting to ~0p",
+                      [#{broker_server => NewBrokerServer,
+                         service_url => NewBrokerServiceURL}], State0),
             do_connect(State0);
         false ->
             %% broker changed; reconnect.
@@ -1173,8 +947,10 @@ maybe_connect(#{ broker_service_url := NewBrokerServiceURL
                       ],
                       State0),
             try_close_socket(State0),
-            State = State0#{broker_server := NewBrokerServer},
-            put(proxy_to_broker_url, NewBrokerServiceURL),
+            State = State0#{
+                broker_server := NewBrokerServer,
+                proxy_to_broker_url := NewBrokerServiceURL
+            },
             ?NEXT_STATE_IDLE_RECONNECT(State)
     end.
 

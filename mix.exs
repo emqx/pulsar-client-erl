@@ -25,6 +25,7 @@ defmodule PulsarClientErl.MixProject do
       {:snappyer, github: "emqx/snappyer", tag: "1.2.5"},
       {:replayq, github: "emqx/replayq", tag: "0.3.9"},
       {:snabbkaffe, github: "kafka4beam/snabbkaffe", tag: "1.0.10"},
+      {:telemetry, "1.3.0"},
       {:redbug, "~> 2.0", only: [:test, :dev]}
     ]
   end

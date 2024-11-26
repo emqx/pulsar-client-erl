@@ -40,7 +40,15 @@
 
 -export([try_initial_connection/3]).
 
--record(state, {sock, servers, opts, producers = #{}, request_id = 0, requests = #{}, from, last_bin = <<>>}).
+-record(state, { sock
+               , servers
+               , opts
+               , producers = #{}
+               , request_id = 0
+               , requests = #{}
+               , from
+               , last_bin = <<>>
+               }).
 
 -export_type([lookup_topic_response/0]).
 -type lookup_topic_response() :: {ok, #{ brokerServiceUrl => string()
@@ -141,7 +149,7 @@ do_contains_authn_error(Iter) ->
             false
     end.
 
-handle_call({get_topic_metadata, Topic, Call}, From,
+handle_call({get_topic_metadata, Topic, ProducerPid}, From,
         State = #state{
             sock = Sock,
             opts = Opts,
@@ -159,32 +167,13 @@ handle_call({get_topic_metadata, Topic, Call}, From,
             pulsar_socket:send_topic_metadata_packet(Sock1, Topic, RequestId, Opts1),
             {noreply, next_request_id(State#state{
                 requests = maps:put(RequestId, {From, Topic}, Reqs),
-                producers = maps:put(Topic, Call, Producers),
+                producers = maps:put(Topic, ProducerPid, Producers),
                 sock = Sock1,
                 opts = Opts1
             })}
     end;
-handle_call({lookup_topic, Topic}, From,
-        State = #state{
-            sock = Sock,
-            opts = Opts,
-            request_id = RequestId,
-            requests = Reqs,
-            servers = Servers
-        }) ->
-    case get_alive_sock_opts(Servers, Sock, Opts) of
-        {error, Reason} ->
-            log_error("lookup_topic from pulsar failed: ~p down", [Reason]),
-            start_reconnect_timer(),
-            {reply, {error, no_servers_available}, State};
-        {ok, {Sock1, Opts1}} ->
-            pulsar_socket:send_lookup_topic_packet(Sock1, Topic, RequestId, Opts1),
-            {noreply, next_request_id(State#state{
-                requests = maps:put(RequestId, {From, Topic}, Reqs),
-                sock = Sock1,
-                opts = Opts1
-            })}
-    end;
+handle_call({lookup_topic, Topic}, From, State) ->
+    handle_lookup_topic_request(State, From, Topic);
 handle_call(get_status, From, State = #state{sock = undefined, opts = Opts, servers = Servers}) ->
     case get_alive_sock_opts(Servers, undefined, Opts) of
         {error, Reason} ->
@@ -322,22 +311,20 @@ handle_response({lookupTopicResponse, #{error := Reason, message := Msg,
         undefined ->
             State
     end;
+handle_response({lookupTopicResponse, #{request_id := RequestId, response := 'Redirect'} = Response},
+                #state{requests = Reqs0} = State0) ->
+    case maps:take(RequestId, Reqs0) of
+        {{From, Topic}, Reqs} ->
+            State = State0#state{requests = Reqs},
+            handle_lookup_redirect_response(State, From, Topic, Response);
+        error ->
+            State0
+    end;
 handle_response({lookupTopicResponse, #{request_id := RequestId} = Response},
                 State = #state{requests = Reqs, opts = Opts}) ->
     case maps:get(RequestId, Reqs, undefined) of
         {From, _} ->
-            ServiceURL =
-                case {Opts, Response} of
-                    {#{enable_ssl := true}, #{brokerServiceUrlTls := BrokerServiceUrlTls}} ->
-                        BrokerServiceUrlTls;
-                    {#{enable_ssl := true}, #{brokerServiceUrl := BrokerServiceUrl}} ->
-                        log_error("SSL enabled but brokerServiceUrlTls is not provided by pulsar,"
-                                  " falling back to brokerServiceUrl: ~p", [BrokerServiceUrl]),
-                        BrokerServiceUrl;
-                    {_, #{brokerServiceUrl := BrokerServiceUrl}} ->
-                        %% the 'brokerServiceUrl' is a mandatory field in case the SSL is disabled
-                        BrokerServiceUrl
-                end,
+            ServiceURL = resolve_returned_lookup_topic_service_url(Opts, Response),
             gen_server:reply(From, {ok,
                 #{ brokerServiceUrl => ServiceURL
                  , proxy_through_service_url => maps:get(proxy_through_service_url, Response, false)
@@ -467,3 +454,62 @@ try_initial_connection(Parent, Servers, Opts) ->
             pulsar_socket:controlling_process(Sock, Parent, Opts1),
             Parent ! {self(), {ok, {Sock, Opts1}}}
     end.
+
+resolve_returned_lookup_topic_service_url(Opts, LookupTopicResponse) ->
+    case {Opts, LookupTopicResponse} of
+        {#{enable_ssl := true}, #{brokerServiceUrlTls := BrokerServiceUrlTls}} ->
+            BrokerServiceUrlTls;
+        {#{enable_ssl := true}, #{brokerServiceUrl := BrokerServiceUrl}} ->
+            log_error("SSL enabled but brokerServiceUrlTls is not provided by pulsar,"
+                      " falling back to brokerServiceUrl: ~p", [BrokerServiceUrl]),
+            BrokerServiceUrl;
+        {_, #{brokerServiceUrl := BrokerServiceUrl}} ->
+            %% the 'brokerServiceUrl' is a mandatory field in case the SSL is disabled
+            BrokerServiceUrl
+    end.
+
+handle_lookup_topic_request(State0, From, Topic) ->
+    #state{
+       sock = Sock0,
+       opts = Opts0,
+       request_id = RequestId,
+       requests = Reqs,
+       servers = Servers
+      } = State0,
+    case get_alive_sock_opts(Servers, Sock0, Opts0) of
+        {error, Reason} ->
+            log_error("lookup_topic from pulsar failed: ~p down", [Reason]),
+            start_reconnect_timer(),
+            {reply, {error, no_servers_available}, State0};
+        {ok, {Sock, Opts}} ->
+            pulsar_socket:send_lookup_topic_packet(Sock, Topic, RequestId, Opts),
+            State = State0#state{
+                requests = maps:put(RequestId, {From, Topic}, Reqs),
+                sock = Sock,
+                opts = Opts
+            },
+            {noreply, next_request_id(State)}
+    end.
+
+handle_lookup_redirect_response(State0, From, Topic, Response) ->
+    %% If the returned lookup type is a redirect, we must re-issue the lookup connecting
+    %% to the returned broker endpoint.
+    #state{
+       servers = Servers0,
+       sock = Sock,
+       opts = Opts
+      } = State0,
+    ServiceURL = resolve_returned_lookup_topic_service_url(Opts, Response),
+    case Sock of
+        undefined ->
+            %% shouldn't happen if we've just received a response...
+            ok;
+        _ ->
+            _ = pulsar_socket:close(Sock, Opts),
+            ok
+    end,
+    %% Attempt to connect to the returned broker
+    Servers1 = Servers0 -- [ServiceURL],
+    Servers = [ServiceURL | Servers1],
+    State = State0#state{sock = undefined, servers = Servers},
+    handle_lookup_topic_request(State, From, Topic).

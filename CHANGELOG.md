@@ -1,3 +1,10 @@
+# 1.1.0
+
+- Fixed handling of `Redirect` lookup type in `CommandLookupTopicResponse`.  Previously,
+  the broker service URL that was returned was interpreted by the producer as the broker
+  to connect to instead of the client re-issuing the lookup command to the new broker
+  endpoint.
+
 # 1.0.0
 
 - Removed support for hot upgrades.

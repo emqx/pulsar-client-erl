@@ -87,25 +87,19 @@ handle_cast(_Cast, State) ->
     {noreply, State}.
 
 handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
-    case pulsar_client_sup:find_client(ClientId) of
-        {ok, Pid} ->
-            case pulsar_client:get_topic_metadata(Pid, Topic) of
-                {ok, {_, Partitions}} ->
-                    PartitionTopics = create_partition_topic(Topic, Partitions),
-                    NewState = lists:foldl(
-                        fun(PartitionTopic, CurrentState) ->
-                            start_consumer(Pid, PartitionTopic, CurrentState)
-                        end,
-                        State, PartitionTopics),
-                    {noreply, NewState#state{partitions = length(PartitionTopics)}};
-                {error, Reason} ->
-                    log_error("get topic metatdata failed: ~p", [Reason]),
-                    {stop, {shutdown, Reason}, State}
-            end;
+    case pulsar_client:get_topic_metadata(ClientId, Topic) of
+        {ok, {_, Partitions}} ->
+            PartitionTopics = create_partition_topic(Topic, Partitions),
+            NewState = lists:foldl(
+                fun(PartitionTopic, CurrentState) ->
+                    start_consumer(ClientId, PartitionTopic, CurrentState)
+                end,
+                State, PartitionTopics),
+            {noreply, NewState#state{partitions = length(PartitionTopics)}};
         {error, Reason} ->
+            log_error("get topic metatdata failed: ~p", [Reason]),
             {stop, {shutdown, Reason}, State}
     end;
-
 handle_info({'EXIT', Pid, _Error}, State = #state{consumers = Consumers}) ->
     case maps:get(Pid, Consumers, undefined) of
         undefined ->
@@ -115,15 +109,8 @@ handle_info({'EXIT', Pid, _Error}, State = #state{consumers = Consumers}) ->
             restart_producer_later(PartitionTopic),
             {noreply, State#state{consumers = maps:remove(Pid, Consumers)}}
     end;
-
 handle_info({restart_consumer, PartitionTopic}, State = #state{client_id = ClientId}) ->
-    case pulsar_client_sup:find_client(ClientId) of
-        {ok, Pid} ->
-            {noreply, start_consumer(Pid, PartitionTopic, State)};
-        {error, Reason} ->
-            {stop, {shutdown, Reason}, State}
-    end;
-
+    {noreply, start_consumer(ClientId, PartitionTopic, State)};
 handle_info(_Info, State) ->
     log_error("Receive unknown message:~p~n", [_Info]),
     {noreply, State}.
@@ -179,12 +166,12 @@ log_error(Fmt, Args) ->
 do_log(Level, Fmt, Args) ->
     logger:log(Level, Fmt, Args, #{domain => [pulsar, consumers]}).
 
-start_consumer(Pid, PartitionTopic, #state{consumer_opts = ConsumerOpts} = State) ->
+start_consumer(ClientId, PartitionTopic, #state{consumer_opts = ConsumerOpts} = State) ->
     try
         {ok, #{ brokerServiceUrl := BrokerServiceURL
               , proxy_through_service_url := IsProxy
               }} =
-            pulsar_client:lookup_topic(Pid, PartitionTopic),
+            pulsar_client:lookup_topic(ClientId, PartitionTopic),
         {MaxConsumerMum, ConsumerOpts1} = case maps:take(max_consumer_num, ConsumerOpts) of
             error -> {1, ConsumerOpts};
             Res -> Res
@@ -196,7 +183,7 @@ start_consumer(Pid, PartitionTopic, #state{consumer_opts = ConsumerOpts} = State
                     false ->
                         {BrokerServiceURL, undefined};
                     true ->
-                        {ok, URL} = pulsar_client:get_alive_pulsar_url(Pid),
+                        {ok, URL} = pulsar_client:get_alive_pulsar_url(ClientId),
                         {URL, BrokerServiceURL}
                 end,
                 {ok, Consumer} =

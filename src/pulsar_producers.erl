@@ -159,24 +159,19 @@ handle_cast(_Cast, State) ->
     {noreply, State}.
 
 handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
-    case pulsar_client_sup:find_client(ClientId) of
-        {ok, Pid} ->
-            case pulsar_client:get_topic_metadata(Pid, Topic) of
-                {ok, {_, Partitions}} ->
-                    PartitionTopics = create_partition_topic(Topic, Partitions),
-                    NewState = lists:foldl(
-                        fun({PartitionTopic, Partition}, CurrentState) ->
-                            start_producer(Pid, Partition, PartitionTopic, CurrentState)
-                        end,
-                        State,
-                        PartitionTopics),
-                    {noreply, NewState#state{partitions = length(PartitionTopics)}};
-                {error, Reason} ->
-                    log_error("get topic metatdata failed: ~p", [Reason]),
-                    {stop, {failed_to_get_metadata, Reason}, State}
-            end;
+    case pulsar_client:get_topic_metadata(ClientId, Topic) of
+        {ok, {_, Partitions}} ->
+            PartitionTopics = create_partition_topic(Topic, Partitions),
+            NewState = lists:foldl(
+               fun({PartitionTopic, Partition}, CurrentState) ->
+                 start_producer(ClientId, Partition, PartitionTopic, CurrentState)
+               end,
+               State,
+               PartitionTopics),
+            {noreply, NewState#state{partitions = length(PartitionTopics)}};
         {error, Reason} ->
-            {stop, {client_not_found, Reason}, State}
+            log_error("get topic metatdata failed: ~p", [Reason]),
+            {stop, {failed_to_get_metadata, Reason}, State}
     end;
 handle_info({'EXIT', Pid, Error}, State = #state{workers = Workers, producers = Producers}) ->
     log_error("Received EXIT from ~p, error: ~p", [Pid, Error]),
@@ -191,12 +186,7 @@ handle_info({'EXIT', Pid, Error}, State = #state{workers = Workers, producers = 
             {noreply, State#state{producers = maps:remove(Pid, Producers)}}
     end;
 handle_info({restart_producer, Partition, PartitionTopic}, State = #state{client_id = ClientId}) ->
-    case pulsar_client_sup:find_client(ClientId) of
-        {ok, Pid} ->
-            {noreply, start_producer(Pid, Partition, PartitionTopic, State)};
-        {error, Reason} ->
-            {stop, {client_not_found, Reason}, State}
-    end;
+    {noreply, start_producer(ClientId, Partition, PartitionTopic, State)};
 handle_info({producer_state_change, ProducerPid, ProducerState},
             State = #state{producers = Producers, workers = WorkersTable})
   when is_map_key(ProducerPid, Producers) ->
@@ -249,13 +239,13 @@ log_error(Fmt, Args) ->
 do_log(Level, Fmt, Args) ->
     logger:log(Level, "[pulsar_producers] " ++ Fmt, Args, #{domain => [pulsar, producers]}).
 
-start_producer(Pid, Partition, PartitionTopic, State) ->
+start_producer(ClientId, Partition, PartitionTopic, State) ->
     try
-        case pulsar_client:lookup_topic(Pid, PartitionTopic) of
+        case pulsar_client:lookup_topic(ClientId, PartitionTopic) of
             {ok, #{ brokerServiceUrl := BrokerServiceURL
                   , proxy_through_service_url := IsProxy
                   }} ->
-                do_start_producer(State, Pid, Partition, PartitionTopic,
+                do_start_producer(State, ClientId, Partition, PartitionTopic,
                     BrokerServiceURL, IsProxy);
             {error, Reason0} ->
                 log_error("Lookup topic failed: ~p", [Reason0]),

@@ -14,6 +14,17 @@
 
 -module(pulsar_client_sup).
 
+%% @doc
+%% pulsar_client_sup (1) (one_for_one)
+%%  |
+%%  +-- pulsar_clients_sup (0..N) (rest_for_one)
+%%        |
+%%        +-- pulsar_client (1) (worker) (proxies calls and spawns new workers)
+%%        |
+%%        +-- pulsar_client_worker_sup (1) (one_for_one)
+%%              |
+%%              +-- pulsar_client_worker (0..N)
+
 -behaviour(supervisor).
 
 -export([start_link/0, init/1]).
@@ -36,16 +47,22 @@ init([]) ->
 ensure_present(ClientId, Hosts, Opts) ->
     ChildSpec = child_spec(ClientId, Hosts, Opts),
     case supervisor:start_child(?SUPERVISOR, ChildSpec) of
-        {ok, Pid} -> {ok, Pid};
-        {error, {already_started, Pid}} -> {ok, Pid};
-        {error, already_present} -> {error, client_not_running};
-        {error, Reason} -> {error, Reason}
+        {ok, Pid} ->
+            {ok, Pid};
+        {error, {already_started, Pid}} ->
+            {ok, Pid};
+        {error, already_present} ->
+            ensure_absence(ClientId),
+            {error, client_not_running};
+        {error, Reason} ->
+            ensure_absence(ClientId),
+            {error, map_start_error(Reason)}
     end.
 
 %% ensure client stopped and deleted under supervisor
 ensure_absence(ClientId) ->
-    case supervisor:terminate_child(?SUPERVISOR, ClientId) of
-        ok -> ok = supervisor:delete_child(?SUPERVISOR, ClientId);
+    case supervisor:terminate_child(?SUPERVISOR, child_id(ClientId)) of
+        ok -> ok = supervisor:delete_child(?SUPERVISOR, child_id(ClientId));
         {error, not_found} -> ok
     end.
 
@@ -61,10 +78,20 @@ find_client(ClientId) ->
             {error, {no_such_client, ClientId}}
     end.
 
+child_id(ClientId) ->
+    ClientId.
+
 child_spec(ClientId, Hosts, Opts) ->
-    #{id => ClientId,
-      start => {pulsar_client, start_link, [ClientId, Hosts, Opts]},
-      restart => transient,
-      type => worker,
-      modules => [pulsar_client]
+    #{id => child_id(ClientId),
+      start => {pulsar_clients_sup, start_link, [ClientId, Hosts, Opts]},
+      restart => permanent,
+      type => supervisor,
+      shutdown => infinity
     }.
+
+map_start_error({{shutdown, {failed_to_start_child,
+                             {worker_sup, _},
+                             {shutdown, {failed_to_start_child, _, Reason}}}}, _}) ->
+    Reason;
+map_start_error(Reason) ->
+    Reason.

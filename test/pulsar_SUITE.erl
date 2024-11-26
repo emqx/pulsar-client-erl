@@ -177,16 +177,16 @@ t_pulsar_client(Config) ->
     {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
 
     ?assertMatch({ok,{<<"test">>, PNum}} when is_integer(PNum),
-        pulsar_client:get_topic_metadata(ClientPid, <<"test">>)),
+        pulsar_client:get_topic_metadata(?TEST_SUIT_CLIENT, <<"test">>)),
 
     ?assertMatch({ok, #{
             brokerServiceUrl := BrokerServiceUrl,
             proxy_through_service_url := IsProxy
         }} when (is_list(BrokerServiceUrl) orelse is_binary(BrokerServiceUrl))
                 andalso is_boolean(IsProxy),
-        pulsar_client:lookup_topic(ClientPid, <<"test-partition-0">>)),
+        pulsar_client:lookup_topic(?TEST_SUIT_CLIENT, <<"test-partition-0">>)),
 
-    ?assertEqual(true, pulsar_client:get_status(ClientPid)),
+    ?assertEqual(true, pulsar_client:get_status(?TEST_SUIT_CLIENT)),
 
     ?assertEqual(ok, pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT)),
 
@@ -207,13 +207,13 @@ t_pulsar_basic_auth(Config) ->
                , conn_opts => #{ auth_data => <<"wrong:credentials">>
                                , auth_method_name => <<"basic">>
                                }}),
-      error(Res)
+      exit(Res)
     end),
     %% Should fail fast if there is an authn error.
     receive
         {'DOWN', Ref, process, Pid0, Reason} ->
-            ?assertMatch({{error, {#{}, _}}, _}, Reason),
-            {{error, {BrokerErrorMap, _}}, _} = Reason,
+            ?assertMatch({error, #{}}, Reason),
+            {error, BrokerErrorMap} = Reason,
             ?assertMatch([#{error := 'AuthenticationError'}], maps:values(BrokerErrorMap)),
             ok = pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT),
             ok
@@ -284,8 +284,8 @@ t_pulsar_token_auth(Config) ->
     %% Should fail fast if there is an authn error.
     receive
         {'DOWN', Ref, process, Pid0, Reason} ->
-            ?assertMatch({{error, {#{}, _}}, _}, Reason),
-            {{error, {BrokerErrorMap, _}}, _} = Reason,
+            ?assertMatch({{error, #{}}, _}, Reason),
+            {{error, BrokerErrorMap}, _} = Reason,
             ?assertMatch([#{error := 'AuthenticationError'}], maps:values(BrokerErrorMap)),
             ok = pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT),
             ok

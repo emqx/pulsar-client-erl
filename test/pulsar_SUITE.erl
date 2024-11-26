@@ -21,6 +21,7 @@
 -define(TEST_SUIT_CLIENT, client_erl_suit).
 -define(BATCH_SIZE , 100).
 -define(PULSAR_HOST, "pulsar://toxiproxy:6650").
+-define(PULSAR_CLONE_HOST, "pulsar://toxiproxy:6651").
 -define(PULSAR_BASIC_AUTH_HOST, "pulsar://pulsar-basic-auth:6650").
 -define(PULSAR_TOKEN_AUTH_HOST, "pulsar://pulsar-token-auth:6650").
 
@@ -41,6 +42,7 @@ all() ->
     , t_per_request_callbacks
     , t_producers_all_connected
     , t_consumers_all_connected
+    , t_topic_lookup_redirect
     , {group, resilience}
     ].
 
@@ -162,6 +164,7 @@ end_per_testcase(_TestCase, _Config) ->
     application:stop(pulsar),
     snabbkaffe:stop(),
     pulsar_test_utils:uninstall_event_logging(),
+    meck:unload(),
     ok.
 
 %%--------------------------------------------------------------------
@@ -1230,7 +1233,7 @@ t_client_down_producers_restart(Config) ->
             ok
     after
         CallTimeout + 3_000 ->
-            ct:fail("producers didn't shut down")
+            ct:fail("l. ~p : producers didn't shut down", [?LINE])
     end,
     %% ... then, they should eventually restart.
     pulsar_test_utils:heal_failure(down, ProxyHost, ProxyPort),
@@ -1239,30 +1242,6 @@ t_client_down_producers_restart(Config) ->
     ?assert(is_pid(ProducersPid1)),
     ?assertNotEqual(ProducersPid0, ProducersPid1),
     ?assert(is_process_alive(ProducersPid1)),
-    ?assertMatch({_, P} when is_pid(P), pulsar_producers:pick_producer(Producers, Batch)),
-
-    %% Alternatively: if the client happens to be restarting while `pulsar_producers' to
-    %% reach the client, it also shuts down.
-    pulsar_test_utils:with_mock(pulsar_client_sup, find_client,
-      fun(_ClientId) -> {error, undefined} end,
-      fun() ->
-        MRef1 = monitor(process, ProducersPid1),
-        ProducersPid1 ! timeout,
-        receive
-            {'DOWN', MRef1, process, ProducersPid1, Reason1} ->
-                ct:pal("shutdown reason: ~p", [Reason1]),
-                ok
-        after
-            CallTimeout + 3_000 ->
-                ct:fail("producers didn't shut down")
-        end
-      end
-    ),
-    ct:sleep(500),
-    ProducersPid2 = whereis(ProducersName),
-    ?assert(is_pid(ProducersPid2)),
-    ?assertNotEqual(ProducersPid1, ProducersPid2),
-    ?assert(is_process_alive(ProducersPid2)),
     ?assertMatch({_, P} when is_pid(P), pulsar_producers:pick_producer(Producers, Batch)),
 
     ok.
@@ -1350,6 +1329,73 @@ t_consumers_all_connected(Config) ->
     ?assertNot(pulsar_consumers:all_connected(Consumers)),
     ok.
 
+%% Checks that, if a topic lookup leads to a redirect to another broker, we dynamically
+%% start a new client for it, redo the lookup with the new client and it replies to the
+%% original producer.
+t_topic_lookup_redirect(Config) ->
+    PulsarHost = ?PULSAR_CLONE_HOST,
+    {ok, _} = application:ensure_all_started(pulsar),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    ct:pal("started client"),
+
+    %% Only a single endpoint initially.
+    ?assertMatch([_], get_worker_pids(?TEST_SUIT_CLIENT)),
+
+    Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
+    TestPid = self(),
+    Mod = pulsar_client_worker,
+    ok = meck:new(Mod, [passthrough]),
+    ok = meck:expect(Mod, handle_response, fun
+      ({lookupTopicResponse, Response0} = Msg, State) ->
+         case meck:called(Mod, handle_response, [{lookupTopicResponse, '_'}, '_']) of
+             true ->
+                 TestPid ! {lookup, Response0, State},
+                 meck:passthrough([Msg, State]);
+             false ->
+                 %% First time we lookup, we fake a redirect response
+                 Response = Response0#{ response := 'Redirect'
+                                      , brokerServiceUrl := ?config(pulsar_host, Config)
+                                      , authoritative := true
+                                      },
+                 TestPid ! {first_lookup, Response, State},
+                 meck:passthrough([{lookupTopicResponse, Response}, State])
+         end;
+      (Msg, State) ->
+         meck:passthrough([Msg, State])
+    end),
+
+    %% After we start our producers, that should trigger starting a new client that looks
+    %% up the topic in the new broker.
+    ProducerOpts = #{
+        batch_size => ?BATCH_SIZE,
+        strategy => random,
+        retention_period => infinity
+    },
+    {ok, _Producers} = pulsar:ensure_supervised_producers(
+                        ?TEST_SUIT_CLIENT,
+                        Topic,
+                        ProducerOpts),
+    ct:pal("started producers"),
+    ProducerPids = pulsar_test_utils:producer_pids(),
+    lists:foreach(
+     fun(ProducerPid) ->
+       pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000)
+     end,
+     ProducerPids),
+
+    %% Should have spawned a new client.
+    ?assertMatch([_, _], get_worker_pids(?TEST_SUIT_CLIENT)),
+
+    %% Second lookup must use the same `authoritative' value from the redirect response.
+    receive
+        {lookup, Response, _} ->
+            ?assertMatch(#{authoritative := true}, Response)
+    after 0 ->
+            ct:fail("missing message; mailbox: ~p", [process_info(self(), messages)])
+    end,
+
+    ok.
+
 wait_until_all_dead(Refs, _Timeout) when map_size(Refs) =:= 0 ->
     ct:pal("all pids dead"),
     ok;
@@ -1404,6 +1450,14 @@ wait_until_consumed(ExpectedPayloads0, Timeout) ->
                     error({missing_messages, lists:sort(sets:to_list(ExpectedPayloads0))})
             end
     end.
+
+get_worker_pids(ClientId) ->
+    [ClientsSup] = [ClientsSup
+                    || {ClientId0, ClientsSup, _, _} <- supervisor:which_children(pulsar_client_sup),
+                       ClientId0 =:= ClientId],
+    [WorkerSup] = [WorkerSup
+                   || {_, WorkerSup, supervisor, _} <- supervisor:which_children(ClientsSup)],
+    lists:map(fun({_, Worker, _, _}) -> Worker end, supervisor:which_children(WorkerSup)).
 
 %%----------------------
 %% pulsar callback

@@ -39,6 +39,9 @@
 
 -export([try_initial_connection/3]).
 
+%% Internal export for tests
+-export([handle_response/2]).
+
 -record(state, { client_id
                , sock
                , server
@@ -69,21 +72,28 @@
 -define(CONN_TIMEOUT, 30000).
 -define(RECONNECT_TIMEOUT, 5_000).
 
+%% calls/casts/infos
+-record(lookup_topic, {partition_topic, opts = #{}}).
+-record(lookup_topic_async, {from, partition_topic, opts = #{}}).
+
 start_link(ClientId, Server, Opts) ->
     gen_server:start_link(?MODULE, [ClientId, Server, Opts], []).
 
 get_topic_metadata(Pid, Topic) ->
     Call = self(),
-    gen_server:call(Pid, {get_topic_metadata, Topic, Call}, 30000).
+    gen_server:call(Pid, {get_topic_metadata, Topic, Call}, 30_000).
 
 lookup_topic(Pid, PartitionTopic) ->
-    gen_server:call(Pid, {lookup_topic, PartitionTopic}, 30000).
+    gen_server:call(Pid, #lookup_topic{partition_topic = PartitionTopic}, 30_000).
 
 -spec lookup_topic_async(server_ref(), binary()) -> {ok, reference()}.
 lookup_topic_async(Pid, PartitionTopic) ->
+    lookup_topic_async(Pid, PartitionTopic, _Opts = #{}).
+
+lookup_topic_async(Pid, PartitionTopic, Opts) ->
     Ref = monitor(process, Pid, [{alias, reply_demonitor}]),
     From = {self(), Ref},
-    gen_server:cast(Pid, {lookup_topic_async, From, PartitionTopic}),
+    gen_server:cast(Pid, #lookup_topic_async{from = From, partition_topic = PartitionTopic, opts = Opts}),
     {ok, Ref}.
 
 get_status(Pid) ->
@@ -173,7 +183,7 @@ handle_call({get_topic_metadata, Topic, Call}, From,
                 opts = Opts1
             })}
     end;
-handle_call({lookup_topic, Topic}, From,
+handle_call(#lookup_topic{partition_topic = Topic, opts = ReqOpts}, From,
         State = #state{
             sock = Sock,
             opts = Opts,
@@ -183,11 +193,11 @@ handle_call({lookup_topic, Topic}, From,
         }) ->
     case get_alive_sock_opts(Server, Sock, Opts) of
         {error, Reason} ->
-            log_error("lookup_topic from pulsar failed: ~p down", [Reason]),
+            log_error("lookup_topic from pulsar failed: ~0p down", [Reason]),
             start_reconnect_timer(),
             {reply, {error, no_servers_available}, State};
         {ok, {Sock1, Opts1}} ->
-            pulsar_socket:send_lookup_topic_packet(Sock1, Topic, RequestId, Opts1),
+            pulsar_socket:send_lookup_topic_packet(Sock1, Topic, RequestId, ReqOpts, Opts1),
             {noreply, next_request_id(State#state{
                 requests = maps:put(RequestId, {From, Topic}, Reqs),
                 sock = Sock1,
@@ -219,10 +229,10 @@ handle_call(_Req, _From, State) ->
     {reply, ok, State, hibernate}.
 
 
-handle_cast({lookup_topic_async, From, PartitionTopic}, State) ->
+handle_cast(#lookup_topic_async{from = From, partition_topic = PartitionTopic, opts = Opts}, State) ->
     %% re-use the same logic as the call, as the process of looking up
     %% a topic is itself async in the gen_server:call.
-    self() ! {'$gen_call', From, {lookup_topic, PartitionTopic}},
+    self() ! {'$gen_call', From, #lookup_topic{partition_topic = PartitionTopic, opts = Opts}},
     {noreply, State};
 handle_cast(_Req, State) ->
     {noreply, State, hibernate}.
@@ -292,9 +302,9 @@ censor_secrets(State) ->
 parse_packet({incomplete, Bin}, State) ->
     State#state{last_bin = Bin};
 parse_packet({Cmd, <<>>}, State) ->
-    handle_response(Cmd, State#state{last_bin = <<>>});
+    ?MODULE:handle_response(Cmd, State#state{last_bin = <<>>});
 parse_packet({Cmd, LastBin}, State) ->
-    State2 = handle_response(Cmd, State),
+    State2 = ?MODULE:handle_response(Cmd, State),
     parse_packet(pulsar_protocol_frame:parse(LastBin), State2).
 
 handle_response({connected, _ConnectedData}, State = #state{from = undefined}) ->
@@ -334,22 +344,21 @@ handle_response({lookupTopicResponse, #{error := Reason, message := Msg,
         undefined ->
             State
     end;
-handle_response({lookupTopicResponse, #{request_id := RequestId} = Response},
+handle_response({lookupTopicResponse, #{response := 'Redirect'} = Response}, State0) ->
+    #state{requests = Requests0} = State0,
+    #{request_id := RequestId} = Response,
+    case maps:take(RequestId, Requests0) of
+        {{From, Topic}, Requests} ->
+            State = State0#state{requests = Requests},
+            handle_redirect_lookup_response(State, From, Topic, Response);
+        error ->
+            State0
+    end;
+handle_response({lookupTopicResponse, #{request_id := RequestId, response := 'Connect'} = Response},
                 State = #state{requests = Reqs, opts = Opts}) ->
     case maps:get(RequestId, Reqs, undefined) of
         {From, _} ->
-            ServiceURL =
-                case {Opts, Response} of
-                    {#{enable_ssl := true}, #{brokerServiceUrlTls := BrokerServiceUrlTls}} ->
-                        BrokerServiceUrlTls;
-                    {#{enable_ssl := true}, #{brokerServiceUrl := BrokerServiceUrl}} ->
-                        log_error("SSL enabled but brokerServiceUrlTls is not provided by pulsar,"
-                                  " falling back to brokerServiceUrl: ~p", [BrokerServiceUrl]),
-                        BrokerServiceUrl;
-                    {_, #{brokerServiceUrl := BrokerServiceUrl}} ->
-                        %% the 'brokerServiceUrl' is a mandatory field in case the SSL is disabled
-                        BrokerServiceUrl
-                end,
+            ServiceURL = get_service_url_from_lookup_response(Response, Opts),
             gen_server:reply(From, {ok,
                 #{ brokerServiceUrl => ServiceURL
                  , proxy_through_service_url => maps:get(proxy_through_service_url, Response, false)
@@ -474,3 +483,44 @@ try_initial_connection(Parent, Server, Opts) ->
             pulsar_socket:controlling_process(Sock, Parent, Opts1),
             Parent ! {self(), {ok, {Sock, Opts1}}}
     end.
+
+get_service_url_from_lookup_response(Response, Opts) ->
+    case {Opts, Response} of
+        {#{enable_ssl := true}, #{brokerServiceUrlTls := BrokerServiceUrlTls}} ->
+            BrokerServiceUrlTls;
+        {#{enable_ssl := true}, #{brokerServiceUrl := BrokerServiceUrl}} ->
+            log_error("SSL enabled but brokerServiceUrlTls is not provided by pulsar,"
+                      " falling back to brokerServiceUrl: ~p", [BrokerServiceUrl]),
+            BrokerServiceUrl;
+        {_, #{brokerServiceUrl := BrokerServiceUrl}} ->
+            %% the 'brokerServiceUrl' is a mandatory field in case the SSL is disabled
+            BrokerServiceUrl
+    end.
+
+%% If we receive a response of lookup type `Redirect', we must re-issue the lookup
+%% connecting to the returned broker.
+%% https://pulsar.apache.org/docs/2.11.x/developing-binary-protocol/#lookuptopicresponse
+handle_redirect_lookup_response(State, From, Topic, Response) ->
+    #state{client_id = ClientId, opts = Opts} = State,
+    ServiceURL = get_service_url_from_lookup_response(Response, Opts),
+    {ok, Sup} = pulsar_client_sup:find_worker_sup(ClientId),
+    case pulsar_client_worker_sup:start_worker(Sup, ClientId, ServiceURL, Opts) of
+        {error, Reason} ->
+            log_error("failed to ensure worker for new url is started;"
+                      " reason: ~p ; client_id: ~p ; new url: ~s ; topic: ~p",
+                      [Reason, ClientId, ServiceURL, Topic]),
+            gen_server:reply(From, {error, {failed_to_start_worker, Reason}}),
+            State;
+        {ok, WorkerPid} ->
+            lookup_topic_redirect_async(WorkerPid, Topic, From, Response),
+            State
+    end.
+
+lookup_topic_redirect_async(WorkerPid, PartitionTopic, OriginalFrom, Response) ->
+    Opts = #{authoritative => maps:get(authoritative, Response, false)},
+    gen_server:cast(WorkerPid, #lookup_topic_async{
+                                  from = OriginalFrom,
+                                  partition_topic = PartitionTopic,
+                                  opts = Opts
+                                 }),
+    ok.

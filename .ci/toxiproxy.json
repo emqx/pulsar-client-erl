@@ -4,5 +4,11 @@
         "listen": "0.0.0.0:6650",
         "upstream": "pulsar:6650",
         "enabled": true
+    },
+    {
+        "name": "pulsar_clone",
+        "listen": "0.0.0.0:6651",
+        "upstream": "pulsar:6650",
+        "enabled": true
     }
 ]

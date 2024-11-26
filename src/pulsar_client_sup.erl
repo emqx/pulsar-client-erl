@@ -29,7 +29,7 @@
 
 -export([start_link/0, init/1]).
 
--export([ensure_present/3, ensure_absence/1, find_client/1]).
+-export([ensure_present/3, ensure_absence/1, find_worker_sup/1]).
 
 -define(SUPERVISOR, ?MODULE).
 
@@ -66,16 +66,15 @@ ensure_absence(ClientId) ->
         {error, not_found} -> ok
     end.
 
-%% find client pid from client id
-find_client(ClientId) ->
+find_worker_sup(ClientId) ->
     Children = supervisor:which_children(?SUPERVISOR),
     case lists:keyfind(ClientId, 1, Children) of
-        {ClientId, Client, _, _} when is_pid(Client) ->
-            {ok, Client};
+        {ClientId, Pid, _, _} when is_pid(Pid) ->
+            pulsar_clients_sup:find_worker_sup(Pid, ClientId);
         {ClientId, Restarting, _, _} ->
             {error, Restarting};
         false ->
-            {error, {no_such_client, ClientId}}
+            {error, not_found}
     end.
 
 child_id(ClientId) ->

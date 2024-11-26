@@ -15,10 +15,22 @@
 
 -behaviour(supervisor).
 
--export([start_link/3, init/1]).
+-export([start_link/3, find_worker_sup/2, init/1]).
 
 start_link(ClientId, Servers, Opts) ->
     supervisor:start_link(?MODULE, [ClientId, Servers, Opts]).
+
+find_worker_sup(Sup, ClientId) ->
+    Children = supervisor:which_children(Sup),
+    Key = {worker_sup, ClientId},
+    case lists:keyfind(Key, 1, Children) of
+        {Key, Pid, _, _} when is_pid(Pid) ->
+            {ok, Pid};
+        {Key, Restarting, _, _} ->
+            {error, Restarting};
+        false ->
+            {error, not_found}
+    end.
 
 init([ClientId, Servers, Opts]) ->
     SupFlags = #{strategy => rest_for_one,

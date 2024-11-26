@@ -440,7 +440,10 @@ refresh_urls_and_connect(State0) ->
     try pulsar_client:lookup_topic_async(ClientId, PartitionTopic) of
         {ok, LookupTopicRequestRef} ->
             State = State0#{lookup_topic_request_ref := LookupTopicRequestRef},
-            {keep_state, State, [{state_timeout, ?LOOKUP_TOPIC_TIMEOUT, lookup_topic_timeout}]}
+            {keep_state, State, [{state_timeout, ?LOOKUP_TOPIC_TIMEOUT, lookup_topic_timeout}]};
+        {error, no_servers_available} ->
+            log_error("client restarting; will retry to lookup topic again later", [], State0),
+            ?NEXT_STATE_IDLE_RECONNECT(State0)
     catch
         exit:{noproc, _} ->
             log_error("client restarting; will retry to lookup topic again later", [], State0),

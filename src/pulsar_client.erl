@@ -87,14 +87,14 @@ lookup_topic_async(ClientId, PartitionTopic) ->
 
 get_status(ClientId) ->
     maybe
-        %% TODO: return status for all workers
-        {ok, WorkerPid} ?= pick_random_worker(ClientId),
-        pulsar_client_worker:get_status(WorkerPid)
+        WorkerPids = maps:values(get_workers(ClientId)),
+        true ?= length(WorkerPids) > 0,
+        lists:all(fun pulsar_client_worker:get_status/1, WorkerPids)
     end.
 
 get_alive_pulsar_url(ClientId) ->
     maybe
-        %% TODO: return all urls
+        %% TODO: return all urls?
         {ok, WorkerPid} ?= pick_random_worker(ClientId),
         pulsar_client_worker:get_alive_pulsar_url(WorkerPid)
     end.
@@ -154,10 +154,11 @@ get_worker_for_service_url(ClientId, BrokerServiceURL0) ->
             {error, worker_not_found}
     end.
 
+get_workers(ClientId) ->
+    persistent_term:get(?PT_WORKERS_KEY(ClientId), #{}).
+
 pick_random_worker(ClientId) ->
-    case persistent_term:get(?PT_WORKERS_KEY(ClientId), undefined) of
-        undefined ->
-            {error, no_servers_available};
+    case get_workers(ClientId) of
         Workers when map_size(Workers) == 0 ->
             {error, no_servers_available};
         Workers ->

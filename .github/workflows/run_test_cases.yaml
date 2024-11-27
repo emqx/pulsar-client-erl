@@ -11,7 +11,7 @@ jobs:
       matrix:
         pulsar_tag:
           - 2.7.0
-          - 2.10.0
+          - 2.11.0
     steps:
       - name: install docker-compose
         run: |
@@ -42,7 +42,7 @@ jobs:
           docker logs pulsar-token-auth
           echo "============== pulsar-token-auth-end =============="
       - name: make coveralls
-        if: ${{github.event_name != 'pull_request' && matrix.pulsar_tag == '2.10.0.3'}}
+        if: ${{github.event_name == 'push' && matrix.pulsar_tag == '2.11.0'}}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

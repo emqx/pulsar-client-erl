@@ -23,7 +23,7 @@ start_link(ClientId, Hosts, Opts) ->
     supervisor:start_link(?MODULE, [ClientId, Hosts, Opts]).
 
 start_worker(Sup, ClientId, Server, Opts) ->
-    case supervisor:start_child(Sup, worker_spec(ClientId, Server, Opts)) of
+    case supervisor:start_child(Sup, worker_spec(transient, ClientId, Server, Opts)) of
         {ok, Pid} -> {ok, Pid};
         {error, {already_started, Pid}} -> {ok, Pid};
         {error, already_present} -> {error, client_not_running};
@@ -35,13 +35,13 @@ init([ClientId, Servers, Opts]) ->
                  intensity => 10,
                  period => 5
                },
-    Children = lists:map(fun(Server) -> worker_spec(ClientId, Server, Opts) end, Servers),
+    Children = lists:map(fun(Server) -> worker_spec(permanent, ClientId, Server, Opts) end, Servers),
     {ok, {SupFlags, Children}}.
 
-worker_spec(ClientId, Server, Opts) ->
+worker_spec(RestartType, ClientId, Server, Opts) ->
     #{id => Server,
       start => {pulsar_client_worker, start_link, [ClientId, Server, Opts]},
-      restart => transient,
+      restart => RestartType,
       type => worker,
       shutdown => 5_000
     }.

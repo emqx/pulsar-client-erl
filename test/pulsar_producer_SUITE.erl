@@ -46,7 +46,7 @@ init_per_testcase(TestCase, Config) when
     TestCase =:= t_port_exit
 ->
     PulsarHost = os:getenv("PULSAR_HOST", ?DEFAULT_PULSAR_HOST),
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     TestPID = self(),
     Counter = counters:new(1, [atomics]),
     Callback =

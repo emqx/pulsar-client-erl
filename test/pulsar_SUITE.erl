@@ -173,11 +173,11 @@ end_per_testcase(_TestCase, _Config) ->
 
 t_pulsar_client(Config) ->
     PulsarHost = ?config(pulsar_host, Config),
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
 
     timer:sleep(1000),
     %% for coverage
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
 
     ?assertMatch({ok,{<<"test">>, PNum}} when is_integer(PNum),
         pulsar_client_manager:get_topic_metadata(?TEST_SUIT_CLIENT, <<"test">>)),
@@ -195,8 +195,7 @@ t_pulsar_client(Config) ->
 
     timer:sleep(50),
 
-    ?assertEqual([], supervisor:which_children(pulsar_client_sup)),
-
+    ?assertEqual(false, is_process_alive(ClientPid)),
     ok.
 
 t_pulsar_basic_auth(Config) ->
@@ -229,7 +228,7 @@ t_pulsar_basic_auth(Config) ->
     ConnOpts = #{ auth_data => <<"super:secretpass">>
                 , auth_method_name => <<"basic">>
                 },
-    ok = pulsar:ensure_supervised_client(
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(
                          ?TEST_SUIT_CLIENT,
                          [PulsarHost],
                          #{conn_opts => ConnOpts}),
@@ -301,7 +300,7 @@ t_pulsar_token_auth(Config) ->
     ConnOpts = #{ auth_data => <<"eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJhZG1pbiJ9.UlVtumfA7z2dSwrtk8Vvt8T_GUiqnfPoHgZWaGcPv051oiR13v-2_oTdYGVwMYbQ56-pM4DocSbc-mSwhh8mhw">>
                 , auth_method_name => <<"token">>
                 },
-    ok = pulsar:ensure_supervised_client(
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(
                          ?TEST_SUIT_CLIENT,
                          [PulsarHost],
                          #{conn_opts => ConnOpts}),
@@ -349,7 +348,7 @@ t_pulsar(Config) ->
 t_pulsar_(Strategy, Config) ->
     PulsarHost = ?config(pulsar_host, Config),
     {ok, _} = application:ensure_all_started(pulsar),
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ConsumerOpts = #{
         cb_init_args => [],
         cb_module => ?MODULE,
@@ -412,11 +411,9 @@ t_pulsar_(Strategy, Config) ->
     %% stop producers
     ?assertEqual(ok, pulsar:stop_and_delete_supervised_producers(Producers)),
     %% stop clients
-    [ClientPid] = get_worker_pids(?TEST_SUIT_CLIENT),
     ?assertEqual(ok, pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT)),
     %% check alive
     ?assertEqual(false, is_process_alive(ClientPid)),
-    ?assertEqual([], supervisor:which_children(pulsar_client_sup)),
     %% metrics test
     [{producer, PCount}, {consumer, CCounter}] = pulsar_metrics:all(),
     ?assertEqual(PCount, CCounter),
@@ -447,7 +444,7 @@ t_pulsar_drop_expired_batch(Config) ->
     {ok, _} = application:ensure_all_started(pulsar),
     ok = snabbkaffe:start_trace(),
 
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ct:pal("started client"),
     ConsumerOpts = #{
         cb_init_args => #{send_to => self()},
@@ -578,7 +575,7 @@ t_pulsar_drop_expired_batch_resend_inflight(Config) ->
     {ok, _} = application:ensure_all_started(pulsar),
     Tab = pulsar_test_utils:install_event_logging(),
 
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ct:pal("started client"),
     ConsumerOpts = #{
         cb_init_args => #{send_to => self()},
@@ -727,7 +724,7 @@ t_pulsar_replayq(Config) ->
     StabilizationPeriod = timer:seconds(15),
     {ok, _} = application:ensure_all_started(pulsar),
 
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ct:pal("started client"),
     Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
     ConsumerOpts = #{
@@ -825,7 +822,7 @@ t_pulsar_replayq_producer_restart(Config) ->
     {ok, _} = application:ensure_all_started(pulsar),
     Tab = pulsar_test_utils:install_event_logging(),
 
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ct:pal("started client"),
     Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
     ConsumerOpts = #{
@@ -986,7 +983,7 @@ t_overflow(Config) ->
     {ok, _} = application:ensure_all_started(pulsar),
     Tab = pulsar_test_utils:install_event_logging(),
 
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ct:pal("started client"),
     Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
     ConsumerOpts = #{
@@ -1118,8 +1115,7 @@ t_pulsar_client_tune_error(Config) ->
     {ok, _} = application:ensure_all_started(pulsar),
 
     %% let it start once
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
-    [ClientPid] = get_worker_pids(?TEST_SUIT_CLIENT),
+    {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
 
     pulsar_test_utils:with_mock(pulsar_socket, internal_getopts,
       fun(_InetM, _Sock, _Opts) -> {error, einval} end,
@@ -1139,7 +1135,7 @@ t_pulsar_client_tune_error(Config) ->
 t_per_request_callbacks(Config) ->
     PulsarHost = ?config(pulsar_host, Config),
     {ok, _} = application:ensure_all_started(pulsar),
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ct:pal("started client"),
     Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
     ConsumerOpts = #{
@@ -1207,7 +1203,7 @@ t_client_down_producers_restart(Config) ->
     ProxyPort = ?config(proxy_port, Config),
     {ok, _} = pulsar_test_utils:reset_proxy(ProxyHost, ProxyPort),
     {ok, _} = application:ensure_all_started(pulsar),
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
     ProducersName = ?FUNCTION_NAME,
     ProducerOpts = #{
@@ -1253,7 +1249,7 @@ t_client_down_producers_restart(Config) ->
 t_producers_all_connected(Config) ->
     PulsarHost = ?config(pulsar_host, Config),
     {ok, _} = application:ensure_all_started(pulsar),
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ct:pal("started client"),
     Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
     ProducerOpts = #{
@@ -1293,7 +1289,7 @@ t_producers_all_connected(Config) ->
 t_consumers_all_connected(Config) ->
     PulsarHost = ?config(pulsar_host, Config),
     {ok, _} = application:ensure_all_started(pulsar),
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ct:pal("started client"),
     Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
     ConsumerOpts = #{
@@ -1339,7 +1335,7 @@ t_consumers_all_connected(Config) ->
 t_topic_lookup_redirect(Config) ->
     PulsarHost = ?PULSAR_CLONE_HOST,
     {ok, _} = application:ensure_all_started(pulsar),
-    ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
     ct:pal("started client"),
 
     %% Only a single endpoint initially.

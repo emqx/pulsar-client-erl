@@ -47,10 +47,10 @@ init([]) ->
 ensure_present(ClientId, Hosts, Opts) ->
     ChildSpec = child_spec(ClientId, Hosts, Opts),
     case supervisor:start_child(?SUPERVISOR, ChildSpec) of
-        {ok, _Pid} ->
-            ok;
-        {error, {already_started, _Pid}} ->
-            ok;
+        {ok, Pid} ->
+            {ok, Pid};
+        {error, {already_started, Pid}} ->
+            {ok, Pid};
         {error, already_present} ->
             ensure_absence(ClientId),
             {error, client_not_running};

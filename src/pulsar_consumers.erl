@@ -43,6 +43,9 @@
                       }.
 
 -define(T_RETRY_START, 5000).
+-define(GET_TOPIC_METADATA_TIMEOUT, 30_000).
+-define(LOOKUP_TOPIC_TIMEOUT, 30_000).
+-define(GET_ALIVE_PULSAR_URL_TIMEOUT, 5_000).
 
 %% @doc Start supervised consumer.
 start_supervised(ClientId, Topic, ConsumerOpts) ->
@@ -87,7 +90,7 @@ handle_cast(_Cast, State) ->
     {noreply, State}.
 
 handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
-    case pulsar_client_manager:get_topic_metadata(ClientId, Topic) of
+    case pulsar_client_manager:get_topic_metadata(ClientId, Topic, ?GET_TOPIC_METADATA_TIMEOUT) of
         {ok, {_, Partitions}} ->
             PartitionTopics = create_partition_topic(Topic, Partitions),
             NewState = lists:foldl(
@@ -97,7 +100,7 @@ handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
                 State, PartitionTopics),
             {noreply, NewState#state{partitions = length(PartitionTopics)}};
         {error, Reason} ->
-            log_error("get topic metatdata failed: ~p", [Reason]),
+            log_error("get topic metadata failed: ~p", [Reason]),
             {stop, {shutdown, Reason}, State}
     end;
 handle_info({'EXIT', Pid, _Error}, State = #state{consumers = Consumers}) ->
@@ -106,7 +109,7 @@ handle_info({'EXIT', Pid, _Error}, State = #state{consumers = Consumers}) ->
             log_error("Not find Pid:~p consumer", [Pid]),
             {noreply, State};
         PartitionTopic ->
-            restart_producer_later(PartitionTopic),
+            restart_consumer_later(PartitionTopic),
             {noreply, State#state{consumers = maps:remove(Pid, Consumers)}}
     end;
 handle_info({restart_consumer, PartitionTopic}, State = #state{client_id = ClientId}) ->
@@ -171,7 +174,7 @@ start_consumer(ClientId, PartitionTopic, #state{consumer_opts = ConsumerOpts} = 
         {ok, #{ brokerServiceUrl := BrokerServiceURL
               , proxy_through_service_url := IsProxy
               }} =
-            pulsar_client_manager:lookup_topic(ClientId, PartitionTopic),
+            pulsar_client_manager:lookup_topic(ClientId, PartitionTopic, ?LOOKUP_TOPIC_TIMEOUT),
         {MaxConsumerMum, ConsumerOpts1} = case maps:take(max_consumer_num, ConsumerOpts) of
             error -> {1, ConsumerOpts};
             Res -> Res
@@ -183,7 +186,8 @@ start_consumer(ClientId, PartitionTopic, #state{consumer_opts = ConsumerOpts} = 
                     false ->
                         {BrokerServiceURL, undefined};
                     true ->
-                        {ok, URL} = pulsar_client_manager:get_alive_pulsar_url(ClientId),
+                        {ok, URL} = pulsar_client_manager:get_alive_pulsar_url(
+                                      ClientId, ?GET_ALIVE_PULSAR_URL_TIMEOUT),
                         {URL, BrokerServiceURL}
                 end,
                 {ok, Consumer} =
@@ -196,11 +200,11 @@ start_consumer(ClientId, PartitionTopic, #state{consumer_opts = ConsumerOpts} = 
     catch
         Error : Reason : Stacktrace ->
             log_error("Start consumer: ~p, ~p", [Error, {Reason, Stacktrace}]),
-            restart_producer_later(PartitionTopic),
+            restart_consumer_later(PartitionTopic),
             State
     end.
 
-restart_producer_later(PartitionTopic) ->
+restart_consumer_later(PartitionTopic) ->
     erlang:send_after(?T_RETRY_START, self(), {restart_consumer, PartitionTopic}).
 
 next_consumer_id(#state{consumer_id = ?MAX_CONSUMER_ID} = Stat) ->

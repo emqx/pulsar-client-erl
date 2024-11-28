@@ -17,19 +17,15 @@
 %% @doc
 %% pulsar_client_sup (1) (one_for_one)
 %%  |
-%%  +-- pulsar_clients_sup (0..N) (rest_for_one)
+%%  +-- pulsar_client (1) (worker) (proxies calls and spawns new workers)
 %%        |
-%%        +-- pulsar_client (1) (worker) (proxies calls and spawns new workers)
-%%        |
-%%        +-- pulsar_client_worker_sup (1) (one_for_one)
-%%              |
-%%              +-- pulsar_client_worker (0..N)
+%%        +-- pulsar_client_worker (0..N)
 
 -behaviour(supervisor).
 
 -export([start_link/0, init/1]).
 
--export([ensure_present/3, ensure_absence/1, find_worker_sup/1]).
+-export([ensure_present/3, ensure_absence/1]).
 
 -define(SUPERVISOR, ?MODULE).
 
@@ -52,10 +48,8 @@ ensure_present(ClientId, Hosts, Opts) ->
         {error, {already_started, Pid}} ->
             {ok, Pid};
         {error, already_present} ->
-            ensure_absence(ClientId),
             {error, client_not_running};
         {error, Reason} ->
-            ensure_absence(ClientId),
             {error, map_start_error(Reason)}
     end.
 
@@ -66,31 +60,18 @@ ensure_absence(ClientId) ->
         {error, not_found} -> ok
     end.
 
-find_worker_sup(ClientId) ->
-    Children = supervisor:which_children(?SUPERVISOR),
-    case lists:keyfind(ClientId, 1, Children) of
-        {ClientId, Pid, _, _} when is_pid(Pid) ->
-            pulsar_clients_sup:find_worker_sup(Pid, ClientId);
-        {ClientId, Restarting, _, _} ->
-            {error, Restarting};
-        false ->
-            {error, not_found}
-    end.
-
 child_id(ClientId) ->
     ClientId.
 
-child_spec(ClientId, Hosts, Opts) ->
+child_spec(ClientId, Servers, Opts) ->
     #{id => child_id(ClientId),
-      start => {pulsar_clients_sup, start_link, [ClientId, Hosts, Opts]},
+      start => {pulsar_client_manager, start_link, [ClientId, Servers, Opts]},
       restart => permanent,
-      type => supervisor,
-      shutdown => infinity
+      type => worker,
+      shutdown => 5_000
     }.
 
-map_start_error({{shutdown, {failed_to_start_child,
-                             {worker_sup, _},
-                             {shutdown, {failed_to_start_child, _, Reason}}}}, _}) ->
+map_start_error({{error, Reason}, _}) ->
     Reason;
 map_start_error(Reason) ->
     Reason.

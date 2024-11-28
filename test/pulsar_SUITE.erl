@@ -180,16 +180,16 @@ t_pulsar_client(Config) ->
     {ok, ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
 
     ?assertMatch({ok,{<<"test">>, PNum}} when is_integer(PNum),
-        pulsar_client_manager:get_topic_metadata(?TEST_SUIT_CLIENT, <<"test">>)),
+        pulsar_client_manager:get_topic_metadata(?TEST_SUIT_CLIENT, <<"test">>, 1_000)),
 
     ?assertMatch({ok, #{
             brokerServiceUrl := BrokerServiceUrl,
             proxy_through_service_url := IsProxy
         }} when (is_list(BrokerServiceUrl) orelse is_binary(BrokerServiceUrl))
                 andalso is_boolean(IsProxy),
-        pulsar_client_manager:lookup_topic(?TEST_SUIT_CLIENT, <<"test-partition-0">>)),
+        pulsar_client_manager:lookup_topic(?TEST_SUIT_CLIENT, <<"test-partition-0">>, 1_000)),
 
-    ?assertEqual(true, pulsar_client_manager:get_status(?TEST_SUIT_CLIENT)),
+    ?assertEqual(true, pulsar_client_manager:get_status(?TEST_SUIT_CLIENT, 1_000)),
 
     ?assertEqual(ok, pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT)),
 
@@ -1452,12 +1452,11 @@ wait_until_consumed(ExpectedPayloads0, Timeout) ->
     end.
 
 get_worker_pids(ClientId) ->
-    [ClientsSup] = [ClientsSup
-                    || {ClientId0, ClientsSup, _, _} <- supervisor:which_children(pulsar_client_sup),
-                       ClientId0 =:= ClientId],
-    [WorkerSup] = [WorkerSup
-                   || {_, WorkerSup, supervisor, _} <- supervisor:which_children(ClientsSup)],
-    lists:map(fun({_, Worker, _, _}) -> Worker end, supervisor:which_children(WorkerSup)).
+    [ClientManager] = [ClientManager
+                       || {ClientId0, ClientManager, _, _} <-
+                              supervisor:which_children(pulsar_client_sup),
+                          ClientId0 =:= ClientId],
+    maps:values(pulsar_client_manager:get_workers(ClientManager, 1_000)).
 
 %%----------------------
 %% pulsar callback

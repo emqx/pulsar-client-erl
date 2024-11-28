@@ -58,6 +58,9 @@
 
 -define(T_RETRY_START, 5000).
 -define(PRODUCER_STATE_INDEX, 3).
+-define(GET_TOPIC_METADATA_TIMEOUT, 30_000).
+-define(LOOKUP_TOPIC_TIMEOUT, 30_000).
+-define(GET_ALIVE_PULSAR_URL_TIMEOUT, 5_000).
 
 %% @doc Start supervised producers.
 -spec start_supervised(clientid(), topic(), map()) -> {ok, producers()}.
@@ -158,8 +161,9 @@ handle_call(_Call, _From, State) ->
 handle_cast(_Cast, State) ->
     {noreply, State}.
 
+%% TODO: should be a `continue'.
 handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
-    case pulsar_client_manager:get_topic_metadata(ClientId, Topic) of
+    case pulsar_client_manager:get_topic_metadata(ClientId, Topic, ?GET_TOPIC_METADATA_TIMEOUT) of
         {ok, {_, Partitions}} ->
             PartitionTopics = create_partition_topic(Topic, Partitions),
             NewState = lists:foldl(
@@ -194,7 +198,7 @@ handle_info({producer_state_change, ProducerPid, ProducerState},
     true = ets:update_element(WorkersTable, Partition, {?PRODUCER_STATE_INDEX, ProducerState}),
     {noreply, State};
 handle_info(_Info, State) ->
-    log_error("Receive unknown message:~p~n", [_Info]),
+    log_error("Received unknown message: ~p~n", [_Info]),
     {noreply, State}.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -241,7 +245,7 @@ do_log(Level, Fmt, Args) ->
 
 start_producer(ClientId, Partition, PartitionTopic, State) ->
     try
-        case pulsar_client_manager:lookup_topic(ClientId, PartitionTopic) of
+        case pulsar_client_manager:lookup_topic(ClientId, PartitionTopic, ?LOOKUP_TOPIC_TIMEOUT) of
             {ok, #{ brokerServiceUrl := BrokerServiceURL
                   , proxy_through_service_url := IsProxy
                   }} ->
@@ -269,7 +273,8 @@ do_start_producer(#state{
     {AlivePulsarURL, ProxyToBrokerURL} = case IsProxy of
             false -> {BrokerServiceURL, undefined};
             true ->
-                {ok, URL} = pulsar_client_manager:get_alive_pulsar_url(Pid),
+                {ok, URL} = pulsar_client_manager:get_alive_pulsar_url(
+                              Pid, ?GET_ALIVE_PULSAR_URL_TIMEOUT),
                 {URL, BrokerServiceURL}
         end,
     ParentPid = self(),

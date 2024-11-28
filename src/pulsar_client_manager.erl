@@ -12,7 +12,7 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 
--module(pulsar_client).
+-module(pulsar_client_manager).
 
 -feature(maybe_expr, enable).
 

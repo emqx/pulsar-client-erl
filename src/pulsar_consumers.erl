@@ -87,7 +87,7 @@ handle_cast(_Cast, State) ->
     {noreply, State}.
 
 handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
-    case pulsar_client:get_topic_metadata(ClientId, Topic) of
+    case pulsar_client_manager:get_topic_metadata(ClientId, Topic) of
         {ok, {_, Partitions}} ->
             PartitionTopics = create_partition_topic(Topic, Partitions),
             NewState = lists:foldl(
@@ -171,7 +171,7 @@ start_consumer(ClientId, PartitionTopic, #state{consumer_opts = ConsumerOpts} = 
         {ok, #{ brokerServiceUrl := BrokerServiceURL
               , proxy_through_service_url := IsProxy
               }} =
-            pulsar_client:lookup_topic(ClientId, PartitionTopic),
+            pulsar_client_manager:lookup_topic(ClientId, PartitionTopic),
         {MaxConsumerMum, ConsumerOpts1} = case maps:take(max_consumer_num, ConsumerOpts) of
             error -> {1, ConsumerOpts};
             Res -> Res
@@ -183,7 +183,7 @@ start_consumer(ClientId, PartitionTopic, #state{consumer_opts = ConsumerOpts} = 
                     false ->
                         {BrokerServiceURL, undefined};
                     true ->
-                        {ok, URL} = pulsar_client:get_alive_pulsar_url(ClientId),
+                        {ok, URL} = pulsar_client_manager:get_alive_pulsar_url(ClientId),
                         {URL, BrokerServiceURL}
                 end,
                 {ok, Consumer} =

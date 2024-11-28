@@ -44,7 +44,7 @@ init([ClientId, Servers, Opts]) ->
 
 client_spec(ClientId, Opts) ->
     #{id => {client, ClientId},
-      start => {pulsar_client, start_link, [ClientId, Opts]},
+      start => {pulsar_client_manager, start_link, [ClientId, Opts]},
       restart => permanent,
       type => worker
     }.

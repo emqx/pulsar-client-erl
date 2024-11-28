@@ -180,16 +180,16 @@ t_pulsar_client(Config) ->
     ok = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
 
     ?assertMatch({ok,{<<"test">>, PNum}} when is_integer(PNum),
-        pulsar_client:get_topic_metadata(?TEST_SUIT_CLIENT, <<"test">>)),
+        pulsar_client_manager:get_topic_metadata(?TEST_SUIT_CLIENT, <<"test">>)),
 
     ?assertMatch({ok, #{
             brokerServiceUrl := BrokerServiceUrl,
             proxy_through_service_url := IsProxy
         }} when (is_list(BrokerServiceUrl) orelse is_binary(BrokerServiceUrl))
                 andalso is_boolean(IsProxy),
-        pulsar_client:lookup_topic(?TEST_SUIT_CLIENT, <<"test-partition-0">>)),
+        pulsar_client_manager:lookup_topic(?TEST_SUIT_CLIENT, <<"test-partition-0">>)),
 
-    ?assertEqual(true, pulsar_client:get_status(?TEST_SUIT_CLIENT)),
+    ?assertEqual(true, pulsar_client_manager:get_status(?TEST_SUIT_CLIENT)),
 
     ?assertEqual(ok, pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT)),
 

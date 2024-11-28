@@ -437,7 +437,7 @@ refresh_urls_and_connect(State0) ->
      , partitiontopic := PartitionTopic
      } = State0,
     ?tp(debug, pulsar_producer_refresh_start, #{}),
-    try pulsar_client:lookup_topic_async(ClientId, PartitionTopic) of
+    try pulsar_client_manager:lookup_topic_async(ClientId, PartitionTopic) of
         {ok, LookupTopicRequestRef} ->
             State = State0#{lookup_topic_request_ref := LookupTopicRequestRef},
             {keep_state, State, [{state_timeout, ?LOOKUP_TOPIC_TIMEOUT, lookup_topic_timeout}]};
@@ -954,7 +954,7 @@ handle_lookup_topic_reply({ok, #{ proxy_through_service_url := true
     #{clientid := ClientId} = State0,
     ?tp(debug, pulsar_producer_lookup_alive_pulsar_url, #{}),
     log_debug("received topic lookup reply: ~0p", [#{proxy_through_service_url => true, broker_service_url => NewBrokerServiceURL}], State0),
-    try pulsar_client:get_alive_pulsar_url(ClientId) of
+    try pulsar_client_manager:get_alive_pulsar_url(ClientId) of
         {ok, AlivePulsarURL} ->
             maybe_connect(#{ broker_service_url => NewBrokerServiceURL
                            , alive_pulsar_url => AlivePulsarURL

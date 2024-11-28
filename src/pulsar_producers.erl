@@ -159,7 +159,7 @@ handle_cast(_Cast, State) ->
     {noreply, State}.
 
 handle_info(timeout, State = #state{client_id = ClientId, topic = Topic}) ->
-    case pulsar_client:get_topic_metadata(ClientId, Topic) of
+    case pulsar_client_manager:get_topic_metadata(ClientId, Topic) of
         {ok, {_, Partitions}} ->
             PartitionTopics = create_partition_topic(Topic, Partitions),
             NewState = lists:foldl(
@@ -241,7 +241,7 @@ do_log(Level, Fmt, Args) ->
 
 start_producer(ClientId, Partition, PartitionTopic, State) ->
     try
-        case pulsar_client:lookup_topic(ClientId, PartitionTopic) of
+        case pulsar_client_manager:lookup_topic(ClientId, PartitionTopic) of
             {ok, #{ brokerServiceUrl := BrokerServiceURL
                   , proxy_through_service_url := IsProxy
                   }} ->
@@ -269,7 +269,7 @@ do_start_producer(#state{
     {AlivePulsarURL, ProxyToBrokerURL} = case IsProxy of
             false -> {BrokerServiceURL, undefined};
             true ->
-                {ok, URL} = pulsar_client:get_alive_pulsar_url(Pid),
+                {ok, URL} = pulsar_client_manager:get_alive_pulsar_url(Pid),
                 {URL, BrokerServiceURL}
         end,
     ParentPid = self(),

@@ -111,7 +111,7 @@ get_alive_pulsar_url(Pid) ->
 
 init([ClientId, Server, Opts]) ->
     process_flag(trap_exit, true),
-    ok = pulsar_client:register_worker(ClientId, self(), Server),
+    ok = pulsar_client_manager:register_worker(ClientId, self(), Server),
     ConnTimeout = maps:get(connect_timeout, Opts, ?CONN_TIMEOUT),
     Parent = self(),
     Pid = spawn_link(fun() -> try_initial_connection(Parent, Server, Opts) end),
@@ -315,7 +315,7 @@ terminate(_Reason, #state{sock = Sock, opts = Opts} = State) ->
     ok.
 
 unregister_worker(#state{client_id = ClientId, server = URL}) ->
-    _ = pulsar_client:unregister_worker_async(ClientId, URL),
+    _ = pulsar_client_manager:unregister_worker_async(ClientId, URL),
     ok.
 
 format_status(Status) ->

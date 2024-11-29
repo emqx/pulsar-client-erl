@@ -35,8 +35,10 @@
 
 -export([ get_status/2
         , get_alive_pulsar_url/2
-        , get_workers/2
         ]).
+
+%% For tests/introspection.
+-export([get_workers/2]).
 
 -export_type([topic/0]).
 
@@ -86,10 +88,10 @@ get_topic_metadata(ClientId, Topic, Timeout) ->
     gen_server:call(ClientId, #get_topic_metadata{topic = Topic}, Timeout).
 
 lookup_topic(ClientId, PartitionTopic, Timeout) ->
-    Deadline = case is_integer(Timeout) of
-        true when Timeout > 0 -> now_ts() + Timeout;
-        false -> infinity
-    end,
+    %% We use a deadline here because `pulsar_producers' and `pulsar_consumers' call this
+    %% with a timeout, and we want to avoid polluting their mailboxes and logs with stale
+    %% responses.
+    Deadline = deadline(Timeout),
     gen_server:call(
       ClientId,
       #lookup_topic{deadline = Deadline, partition_topic = PartitionTopic},
@@ -145,8 +147,7 @@ init(Args) ->
     end.
 
 handle_call(#get_workers{}, _From, State) ->
-    #{?workers := Workers0} = State,
-    Workers = maps:filter(fun(_K, V) -> is_pid(V) end, Workers0),
+    #{?workers := Workers} = State,
     {reply, Workers, State};
 handle_call(#get_status{}, _From, State0) ->
     {Reply, State} = handle_get_status(State0),
@@ -160,7 +161,7 @@ handle_call(#get_topic_metadata{topic = Topic}, _From, State0) ->
 handle_call(#lookup_topic{deadline = Deadline, partition_topic = PartitionTopic}, From, State0) ->
     {Reply, State} = handle_lookup_topic_async(State0, PartitionTopic),
     maybe
-        true ?= Deadline == infinity orelse now_ts() < Deadline,
+        true ?= is_within_deadline(Deadline),
         gen_server:reply(From, Reply)
     end,
     {noreply, State};
@@ -174,9 +175,7 @@ handle_cast(#lookup_topic_async{from = From, partition_topic = PartitionTopic}, 
 handle_cast(_Req, State) ->
     {noreply, State, hibernate}.
 
-handle_info({'EXIT', Pid, Reason}, #{?workers := Workers} = State0) when
-    is_map_key(Pid, Workers)
-->
+handle_info({'EXIT', Pid, Reason}, State0) ->
     State = handle_worker_down(State0, Pid, Reason),
     {noreply, State};
 handle_info(_Info, State) ->
@@ -297,11 +296,24 @@ handle_redirect_lookup(State0, ServiceURL, Opts, PartitionTopic) ->
     end.
 
 handle_worker_down(State0, Pid, Reason) ->
-    log_info("worker ~0p down: ~0p", [Pid, Reason]),
     #{?workers := Workers0} = State0,
-    {URL, Workers1} = maps:take(Pid, Workers0),
-    Workers = maps:remove(URL, Workers1),
-    State0#{?workers := Workers}.
+    maybe
+        {ok, URL} ?= find_url_by_worker_pid(Workers0, Pid),
+        log_info("worker for ~0s down: ~0p", [URL, Reason]),
+        {_Pid, Workers} = maps:take(URL, Workers0),
+        State0#{?workers := Workers}
+    else
+        error -> State0
+    end.
+
+find_url_by_worker_pid(Workers, Pid) ->
+    MURL = [URL || {URL, Pid0} <- maps:to_list(Workers), Pid0 =:= Pid],
+    case MURL of
+        [] ->
+            error;
+        [URL] ->
+            {ok, URL}
+    end.
 
 find_alive_worker(State, URL) ->
     #{?workers := Workers} = State,
@@ -316,8 +328,8 @@ find_alive_worker(State, URL) ->
 
 alive_workers(State) ->
     #{?workers := Workers} = State,
-    Keys = maps:keys(Workers),
-    lists:filter(fun(Key) -> is_pid(Key) andalso is_process_alive(Key) end, Keys).
+    Pids = maps:values(Workers),
+    lists:filter(fun is_process_alive/1, Pids).
 
 get_first_successful_call(WorkerPids, Fun, Args) ->
     pulsar_utils:foldl_while(
@@ -359,7 +371,7 @@ spawn_any_and_wait_connected(State0, SeedURLs) ->
     %% We currently don't use `ignore'.
     case Res of
         {ok, {URL, Pid}} ->
-            Workers = Workers0#{bin(URL) => Pid, Pid => true},
+            Workers = Workers0#{bin(URL) => Pid},
             State = State0#{workers := Workers},
             {{ok, Pid}, State};
         {error, Reason} ->
@@ -377,5 +389,11 @@ do_log(Level, Fmt, Args) ->
 
 bin(Str) when is_list(Str) -> list_to_binary(Str);
 bin(Bin) when is_binary(Bin) -> Bin.
+
+deadline(infinity) -> infinity;
+deadline(Timeout) when Timeout > 0 -> now_ts() + Timeout.
+
+is_within_deadline(infinity) -> true;
+is_within_deadline(Deadline) -> now_ts() < Deadline.
 
 now_ts() -> erlang:system_time(millisecond).

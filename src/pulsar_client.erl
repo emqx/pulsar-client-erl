@@ -429,7 +429,7 @@ log_warning(Fmt, Args) ->
     do_log(warning, Fmt, Args).
 
 do_log(Level, Fmt, Args) ->
-    logger:log(Level, "[pulsar-client-worker] " ++ Fmt, Args, #{domain => [pulsar, client_worker]}).
+    logger:log(Level, "[pulsar-client] " ++ Fmt, Args, #{domain => [pulsar, client_worker]}).
 
 %% we use the same ping workflow as it attempts the connection
 start_keepalive() ->

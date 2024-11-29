@@ -199,7 +199,7 @@ handle_get_status(State0) ->
                     {false, State}
             end;
         [_ | _] ->
-            %% Should we call their `get_status' to ensure they received pongs?
+            %% Clients shut themselves down if no pong received after a timeout.
             {true, State0}
     end.
 

@@ -259,11 +259,20 @@ handle_info(ping, State = #state{sock = undefined, opts = Opts, server = Server}
             {stop, {shutdown, Reason}, State};
         {ok, {Sock, Opts1}} ->
             pulsar_socket:ping(Sock, Opts1),
+            start_check_pong_timeout(),
             {noreply, State#state{sock = Sock, opts = Opts1}, hibernate}
     end;
 handle_info(ping, State = #state{sock = Sock, opts = Opts}) ->
     pulsar_socket:ping(Sock, Opts),
+    start_check_pong_timeout(),
     {noreply, State, hibernate};
+handle_info(check_pong, State) ->
+    case is_pong_longtime_no_received() of
+        true ->
+            {stop, {shutdown, no_pong_received}, State};
+        false ->
+            {noreply, State, hibernate}
+    end;
 handle_info(_Info, State) ->
     log_warning("received unknown message: ~p", [_Info]),
     {noreply, State, hibernate}.
@@ -434,6 +443,9 @@ do_log(Level, Fmt, Args) ->
 %% we use the same ping workflow as it attempts the connection
 start_keepalive() ->
     erlang:send_after(?PING_INTERVAL, self(), ping).
+
+start_check_pong_timeout() ->
+    erlang:send_after(?PONG_TIMEOUT, self(), check_pong).
 
 %% TODO: use explicit state instead of dictionary
 pong_received() ->

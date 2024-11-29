@@ -248,8 +248,8 @@ handle_cast(#lookup_topic_async{from = From, partition_topic = PartitionTopic, o
 handle_cast(_Req, State) ->
     {noreply, State, hibernate}.
 
-handle_info({'EXIT', Parent, _}, State = #state{parent = Parent}) ->
-    {stop, shutdown, State};
+handle_info({'EXIT', Parent, Reason}, State = #state{parent = Parent}) ->
+    {stop, {shutdown, Reason}, State};
 handle_info({Transport, Sock, Bin}, State = #state{sock = Sock, last_bin = LastBin})
         when Transport == tcp; Transport == ssl ->
     {noreply, parse_packet(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State)};

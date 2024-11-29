@@ -16,7 +16,7 @@
 
 -behaviour(gen_server).
 
--export([start_link/3]).
+-export([start_link/4]).
 
 %% gen_server Callbacks
 -export([ init/1
@@ -48,6 +48,7 @@
 %%--------------------------------------------------------------------
 
 -record(state, { client_id
+               , parent
                , sock
                , server
                , opts
@@ -85,8 +86,8 @@
 %% API
 %%--------------------------------------------------------------------
 
-start_link(ClientId, Server, Opts) ->
-    gen_server:start_link(?MODULE, [ClientId, Server, Opts], []).
+start_link(ClientId, Server, Opts, Owner) ->
+    gen_server:start_link(?MODULE, [ClientId, Server, Opts, Owner], []).
 
 get_topic_metadata(Pid, Topic) ->
     gen_server:call(Pid, #get_topic_metadata{topic = Topic}, 30_000).
@@ -117,13 +118,13 @@ get_alive_pulsar_url(Pid) ->
 %% gen_server callback
 %%--------------------------------------------------------------------
 
-init([ClientId, Server, Opts]) ->
+init([ClientId, Server, Opts, Parent]) ->
     process_flag(trap_exit, true),
     ConnTimeout = maps:get(connect_timeout, Opts, ?CONN_TIMEOUT),
-    Parent = self(),
-    Pid = spawn_link(fun() -> try_initial_connection(Parent, Server, Opts) end),
+    Me = self(),
+    Pid = spawn_link(fun() -> try_initial_connection(Me, Server, Opts) end),
     TRef = erlang:send_after(ConnTimeout, self(), timeout),
-    Result = wait_for_socket_and_opts(ClientId, Server, Pid, timeout),
+    Result = wait_for_socket_and_opts(ClientId, Server, Pid, Parent, timeout),
     _ = erlang:cancel_timer(TRef),
     exit(Pid, kill),
     receive
@@ -138,10 +139,16 @@ init([ClientId, Server, Opts]) ->
     end,
     Result.
 
-wait_for_socket_and_opts(ClientId, Server, Pid, LastError) ->
+wait_for_socket_and_opts(ClientId, Server, Pid, Parent, LastError) ->
     receive
         {Pid, {ok, {Sock, Opts}}} ->
-            State = #state{client_id = ClientId, sock = Sock, server = Server, opts = Opts},
+            State = #state{
+              client_id = ClientId,
+              parent = Parent,
+              sock = Sock,
+              server = Server,
+              opts = Opts
+            },
             {ok, State};
         {Pid, {error, Error}} ->
             case contains_authn_error(Error) of
@@ -149,7 +156,7 @@ wait_for_socket_and_opts(ClientId, Server, Pid, LastError) ->
                     log_error("authentication error starting pulsar client: ~p", [Error]),
                     {stop, Error};
                 false ->
-                    wait_for_socket_and_opts(ClientId, Server, Pid, Error)
+                    wait_for_socket_and_opts(ClientId, Server, Pid, Parent, Error)
             end;
         timeout ->
             log_error("timed out when starting pulsar client; last error: ~p", [LastError]),
@@ -241,6 +248,8 @@ handle_cast(#lookup_topic_async{from = From, partition_topic = PartitionTopic, o
 handle_cast(_Req, State) ->
     {noreply, State, hibernate}.
 
+handle_info({'EXIT', Parent, _}, State = #state{parent = Parent}) ->
+    {stop, shutdown, State};
 handle_info({Transport, Sock, Bin}, State = #state{sock = Sock, last_bin = LastBin})
         when Transport == tcp; Transport == ssl ->
     {noreply, parse_packet(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State)};

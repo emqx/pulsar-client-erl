@@ -182,7 +182,12 @@ handle_info(_Info, State) ->
     log_error("received unknown message: ~p", [_Info]),
     {noreply, State, hibernate}.
 
-terminate(_Reason, _State) ->
+terminate(_Reason, #{?workers := Workers}) ->
+    maps:foreach(
+      fun(_URL, WorkerPid) ->
+         exit(WorkerPid, shutdown)
+      end,
+      Workers),
     ok.
 
 %%--------------------------------------------------------------------
@@ -359,7 +364,7 @@ spawn_any_and_wait_connected(State0, SeedURLs) ->
     Res =
         pulsar_utils:foldl_while(
           fun(URL, _Acc) ->
-            case pulsar_client:start_link(ClientId, URL, Opts) of
+            case pulsar_client:start_link(ClientId, URL, Opts, self()) of
                 {error, _} = Error ->
                     {cont, Error};
                 {ok, Pid} ->

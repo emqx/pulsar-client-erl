@@ -214,10 +214,10 @@ t_pulsar_basic_auth(Config) ->
     end),
     %% Should fail fast if there is an authn error.
     receive
-        {'DOWN', Ref, process, Pid0, Reason} ->
-            ?assertMatch({error, #{}}, Reason),
-            {error, BrokerErrorMap} = Reason,
-            ?assertMatch([#{error := 'AuthenticationError'}], maps:values(BrokerErrorMap)),
+        {'DOWN', Ref, process, Pid0, Error} ->
+            ?assertMatch({error, _}, Error),
+            {error, Reason} = Error,
+            ?assertMatch(#{error := 'AuthenticationError'}, Reason),
             ok = pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT),
             ok
     after
@@ -282,14 +282,14 @@ t_pulsar_token_auth(Config) ->
                , conn_opts => #{ auth_data => <<"wrong_token">>
                                , auth_method_name => <<"token">>
                                }}),
-      error(Res)
+      exit(Res)
     end),
     %% Should fail fast if there is an authn error.
     receive
-        {'DOWN', Ref, process, Pid0, Reason} ->
-            ?assertMatch({{error, #{}}, _}, Reason),
-            {{error, BrokerErrorMap}, _} = Reason,
-            ?assertMatch([#{error := 'AuthenticationError'}], maps:values(BrokerErrorMap)),
+        {'DOWN', Ref, process, Pid0, Error} ->
+            ?assertMatch({error, _}, Error),
+            {error, Reason} = Error,
+            ?assertMatch(#{error := 'AuthenticationError'}, Reason),
             ok = pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT),
             ok
     after

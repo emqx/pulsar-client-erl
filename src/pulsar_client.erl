@@ -156,19 +156,8 @@ wait_for_socket_and_opts(ClientId, Server, Pid, LastError) ->
             {stop, LastError}
     end.
 
-contains_authn_error(BrokerToErrorMap) ->
-    Iter = maps:iterator(BrokerToErrorMap),
-    do_contains_authn_error(Iter).
-
-do_contains_authn_error(Iter) ->
-    case maps:next(Iter) of
-        {_HostAndPort, #{error := 'AuthenticationError'}, _NIter} ->
-            true;
-        {_HostAndPort, _Error, NIter} ->
-            do_contains_authn_error(NIter);
-        none ->
-            false
-    end.
+contains_authn_error(#{error := 'AuthenticationError'}) -> true;
+contains_authn_error(_Reason) -> false.
 
 handle_call(#get_topic_metadata{topic = Topic}, From,
         State = #state{
@@ -404,10 +393,10 @@ try_connect(URI, Opts0) ->
                     {ok, Result};
                 {error, Reason} ->
                     ok = close_socket_and_flush_signals(Sock, Opts),
-                    {error, #{{Host, Port} => Reason}}
+                    {error, Reason}
             end;
         {error, Reason} ->
-            {error, #{{Host, Port} => Reason}}
+            {error, Reason}
     end.
 
 wait_for_conn_response(Sock, Opts) ->

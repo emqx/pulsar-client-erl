@@ -21,7 +21,7 @@
         ]).
 
 -export([ send_connect_packet/2
-        , send_lookup_topic_packet/4
+        , send_lookup_topic_packet/5
         , send_topic_metadata_packet/4
         , send_subscribe_packet/7
         , send_set_flow_packet/4
@@ -63,9 +63,9 @@ send_topic_metadata_packet(Sock, Topic, RequestId, Opts) ->
     Metadata = topic_metadata_cmd(Topic, RequestId),
     Mod:send(Sock, pulsar_protocol_frame:topic_metadata(Metadata)).
 
-send_lookup_topic_packet(Sock, Topic, RequestId, Opts) ->
+send_lookup_topic_packet(Sock, Topic, RequestId, ReqOpts, Opts) ->
     Mod = tcp_module(Opts),
-    LookupCmd = lookup_topic_cmd(Topic, RequestId),
+    LookupCmd = lookup_topic_cmd(Topic, RequestId, ReqOpts),
     Mod:send(Sock, pulsar_protocol_frame:lookup_topic(LookupCmd)).
 
 send_subscribe_packet(Sock, Topic, RequestId, ConsumerId, Subscription, SubType, Opts) ->
@@ -184,10 +184,12 @@ topic_metadata_cmd(Topic, RequestId) ->
         request_id => RequestId
     }.
 
-lookup_topic_cmd(Topic, RequestId) ->
+lookup_topic_cmd(Topic, RequestId, ReqOpts) ->
+    Authoritative = maps:get(authoritative, ReqOpts, false),
     #{
         topic => Topic,
-        request_id => RequestId
+        request_id => RequestId,
+        authoritative => Authoritative
     }.
 
 message_snd_cmd(Len, ProducerId, SequenceId) when is_integer(Len) ->

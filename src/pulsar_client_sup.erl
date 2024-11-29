@@ -14,11 +14,18 @@
 
 -module(pulsar_client_sup).
 
+%% @doc
+%% pulsar_client_sup (1) (one_for_one)
+%%  |
+%%  +-- pulsar_client (1) (worker) (proxies calls and spawns new workers)
+%%        |
+%%        +-- pulsar_client (0..N)
+
 -behaviour(supervisor).
 
 -export([start_link/0, init/1]).
 
--export([ensure_present/3, ensure_absence/1, find_client/1]).
+-export([ensure_present/3, ensure_absence/1]).
 
 -define(SUPERVISOR, ?MODULE).
 
@@ -36,35 +43,35 @@ init([]) ->
 ensure_present(ClientId, Hosts, Opts) ->
     ChildSpec = child_spec(ClientId, Hosts, Opts),
     case supervisor:start_child(?SUPERVISOR, ChildSpec) of
-        {ok, Pid} -> {ok, Pid};
-        {error, {already_started, Pid}} -> {ok, Pid};
-        {error, already_present} -> {error, client_not_running};
-        {error, Reason} -> {error, Reason}
+        {ok, Pid} ->
+            {ok, Pid};
+        {error, {already_started, Pid}} ->
+            {ok, Pid};
+        {error, already_present} ->
+            {error, client_not_running};
+        {error, Reason} ->
+            {error, map_start_error(Reason)}
     end.
 
 %% ensure client stopped and deleted under supervisor
 ensure_absence(ClientId) ->
-    case supervisor:terminate_child(?SUPERVISOR, ClientId) of
-        ok -> ok = supervisor:delete_child(?SUPERVISOR, ClientId);
+    case supervisor:terminate_child(?SUPERVISOR, child_id(ClientId)) of
+        ok -> ok = supervisor:delete_child(?SUPERVISOR, child_id(ClientId));
         {error, not_found} -> ok
     end.
 
-%% find client pid from client id
-find_client(ClientId) ->
-    Children = supervisor:which_children(?SUPERVISOR),
-    case lists:keyfind(ClientId, 1, Children) of
-        {ClientId, Client, _, _} when is_pid(Client) ->
-            {ok, Client};
-        {ClientId, Restarting, _, _} ->
-            {error, Restarting};
-        false ->
-            {error, {no_such_client, ClientId}}
-    end.
+child_id(ClientId) ->
+    ClientId.
 
-child_spec(ClientId, Hosts, Opts) ->
-    #{id => ClientId,
-      start => {pulsar_client, start_link, [ClientId, Hosts, Opts]},
-      restart => transient,
+child_spec(ClientId, Servers, Opts) ->
+    #{id => child_id(ClientId),
+      start => {pulsar_client_manager, start_link, [ClientId, Servers, Opts]},
+      restart => permanent,
       type => worker,
-      modules => [pulsar_client]
+      shutdown => 5_000
     }.
+
+map_start_error({{error, Reason}, _}) ->
+    Reason;
+map_start_error(Reason) ->
+    Reason.

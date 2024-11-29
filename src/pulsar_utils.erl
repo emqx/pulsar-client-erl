@@ -20,9 +20,21 @@
         , maybe_enable_ssl_opts/2
         , maybe_add_proxy_to_broker_url_opts/2
         , escape_uri/1
+        , foldl_while/3
         ]).
 
 -export([collect_send_calls/1]).
+
+-spec foldl_while(fun((X, Acc) -> {cont | halt, Acc}), Acc, [X]) -> Acc.
+foldl_while(_Fun, Acc, []) ->
+    Acc;
+foldl_while(Fun, Acc, [X | Xs]) ->
+    case Fun(X, Acc) of
+        {cont, NewAcc} ->
+            foldl_while(Fun, NewAcc, Xs);
+        {halt, NewAcc} ->
+            NewAcc
+    end.
 
 merge_opts([Opts1, Opts2]) ->
     proplist_diff(Opts1, Opts2) ++ Opts2;

@@ -1,4 +1,4 @@
-%% Copyright (c) 2013-2019 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2013-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 -behaviour(gen_server).
 
--export([start_link/3]).
+-export([start_link/4]).
 
 %% gen_server Callbacks
 -export([ init/1
@@ -24,13 +24,13 @@
         , handle_cast/2
         , handle_info/2
         , terminate/2
-        , code_change/3
         , format_status/1
         , format_status/2
         ]).
 
 -export([ get_topic_metadata/2
         , lookup_topic/2
+        , lookup_topic/3
         , lookup_topic_async/2
         ]).
 
@@ -40,7 +40,24 @@
 
 -export([try_initial_connection/3]).
 
--record(state, {sock, servers, opts, producers = #{}, request_id = 0, requests = #{}, from, last_bin = <<>>}).
+%% Internal export for tests
+-export([handle_response/2]).
+
+%%--------------------------------------------------------------------
+%% Type definitions
+%%--------------------------------------------------------------------
+
+-record(state, { client_id
+               , parent
+               , sock
+               , server
+               , opts
+               , request_id = 0
+               , requests = #{}
+               , from
+               , last_bin = <<>>
+               , extra = #{}
+               }).
 
 -export_type([lookup_topic_response/0]).
 -type lookup_topic_response() :: {ok, #{ brokerServiceUrl => string()
@@ -59,23 +76,36 @@
 -define(PONG_TS, {pulsar_rcvd, pong}).
 -define(PONG_TIMEOUT, ?PING_INTERVAL * 2). %% 60s
 -define(CONN_TIMEOUT, 30000).
--define(RECONNECT_TIMEOUT, 5_000).
 
-start_link(ClientId, Servers, Opts) ->
-    gen_server:start_link({local, ClientId}, ?MODULE, [Servers, Opts], []).
+%% calls/casts/infos
+-record(get_topic_metadata, {topic :: pulsar_client_manager:topic()}).
+-record(lookup_topic, {partition_topic, opts = #{}}).
+-record(lookup_topic_async, {from, partition_topic, opts = #{}}).
+
+%%--------------------------------------------------------------------
+%% API
+%%--------------------------------------------------------------------
+
+start_link(ClientId, Server, Opts, Owner) ->
+    gen_server:start_link(?MODULE, [ClientId, Server, Opts, Owner], []).
 
 get_topic_metadata(Pid, Topic) ->
-    Call = self(),
-    gen_server:call(Pid, {get_topic_metadata, Topic, Call}, 30000).
+    gen_server:call(Pid, #get_topic_metadata{topic = Topic}, 30_000).
 
 lookup_topic(Pid, PartitionTopic) ->
-    gen_server:call(Pid, {lookup_topic, PartitionTopic}, 30000).
+    lookup_topic(Pid, PartitionTopic, _Opts = #{}).
+
+lookup_topic(Pid, PartitionTopic, Opts) ->
+    gen_server:call(Pid, #lookup_topic{partition_topic = PartitionTopic, opts = Opts}, 30_000).
 
 -spec lookup_topic_async(server_ref(), binary()) -> {ok, reference()}.
 lookup_topic_async(Pid, PartitionTopic) ->
+    lookup_topic_async(Pid, PartitionTopic, _Opts = #{}).
+
+lookup_topic_async(Pid, PartitionTopic, Opts) ->
     Ref = monitor(process, Pid, [{alias, reply_demonitor}]),
     From = {self(), Ref},
-    gen_server:cast(Pid, {lookup_topic_async, From, PartitionTopic}),
+    gen_server:cast(Pid, #lookup_topic_async{from = From, partition_topic = PartitionTopic, opts = Opts}),
     {ok, Ref}.
 
 get_status(Pid) ->
@@ -88,13 +118,13 @@ get_alive_pulsar_url(Pid) ->
 %% gen_server callback
 %%--------------------------------------------------------------------
 
-init([Servers, Opts]) ->
+init([ClientId, Server, Opts, Parent]) ->
     process_flag(trap_exit, true),
     ConnTimeout = maps:get(connect_timeout, Opts, ?CONN_TIMEOUT),
-    Parent = self(),
-    Pid = spawn_link(fun() -> try_initial_connection(Parent, Servers, Opts) end),
+    Me = self(),
+    Pid = spawn_link(fun() -> try_initial_connection(Me, Server, Opts) end),
     TRef = erlang:send_after(ConnTimeout, self(), timeout),
-    Result = wait_for_socket_and_opts(Servers, Pid, timeout),
+    Result = wait_for_socket_and_opts(ClientId, Server, Pid, Parent, timeout),
     _ = erlang:cancel_timer(TRef),
     exit(Pid, kill),
     receive
@@ -109,10 +139,16 @@ init([Servers, Opts]) ->
     end,
     Result.
 
-wait_for_socket_and_opts(Servers, Pid, LastError) ->
+wait_for_socket_and_opts(ClientId, Server, Pid, Parent, LastError) ->
     receive
         {Pid, {ok, {Sock, Opts}}} ->
-            State = #state{sock = Sock, servers = Servers, opts = Opts},
+            State = #state{
+              client_id = ClientId,
+              parent = Parent,
+              sock = Sock,
+              server = Server,
+              opts = Opts
+            },
             {ok, State};
         {Pid, {error, Error}} ->
             case contains_authn_error(Error) of
@@ -120,133 +156,134 @@ wait_for_socket_and_opts(Servers, Pid, LastError) ->
                     log_error("authentication error starting pulsar client: ~p", [Error]),
                     {stop, Error};
                 false ->
-                    wait_for_socket_and_opts(Servers, Pid, Error)
+                    wait_for_socket_and_opts(ClientId, Server, Pid, Parent, Error)
             end;
         timeout ->
             log_error("timed out when starting pulsar client; last error: ~p", [LastError]),
             {stop, LastError}
     end.
 
-contains_authn_error(BrokerToErrorMap) ->
-    Iter = maps:iterator(BrokerToErrorMap),
-    do_contains_authn_error(Iter).
+contains_authn_error(#{error := 'AuthenticationError'}) -> true;
+contains_authn_error(_Reason) -> false.
 
-do_contains_authn_error(Iter) ->
-    case maps:next(Iter) of
-        {_HostAndPort, #{error := 'AuthenticationError'}, _NIter} ->
-            true;
-        {_HostAndPort, _Error, NIter} ->
-            do_contains_authn_error(NIter);
-        none ->
-            false
-    end.
-
-handle_call({get_topic_metadata, Topic, Call}, From,
+handle_call(#get_topic_metadata{topic = Topic}, From,
         State = #state{
             sock = Sock,
             opts = Opts,
             request_id = RequestId,
             requests = Reqs,
-            producers = Producers,
-            servers = Servers
+            server = Server
         }) ->
-    case get_alive_sock_opts(Servers, Sock, Opts) of
+    case get_alive_sock_opts(Server, Sock, Opts) of
         {error, Reason} ->
             log_error("get_topic_metadata from pulsar servers failed: ~p", [Reason]),
-            start_reconnect_timer(),
-            {reply, {error, no_servers_available}, State};
+            Reply = {error, unavailable},
+            {stop, {shutdown, Reason}, Reply, State};
         {ok, {Sock1, Opts1}} ->
             pulsar_socket:send_topic_metadata_packet(Sock1, Topic, RequestId, Opts1),
             {noreply, next_request_id(State#state{
                 requests = maps:put(RequestId, {From, Topic}, Reqs),
-                producers = maps:put(Topic, Call, Producers),
                 sock = Sock1,
                 opts = Opts1
             })}
     end;
-handle_call({lookup_topic, Topic}, From,
+handle_call(#lookup_topic{partition_topic = Topic, opts = ReqOpts}, From,
         State = #state{
             sock = Sock,
             opts = Opts,
             request_id = RequestId,
             requests = Reqs,
-            servers = Servers
+            server = Server
         }) ->
-    case get_alive_sock_opts(Servers, Sock, Opts) of
+    case get_alive_sock_opts(Server, Sock, Opts) of
         {error, Reason} ->
-            log_error("lookup_topic from pulsar failed: ~p down", [Reason]),
-            start_reconnect_timer(),
-            {reply, {error, no_servers_available}, State};
+            log_error("lookup_topic from pulsar failed: ~0p down", [Reason]),
+            {stop, {shutdown, Reason}, {error, unavailable}, State};
         {ok, {Sock1, Opts1}} ->
-            pulsar_socket:send_lookup_topic_packet(Sock1, Topic, RequestId, Opts1),
+            pulsar_socket:send_lookup_topic_packet(Sock1, Topic, RequestId, ReqOpts, Opts1),
             {noreply, next_request_id(State#state{
                 requests = maps:put(RequestId, {From, Topic}, Reqs),
                 sock = Sock1,
                 opts = Opts1
             })}
     end;
-handle_call(get_status, From, State = #state{sock = undefined, opts = Opts, servers = Servers}) ->
-    case get_alive_sock_opts(Servers, undefined, Opts) of
+handle_call(get_status, From, State = #state{sock = undefined, opts = Opts, server = Server}) ->
+    case get_alive_sock_opts(Server, undefined, Opts) of
         {error, Reason} ->
-            log_error("get_status from pulsar failed: ~p", [Reason]),
-            start_reconnect_timer(),
-            {reply, false, State};
+            log_error("get_status from pulsar failed: ~0p", [Reason]),
+            {stop, {shutdown, Reason}, false, State};
         {ok, {Sock, Opts1}} ->
-            {reply, not is_pong_longtime_no_received(),
-                State#state{from = From, sock = Sock, opts = Opts1}}
+            IsHealthy = not is_pong_longtime_no_received(),
+            case IsHealthy of
+                true ->
+                    {reply, IsHealthy, State#state{from = From, sock = Sock, opts = Opts1}};
+                false ->
+                    {stop, {shutdown, no_pong_received}, IsHealthy, State}
+            end
     end;
 handle_call(get_status, _From, State) ->
-    {reply, not is_pong_longtime_no_received(), State};
-handle_call(get_alive_pulsar_url, From, State = #state{sock = Sock, opts = Opts, servers = Servers}) ->
-    case get_alive_sock_opts(Servers, Sock, Opts) of
-        {error, _Reason} ->
-            start_reconnect_timer(),
-            {reply, {error, no_servers_available}, State};
+    IsHealthy = not is_pong_longtime_no_received(),
+    case IsHealthy of
+        true ->
+            {reply, IsHealthy, State};
+        false ->
+            {stop, {shutdown, no_pong_received}, IsHealthy, State}
+    end;
+handle_call(get_alive_pulsar_url, From, State = #state{sock = Sock, opts = Opts, server = Server}) ->
+    case get_alive_sock_opts(Server, Sock, Opts) of
+        {error, Reason} ->
+            {stop, {shutdown, Reason}, {error, Reason}, State};
         {ok, {Sock1, Opts1}} ->
-            {reply, pulsar_socket:get_pulsar_uri(Sock1, Opts),
-                State#state{from = From, sock = Sock1, opts = Opts1}}
+            URI = pulsar_socket:get_pulsar_uri(Sock1, Opts),
+            {reply, URI, State#state{from = From, sock = Sock1, opts = Opts1}}
     end;
 handle_call(_Req, _From, State) ->
-    {reply, ok, State, hibernate}.
+    {reply, {error, unknown_call}, State, hibernate}.
 
-
-handle_cast({lookup_topic_async, From, PartitionTopic}, State) ->
+handle_cast(#lookup_topic_async{from = From, partition_topic = PartitionTopic, opts = Opts}, State) ->
     %% re-use the same logic as the call, as the process of looking up
     %% a topic is itself async in the gen_server:call.
-    self() ! {'$gen_call', From, {lookup_topic, PartitionTopic}},
+    self() ! {'$gen_call', From, #lookup_topic{partition_topic = PartitionTopic, opts = Opts}},
     {noreply, State};
 handle_cast(_Req, State) ->
     {noreply, State, hibernate}.
 
-
+handle_info({'EXIT', Parent, Reason}, State = #state{parent = Parent}) ->
+    {stop, {shutdown, Reason}, State};
 handle_info({Transport, Sock, Bin}, State = #state{sock = Sock, last_bin = LastBin})
         when Transport == tcp; Transport == ssl ->
     {noreply, parse_packet(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State)};
 handle_info({Error, Sock, Reason}, State = #state{sock = Sock})
         when Error == ssl_error; Error == tcp_error ->
     log_error("transport layer error: ~p", [Reason]),
-    start_reconnect_timer(),
-    {noreply, State#state{sock = undefined}, hibernate};
+    {stop, {shutdown, Reason}, State#state{sock = undefined}};
 handle_info({Closed, Sock}, State = #state{sock = Sock})
         when Closed == tcp_closed; Closed == ssl_closed ->
     log_error("connection closed by peer", []),
-    start_reconnect_timer(),
-    {noreply, State#state{sock = undefined}, hibernate};
-handle_info(ping, State = #state{sock = undefined, opts = Opts, servers = Servers}) ->
-    case get_alive_sock_opts(Servers, undefined, Opts) of
+    {stop, {shutdown, connection_closed}, State#state{sock = undefined}};
+handle_info(ping, State = #state{sock = undefined, opts = Opts, server = Server}) ->
+    case get_alive_sock_opts(Server, undefined, Opts) of
         {error, Reason} ->
             log_error("ping to pulsar servers failed: ~p", [Reason]),
-            start_reconnect_timer(),
-            {noreply, State, hibernate};
+            {stop, {shutdown, Reason}, State};
         {ok, {Sock, Opts1}} ->
             pulsar_socket:ping(Sock, Opts1),
+            start_check_pong_timeout(),
             {noreply, State#state{sock = Sock, opts = Opts1}, hibernate}
     end;
 handle_info(ping, State = #state{sock = Sock, opts = Opts}) ->
     pulsar_socket:ping(Sock, Opts),
+    start_check_pong_timeout(),
     {noreply, State, hibernate};
+handle_info(check_pong, State) ->
+    case is_pong_longtime_no_received() of
+        true ->
+            {stop, {shutdown, no_pong_received}, State};
+        false ->
+            {noreply, State, hibernate}
+    end;
 handle_info(_Info, State) ->
-    log_error("received unknown message: ~p", [_Info]),
+    log_warning("received unknown message: ~p", [_Info]),
     {noreply, State, hibernate}.
 
 terminate(_Reason, #state{sock = undefined}) ->
@@ -254,9 +291,6 @@ terminate(_Reason, #state{sock = undefined}) ->
 terminate(_Reason, #state{sock = Sock, opts = Opts}) ->
     _ = pulsar_socket:close(Sock, Opts),
     ok.
-
-code_change(_, State, _) ->
-    {ok, State}.
 
 format_status(Status) ->
     maps:map(
@@ -280,9 +314,9 @@ censor_secrets(State) ->
 parse_packet({incomplete, Bin}, State) ->
     State#state{last_bin = Bin};
 parse_packet({Cmd, <<>>}, State) ->
-    handle_response(Cmd, State#state{last_bin = <<>>});
+    ?MODULE:handle_response(Cmd, State#state{last_bin = <<>>});
 parse_packet({Cmd, LastBin}, State) ->
-    State2 = handle_response(Cmd, State),
+    State2 = ?MODULE:handle_response(Cmd, State),
     parse_packet(pulsar_protocol_frame:parse(LastBin), State2).
 
 handle_response({connected, _ConnectedData}, State = #state{from = undefined}) ->
@@ -322,22 +356,21 @@ handle_response({lookupTopicResponse, #{error := Reason, message := Msg,
         undefined ->
             State
     end;
-handle_response({lookupTopicResponse, #{request_id := RequestId} = Response},
+handle_response({lookupTopicResponse, #{response := 'Redirect'} = Response}, State0) ->
+    #state{requests = Requests0} = State0,
+    #{request_id := RequestId} = Response,
+    case maps:take(RequestId, Requests0) of
+        {{From, _Topic}, Requests} ->
+            State = State0#state{requests = Requests},
+            handle_redirect_lookup_response(State, From, Response);
+        error ->
+            State0
+    end;
+handle_response({lookupTopicResponse, #{request_id := RequestId, response := 'Connect'} = Response},
                 State = #state{requests = Reqs, opts = Opts}) ->
     case maps:get(RequestId, Reqs, undefined) of
         {From, _} ->
-            ServiceURL =
-                case {Opts, Response} of
-                    {#{enable_ssl := true}, #{brokerServiceUrlTls := BrokerServiceUrlTls}} ->
-                        BrokerServiceUrlTls;
-                    {#{enable_ssl := true}, #{brokerServiceUrl := BrokerServiceUrl}} ->
-                        log_error("SSL enabled but brokerServiceUrlTls is not provided by pulsar,"
-                                  " falling back to brokerServiceUrl: ~p", [BrokerServiceUrl]),
-                        BrokerServiceUrl;
-                    {_, #{brokerServiceUrl := BrokerServiceUrl}} ->
-                        %% the 'brokerServiceUrl' is a mandatory field in case the SSL is disabled
-                        BrokerServiceUrl
-                end,
+            ServiceURL = get_service_url_from_lookup_response(Response, Opts),
             gen_server:reply(From, {ok,
                 #{ brokerServiceUrl => ServiceURL
                  , proxy_through_service_url => maps:get(proxy_through_service_url, Response, false)
@@ -357,22 +390,17 @@ handle_response(_Info, State) ->
     log_error("handle unknown response: ~p", [_Info]),
     State.
 
-get_alive_sock_opts(Servers, undefined, Opts) ->
-    try_connect(Servers, Opts);
-get_alive_sock_opts(Servers, Sock, Opts) ->
+get_alive_sock_opts(Server, undefined, Opts) ->
+    try_connect(Server, Opts);
+get_alive_sock_opts(Server, Sock, Opts) ->
     case pulsar_socket:getstat(Sock, Opts) of
         {ok, _} ->
             {ok, {Sock, Opts}};
         {error, _} ->
-            try_connect(Servers, Opts)
+            try_connect(Server, Opts)
     end.
 
-try_connect(Servers, Opts) ->
-    do_try_connect(Servers, Opts, #{}).
-
-do_try_connect([], _Opts, Res) ->
-    {error, Res};
-do_try_connect([URI | Servers], Opts0, Res) ->
+try_connect(URI, Opts0) ->
     {Type, {Host, Port}} = pulsar_utils:parse_url(URI),
     Opts = pulsar_utils:maybe_enable_ssl_opts(Type, Opts0),
     case pulsar_socket:connect(Host, Port, Opts) of
@@ -383,10 +411,10 @@ do_try_connect([URI | Servers], Opts0, Res) ->
                     {ok, Result};
                 {error, Reason} ->
                     ok = close_socket_and_flush_signals(Sock, Opts),
-                    do_try_connect(Servers, Opts, Res#{{Host, Port} => Reason})
+                    {error, Reason}
             end;
         {error, Reason} ->
-            do_try_connect(Servers, Opts, Res#{{Host, Port} => Reason})
+            {error, Reason}
     end.
 
 wait_for_conn_response(Sock, Opts) ->
@@ -415,20 +443,25 @@ next_request_id(State = #state{request_id = RequestId}) ->
 log_error(Fmt, Args) ->
     do_log(error, Fmt, Args).
 
+log_warning(Fmt, Args) ->
+    do_log(warning, Fmt, Args).
+
 do_log(Level, Fmt, Args) ->
-    logger:log(Level, "[pulsar-client] " ++ Fmt, Args, #{domain => [pulsar, client]}).
+    logger:log(Level, "[pulsar-client] " ++ Fmt, Args, #{domain => [pulsar, client_worker]}).
 
 %% we use the same ping workflow as it attempts the connection
-start_reconnect_timer() ->
-    erlang:send_after(?RECONNECT_TIMEOUT, self(), ping).
-
 start_keepalive() ->
     erlang:send_after(?PING_INTERVAL, self(), ping).
 
+start_check_pong_timeout() ->
+    erlang:send_after(?PONG_TIMEOUT, self(), check_pong).
+
+%% TODO: use explicit state instead of dictionary
 pong_received() ->
     _ = erlang:put(?PONG_TS, now_ts()),
     ok.
 
+%% TODO: use explicit state instead of dictionary
 is_pong_longtime_no_received() ->
     case erlang:get(?PONG_TS) of
         undefined -> false;
@@ -454,16 +487,39 @@ close_socket_and_flush_signals(Sock, Opts) ->
             ok
     end.
 
-try_initial_connection(Parent, Servers, Opts) ->
-    case get_alive_sock_opts(Servers, undefined, Opts) of
+try_initial_connection(Parent, Server, Opts) ->
+    case get_alive_sock_opts(Server, undefined, Opts) of
         {error, Reason} ->
             %% to avoid a hot restart loop leading to max restart
             %% intensity when pulsar (or the connection to it) is
             %% having a bad day...
             Parent ! {self(), {error, Reason}},
             timer:sleep(100),
-            ?MODULE:try_initial_connection(Parent, Servers, Opts);
+            ?MODULE:try_initial_connection(Parent, Server, Opts);
         {ok, {Sock, Opts1}} ->
             pulsar_socket:controlling_process(Sock, Parent, Opts1),
             Parent ! {self(), {ok, {Sock, Opts1}}}
     end.
+
+get_service_url_from_lookup_response(Response, Opts) ->
+    case {Opts, Response} of
+        {#{enable_ssl := true}, #{brokerServiceUrlTls := BrokerServiceUrlTls}} ->
+            BrokerServiceUrlTls;
+        {#{enable_ssl := true}, #{brokerServiceUrl := BrokerServiceUrl}} ->
+            log_error("SSL enabled but brokerServiceUrlTls is not provided by pulsar,"
+                      " falling back to brokerServiceUrl: ~p", [BrokerServiceUrl]),
+            BrokerServiceUrl;
+        {_, #{brokerServiceUrl := BrokerServiceUrl}} ->
+            %% the 'brokerServiceUrl' is a mandatory field in case the SSL is disabled
+            BrokerServiceUrl
+    end.
+
+%% If we receive a response of lookup type `Redirect', we must re-issue the lookup
+%% connecting to the returned broker.
+%% https://pulsar.apache.org/docs/2.11.x/developing-binary-protocol/#lookuptopicresponse
+handle_redirect_lookup_response(State, From, Response) ->
+    #state{opts = Opts} = State,
+    ServiceURL = get_service_url_from_lookup_response(Response, Opts),
+    ReqOpts = #{authoritative => maps:get(authoritative, Response, false)},
+    gen_server:reply(From, {redirect, ServiceURL, ReqOpts}),
+    State.

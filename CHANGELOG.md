@@ -1,3 +1,10 @@
+# 2.0.0
+
+- Fixed handling of `Redirect` lookup type in `CommandLookupTopicResponse`.  Previously,
+  the broker service URL that was returned was interpreted by the producer as the broker
+  to connect to instead of the client re-issuing the lookup command to the new broker
+  endpoint.  Several `pulsar_client` APIs were refactored to accomodate this fix.
+
 # 1.0.0
 
 - Removed support for hot upgrades.

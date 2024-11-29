@@ -206,7 +206,7 @@ handle_get_status(State0) ->
 
 handle_get_alive_pulsar_url(State0) ->
     WorkerPids = alive_workers(State0),
-    Fun = fun pulsar_client_worker:get_alive_pulsar_url/1,
+    Fun = fun pulsar_client:get_alive_pulsar_url/1,
     Args = [],
     case get_first_successful_call(WorkerPids, Fun, Args) of
         {ok, URI} ->
@@ -223,7 +223,7 @@ handle_get_alive_pulsar_url(State0) ->
 
 handle_get_topic_metadata(State0, Topic) ->
     WorkerPids = alive_workers(State0),
-    Fun = fun pulsar_client_worker:get_topic_metadata/2,
+    Fun = fun pulsar_client:get_topic_metadata/2,
     Args = [Topic],
     case get_first_successful_call(WorkerPids, Fun, Args) of
         {ok, _} = Res ->
@@ -240,7 +240,7 @@ handle_get_topic_metadata(State0, Topic) ->
 
 handle_lookup_topic_async(State0, PartitionTopic) ->
     WorkerPids = alive_workers(State0),
-    Fun = fun pulsar_client_worker:lookup_topic/2,
+    Fun = fun pulsar_client:lookup_topic/2,
     Args = [PartitionTopic],
     case get_first_successful_call(WorkerPids, Fun, Args) of
         {redirect, ServiceURL, Opts} ->
@@ -256,7 +256,7 @@ handle_lookup_topic_async(State0, PartitionTopic) ->
 handle_lookup_topic_async_fresh_worker(State0, PartitionTopic) ->
     maybe
         {{ok, Pid}, State} ?= spawn_any_and_wait_connected(State0),
-        Fun = fun pulsar_client_worker:lookup_topic/2,
+        Fun = fun pulsar_client:lookup_topic/2,
         Args = [PartitionTopic],
         case get_first_successful_call([Pid], Fun, Args) of
             {redirect, ServiceURL, Opts} ->
@@ -272,7 +272,7 @@ handle_lookup_topic_async_fresh_worker(State0, PartitionTopic) ->
 handle_redirect_lookup(State0, ServiceURL, Opts, PartitionTopic) ->
     case find_alive_worker(State0, ServiceURL) of
         {ok, Pid} ->
-            try pulsar_client_worker:lookup_topic(Pid, PartitionTopic, Opts) of
+            try pulsar_client:lookup_topic(Pid, PartitionTopic, Opts) of
                 {redirect, ServiceURL, _Opts} ->
                     %% Should not respond with this, since we've just used this server.
                     %% Replying error to avoid loop
@@ -347,7 +347,7 @@ spawn_any_and_wait_connected(State0, SeedURLs) ->
     Res =
         pulsar_utils:foldl_while(
           fun(URL, _Acc) ->
-            case pulsar_client_worker:start_link(ClientId, URL, Opts) of
+            case pulsar_client:start_link(ClientId, URL, Opts) of
                 {error, _} = Error ->
                     {cont, Error};
                 {ok, Pid} ->

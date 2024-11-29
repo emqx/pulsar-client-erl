@@ -19,7 +19,7 @@
 %%  |
 %%  +-- pulsar_client (1) (worker) (proxies calls and spawns new workers)
 %%        |
-%%        +-- pulsar_client_worker (0..N)
+%%        +-- pulsar_client (0..N)
 
 -behaviour(supervisor).
 

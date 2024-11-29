@@ -942,7 +942,7 @@ escape(Str) ->
     NormalizedStr = unicode:characters_to_nfd_list(Str),
     iolist_to_binary(pulsar_utils:escape_uri(NormalizedStr)).
 
--spec handle_lookup_topic_reply(pulsar_client_worker:lookup_topic_response(), state()) -> handler_result().
+-spec handle_lookup_topic_reply(pulsar_client:lookup_topic_response(), state()) -> handler_result().
 handle_lookup_topic_reply({error, Error}, State) ->
     log_error("error looking up topic: ~0p", [Error], State),
     try_close_socket(State),

@@ -1343,7 +1343,7 @@ t_topic_lookup_redirect(Config) ->
 
     Topic = "persistent://public/default/" ++ atom_to_list(?FUNCTION_NAME),
     TestPid = self(),
-    Mod = pulsar_client_worker,
+    Mod = pulsar_client,
     ok = meck:new(Mod, [passthrough]),
     ok = meck:expect(Mod, handle_response, fun
       ({lookupTopicResponse, Response0} = Msg, State) ->

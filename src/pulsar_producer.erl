@@ -345,8 +345,7 @@ connecting(info, {E, Sock, Reason}, State) when E =:= tcp_error; E =:= ssl_error
 connecting(info, ?SOCK_ERR(Sock, Reason), State) ->
     handle_socket_close(connecting, Sock, Reason, State);
 connecting(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
-    {Cmd, _} = pulsar_protocol_frame:parse(Bin),
-    handle_response(Cmd, State);
+    handle_and_parse(pulsar_protocol_frame:parse(Bin), State);
 connecting(info, Msg, State) ->
     log_info("[connecting] unknown message received ~p~n  ~p", [Msg, State], State),
     keep_state_and_data;
@@ -401,7 +400,7 @@ connected(_EventType, ?SOCK_ERR(Sock, Reason), State) ->
     handle_socket_close(connected, Sock, Reason, State);
 connected(_EventType, {Inet, _, Bin}, State = #{last_bin := LastBin})
         when Inet == tcp; Inet == ssl ->
-    parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
+    handle_and_parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
 connected(_EventType, ping, State = #{sock := Sock, opts := Opts}) ->
     ?POORMAN(Sock, pulsar_socket:ping(Sock, Opts)),
     {keep_state, State};
@@ -412,7 +411,7 @@ connected({call, From}, _EventContent, _State) ->
 connected(cast, _EventContent, _State) ->
     keep_state_and_data;
 connected(_EventType, EventContent, State) ->
-    handle_response(EventContent, State).
+    handle_and_parse(EventContent, State).
 
 handle_socket_close(StateName, Sock, Reason, #{sock := Sock} = State) ->
     ?tp("pulsar_socket_close", #{sock => Sock, reason => Reason}),
@@ -517,21 +516,25 @@ is_replayq_durable(#{replayq_offload_mode := true}, _Q) ->
 is_replayq_durable(_, Q) ->
     not replayq:is_mem_only(Q).
 
-parse({incomplete, Bin}, State) ->
-    {keep_state, State#{last_bin := Bin}};
-parse({Cmd, <<>>}, State) ->
-    handle_response(Cmd, State#{last_bin := <<>>});
-parse({Cmd, LastBin}, State) ->
-    State2 = case handle_response(Cmd, State) of
-        keep_state_and_data -> State;
-        {_, State1 = #{}} -> State1;
-        {_, _NextState, State1 = #{}} -> State1;
-        {_, _NextState, State1 = #{}, _Actions} -> State1
-    end,
-    parse(pulsar_protocol_frame:parse(LastBin), State2).
+handle_and_parse(DecodedHead, State) ->
+    try
+        {keep_state, handle_and_parse2(DecodedHead, State)}
+    catch
+        throw:{connected, State1} ->
+            {next_state, connected, State1};
+        throw:{reconnect, State1} ->
+            %% discard the remaining bytes (if any)
+            ?NEXT_STATE_IDLE_RECONNECT(State1#{last_bin := <<>>})
+    end.
 
--spec handle_response(_EventContent, state()) ->
-          handler_result().
+handle_and_parse2({incomplete, Bin}, State) ->
+    State#{last_bin := Bin};
+handle_and_parse2({Cmd, LastBin}, State) ->
+    %% push LastBin because handle_response may throw
+    State2 = handle_response(Cmd, State#{last_bin => LastBin}),
+    handle_and_parse2(pulsar_protocol_frame:parse(LastBin), State2).
+
+-spec handle_response(_EventContent, state()) -> state().
 handle_response({connected, _ConnectedData}, State0 = #{
         sock := Sock,
         opts := Opts,
@@ -541,20 +544,20 @@ handle_response({connected, _ConnectedData}, State0 = #{
     }) ->
     start_keepalive(),
     ?POORMAN(Sock, pulsar_socket:send_create_producer_packet(Sock, PartitionTopic, RequestId, ProducerId, Opts)),
-    {keep_state, next_request_id(State0)};
+    next_request_id(State0);
 handle_response({producer_success, #{producer_name := ProName}}, State) ->
-    {next_state, connected, State#{producer_name := ProName}};
-handle_response({pong, #{}}, _State) ->
+    throw({connected, State#{producer_name := ProName}});
+handle_response({pong, #{}}, State) ->
     start_keepalive(),
-    keep_state_and_data;
-handle_response({ping, #{}}, #{sock := Sock, opts := Opts}) ->
+    State;
+handle_response({ping, #{}}, #{sock := Sock, opts := Opts} = State) ->
     ?POORMAN(Sock, pulsar_socket:pong(Sock, Opts)),
-    keep_state_and_data;
+    State;
 handle_response({close_producer, #{}}, State = #{ partitiontopic := Topic
                                                 }) ->
     log_error("Close producer: ~p~n", [Topic], State),
     try_close_socket(State),
-    ?NEXT_STATE_IDLE_RECONNECT(State);
+    throw({reconnect, State});
 handle_response({send_receipt, Resp = #{sequence_id := SequenceId}}, State) ->
     #{ callback := Callback
      , inflight_calls := InflightCalls0
@@ -565,7 +568,7 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}}, State) ->
     case maps:get(SequenceId, Reqs, undefined) of
         undefined ->
             _ = invoke_callback(Callback, {ok, Resp}),
-            {keep_state, State};
+            State;
         ?INFLIGHT_REQ(QAckRef, FromsToMessages, BatchSize) ->
             ok = replayq:ack(Q, QAckRef),
             lists:foreach(
@@ -584,17 +587,17 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}}, State) ->
               FromsToMessages),
             InflightCalls = InflightCalls0 - BatchSize,
             pulsar_metrics:inflight_set(State, InflightCalls),
-            {keep_state, State#{ requests := maps:remove(SequenceId, Reqs)
-                               , inflight_calls := InflightCalls
-                               }}
+            State#{ requests := maps:remove(SequenceId, Reqs)
+                  , inflight_calls := InflightCalls
+                  }
     end;
 handle_response({error, #{error := Error, message := Msg}}, State) ->
     log_error("Response error:~p, msg:~p~n", [Error, Msg], State),
     try_close_socket(State),
-    ?NEXT_STATE_IDLE_RECONNECT(State);
+    throw({reconnect, State});
 handle_response(Msg, State) ->
     log_error("Receive unknown message:~p~n", [Msg], State),
-    keep_state_and_data.
+    State.
 
 -spec send_batch_payload([{timestamp(), [pulsar:message()]}], sequence_id(), state()) -> ok.
 send_batch_payload(Messages, SequenceId, #{

@@ -45,7 +45,6 @@ callback_mode() -> [state_functions].
                 opts = #{},
                 cb_module,
                 cb_state,
-                last_bin = <<>>,
                 flow,
                 flow_rate}).
 
@@ -89,7 +88,7 @@ idle(_EventType, _Event, _State) ->
 connecting(_, do_connect, State) ->
     do_connect(State);
 connecting(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
-    {Cmd, _} = pulsar_protocol_frame:parse(Bin),
+    Cmd = pulsar_protocol_frame:parse(Bin),
     handle_response(Cmd, State);
 connecting({call, From}, get_state, _State) ->
     {keep_state_and_data, [{reply, From, ?FUNCTION_NAME}]};
@@ -116,9 +115,9 @@ connected(_EventType, {InetError, _Sock, Reason}, State = #state{partitiontopic 
     log_error("tcp error on topic: ~p, error: ~p~n", [Topic, Reason]),
     erlang:send_after(5000, self(), do_connect),
     {next_state, idle, State#state{sock = undefined}};
-connected(_EventType, {Inet, _, Bin}, State = #state{last_bin = LastBin})
-        when Inet == tcp; Inet == ssl ->
-    parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
+connected(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
+    Cmd = pulsar_protocol_frame:parse(Bin),
+    handle_response(Cmd, State);
 connected(_EventType, ping, State = #state{sock = Sock, opts = Opts}) ->
     pulsar_socket:ping(Sock, Opts),
     {keep_state, State};
@@ -160,17 +159,6 @@ censor_secrets(State0 = #state{opts = Opts0 = #{conn_opts := ConnOpts0 = #{auth_
     State0#state{opts = Opts0#{conn_opts := ConnOpts0#{auth_data := "******"}}};
 censor_secrets(State) ->
     State.
-
-parse({incomplete, Bin}, State) ->
-    {keep_state, State#state{last_bin = Bin}};
-parse({Cmd, <<>>}, State) ->
-    handle_response(Cmd, State#state{last_bin = <<>>});
-parse({Cmd, LastBin}, State) ->
-    State2 = case handle_response(Cmd, State) of
-        {_, State1} -> State1;
-        {_, _, State1} -> State1
-    end,
-    parse(pulsar_protocol_frame:parse(LastBin), State2).
 
 handle_response({connected, _ConnectedData}, State = #state{sock = Sock,
                                                             request_id = RequestId,

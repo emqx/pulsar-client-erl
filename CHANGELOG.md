@@ -1,3 +1,8 @@
+# 2.0.1
+
+- Change packet framing from 'packet-raw' to 'packet-4'.
+  This also fixes the inflight state leak in producer process.
+
 # 2.0.0
 
 - Fixed handling of `Redirect` lookup type in `CommandLookupTopicResponse`.  Previously,

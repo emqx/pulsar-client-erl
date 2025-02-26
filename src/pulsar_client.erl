@@ -55,7 +55,6 @@
                , request_id = 0
                , requests = #{}
                , from
-               , last_bin = <<>>
                , extra = #{}
                }).
 
@@ -250,9 +249,8 @@ handle_cast(_Req, State) ->
 
 handle_info({'EXIT', Parent, Reason}, State = #state{parent = Parent}) ->
     {stop, {shutdown, Reason}, State};
-handle_info({Transport, Sock, Bin}, State = #state{sock = Sock, last_bin = LastBin})
-        when Transport == tcp; Transport == ssl ->
-    {noreply, parse_packet(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State)};
+handle_info({Transport, Sock, Bin}, State = #state{sock = Sock}) when Transport == tcp; Transport == ssl ->
+    {noreply, ?MODULE:handle_response(pulsar_protocol_frame:parse(Bin), State)};
 handle_info({Error, Sock, Reason}, State = #state{sock = Sock})
         when Error == ssl_error; Error == tcp_error ->
     log_error("transport layer error: ~p", [Reason]),
@@ -310,14 +308,6 @@ censor_secrets(State0 = #state{opts = Opts0 = #{conn_opts := ConnOpts0 = #{auth_
     State0#state{opts = Opts0#{conn_opts := ConnOpts0#{auth_data := "******"}}};
 censor_secrets(State) ->
     State.
-
-parse_packet({incomplete, Bin}, State) ->
-    State#state{last_bin = Bin};
-parse_packet({Cmd, <<>>}, State) ->
-    ?MODULE:handle_response(Cmd, State#state{last_bin = <<>>});
-parse_packet({Cmd, LastBin}, State) ->
-    State2 = ?MODULE:handle_response(Cmd, State),
-    parse_packet(pulsar_protocol_frame:parse(LastBin), State2).
 
 handle_response({connected, _ConnectedData}, State = #state{from = undefined}) ->
     start_keepalive(),
@@ -421,9 +411,9 @@ wait_for_conn_response(Sock, Opts) ->
     receive
         {Transport, Sock, Bin} when Transport == tcp; Transport == ssl ->
             case pulsar_protocol_frame:parse(Bin) of
-                {{connected, _CommandConnected}, <<>>} ->
+                {connected, _CommandConnected} ->
                     {ok, {Sock, Opts}};
-                {{error, CommandError}, <<>>} ->
+                {error, CommandError} ->
                     {error, CommandError}
             end;
         {Error, Sock, Reason} when Error == ssl_error; Error == tcp_error ->

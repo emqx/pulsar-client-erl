@@ -568,7 +568,7 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}}, State) ->
             {keep_state, State};
         ?INFLIGHT_REQ(QAckRef, FromsToMessages, BatchSize) ->
             ok = replayq:ack(Q, QAckRef),
-            lists:foreach(
+            spawn_link(fun() -> lists:foreach(
               fun({undefined, {_TS, Messages}}) ->
                    BatchLen = length(Messages),
                    _ = invoke_callback(Callback, {ok, Resp}, BatchLen),
@@ -581,7 +581,7 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}}, State) ->
                  ({From, {_TS, _Messages}}) ->
                    gen_statem:reply(From, {ok, Resp})
               end,
-              FromsToMessages),
+              FromsToMessages) end),
             InflightCalls = InflightCalls0 - BatchSize,
             pulsar_metrics:inflight_set(State, InflightCalls),
             {keep_state, State#{ requests := maps:remove(SequenceId, Reqs)

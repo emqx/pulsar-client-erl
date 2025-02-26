@@ -46,6 +46,7 @@
     , {reuseaddr, true}
     , {active, true}
     , {reuseaddr, true}
+    , {sndbuf, 10_000_000}
     ]).
 
 -define(DEF_TCP_OPTS,

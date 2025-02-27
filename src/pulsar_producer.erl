@@ -951,9 +951,10 @@ resend_sent_requests(State) ->
      } = State,
     Now = now_ts(),
     RetentionPeriod = maps:get(retention_period, ProducerOpts, infinity),
+    Requests1 = lists:keysort(1, maps:to_list(Requests0)),
     {Requests, Dropped} =
-        maps:fold(
-          fun(SequenceId, ?INFLIGHT_REQ(QAckRef, FromsToMessages, _BatchSize), {AccIn, DroppedAcc}) ->
+        lists:foldl(
+          fun({SequenceId, ?INFLIGHT_REQ(QAckRef, FromsToMessages, _BatchSize)}, {AccIn, DroppedAcc}) ->
                {Messages, Expired} =
                   lists:partition(
                     fun({_From, {Ts, _Msgs}}) ->
@@ -980,7 +981,7 @@ resend_sent_requests(State) ->
                {Acc, DroppedAcc + Dropped}
           end,
           {#{}, 0},
-          Requests0),
+          Requests1),
     InflightCalls = InflightCalls0 - Dropped,
     pulsar_metrics:dropped_inc(State, Dropped),
     pulsar_metrics:inflight_set(State, InflightCalls),

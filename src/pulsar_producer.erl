@@ -521,8 +521,6 @@ terminate(_Reason, _StateName, _State = #{replayq := Q}) ->
 
 parse({incomplete, Bin}, State) ->
     {keep_state, State#{last_bin := Bin}};
-parse({Cmd, <<>>}, State) ->
-    handle_response(Cmd, State#{last_bin := <<>>});
 parse({Cmd, LastBin}, State) ->
     State2 = case handle_response(Cmd, State) of
         keep_state_and_data -> State;

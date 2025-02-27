@@ -20,11 +20,12 @@ defmodule PulsarClientErl.MixProject do
 
   defp deps do
     [
-      {:crc32cer, github: "emqx/crc32cer", tag: "0.1.9"},
+      {:crc32cer, github: "emqx/crc32cer", tag: "0.1.12"},
       {:murmerl3, github: "emqx/murmerl3", tag: "0.1.0-emqx.1"},
       {:snappyer, github: "emqx/snappyer", tag: "1.2.5"},
-      {:replayq, github: "emqx/replayq", tag: "0.3.9"},
+      {:replayq, github: "emqx/replayq", tag: "0.4.0"},
       {:snabbkaffe, github: "kafka4beam/snabbkaffe", tag: "1.0.10"},
+      {:lc, github: "emqx/lc", tag: "0.3.4"},
       {:telemetry, "1.3.0"},
       {:redbug, "~> 2.0", only: [:test, :dev]}
     ]

@@ -46,12 +46,12 @@
     , {reuseaddr, true}
     , {active, true}
     , {reuseaddr, true}
-    , {sndbuf, 1_000_000}
-    , {recbuf, 1_000_000}
     ]).
 
 -define(DEF_TCP_OPTS,
     [ {nodelay, true}
+    , {sndbuf, 1_000_000}
+    , {recbuf, 1_000_000}
     , {send_timeout, ?SEND_TIMEOUT}
     ]).
 

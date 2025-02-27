@@ -37,13 +37,27 @@
 %% exposed ONLY for mocking
 -export([internal_getopts/3]).
 
+%% Async socket process
+-export([ spawn_link_connect/3
+        , send_batch_message_packet_async/7
+        , ping_async/1
+        , pong_async/1
+        ]).
+%% `proc_lib' loop
+-export([init/2, loop/2, stop/1]).
+%% `sys' API
+-export([ system_continue/3
+        , system_terminate/4
+        , system_code_change/4
+        , format_status/2
+        ]).
+
 -define(SEND_TIMEOUT, 60000).
 -define(CONN_TIMEOUT, 30000).
 
 -define(INTERNAL_TCP_OPTS,
     [ binary
     , {packet, 4}
-    , {reuseaddr, true}
     , {active, true}
     , {reuseaddr, true}
     ]).
@@ -54,6 +68,19 @@
     , {recbuf, 1_000_000}
     , {send_timeout, ?SEND_TIMEOUT}
     ]).
+
+%% Socket process requests
+-record(send_batch, {
+    topic,
+    messages,
+    sequence_id,
+    producer_id,
+    producer_name,
+    opts
+}).
+-record(ping, {}).
+-record(pong, {}).
+-record(stop, {}).
 
 send_connect_packet(Sock, Opts) ->
     Mod = tcp_module(Opts),
@@ -107,6 +134,18 @@ send_batch_message_packet(Sock, Topic, Messages, SequenceId, ProducerId, Produce
     pulsar_metrics:send(Topic, length(Messages)),
     Mod:send(Sock, pulsar_protocol_frame:send(SendCmd, MsgMetadata, BatchMsg)).
 
+send_batch_message_packet_async(SockPid, Topic, Messages, SequenceId, ProducerId, ProducerName, Opts) ->
+    Req =
+        #send_batch{ topic = Topic
+                   , messages = Messages
+                   , sequence_id = SequenceId
+                   , producer_id = ProducerId
+                   , producer_name = ProducerName
+                   , opts = Opts
+                   },
+    _ = erlang:send(SockPid, Req),
+    ok.
+
 send_create_producer_packet(Sock, Topic, RequestId, ProducerId, Opts) ->
     Mod = tcp_module(Opts),
     Producer = #{
@@ -120,9 +159,17 @@ ping(Sock, Opts) ->
     Mod = tcp_module(Opts),
     Mod:send(Sock, pulsar_protocol_frame:ping()).
 
+ping_async(SockPid) ->
+    _ = erlang:send(SockPid, #ping{}),
+    ok.
+
 pong(Sock, Opts) ->
     Mod = tcp_module(Opts),
     Mod:send(Sock, pulsar_protocol_frame:pong()).
+
+pong_async(SockPid) ->
+    _ = erlang:send(SockPid, #pong{}),
+    ok.
 
 getstat(Sock, Opts) ->
     InetM = inet_module(Opts),
@@ -147,6 +194,9 @@ connect(Host, Port, Opts) ->
         {error, _} = Error ->
             Error
     end.
+
+spawn_link_connect(Host, Port, Opts) ->
+    proc_lib:start_link(?MODULE, init, [self(), #{host => Host, port => Port, opts => Opts}]).
 
 controlling_process(Sock, Pid, Opts) ->
     TcpMod = tcp_module(Opts),
@@ -239,9 +289,127 @@ maybe_compression(Bin, 'ZLIB') ->
 maybe_compression(Bin, _) ->
     Bin.
 
-%% =======================================================================================
+%%=======================================================================================
+%% Process loop
+%%=======================================================================================
+
+init(OwnerPid, #{host := Host, port := Port, opts := Opts}) ->
+    logger:set_process_metadata(#{domain => [pulsar, socket]}),
+    set_label({pulsar_socket, OwnerPid}),
+    case connect(Host, Port, Opts) of
+        {ok, Sock} ->
+            controlling_process(Sock, OwnerPid, Opts),
+            proc_lib:init_ack(OwnerPid, {ok, {self(), Sock}}),
+            link(Sock),
+            State = #{sock => Sock, owner => OwnerPid, opts => Opts},
+            Debug = sys:debug_options(maps:get(debug, Opts, [])),
+            ?MODULE:loop(State, Debug);
+        Error ->
+            proc_lib:init_ack(OwnerPid, Error),
+            exit(normal)
+    end.
+
+-if(OTP_RELEASE >= 27).
+set_label(Label) -> proc_lib:set_label(Label).
+-else.
+set_label(_Label) -> ok.
+-endif.
+
+stop(SockPid) ->
+    _ = erlang:send(SockPid, #stop{}),
+    ok.
+
+loop(State, Debug) ->
+    Msg = receive X -> X end,
+    decode_msg(Msg, State, Debug).
+
+decode_msg({system, From, Msg}, State, Debug) ->
+    #{owner := OwnerPid} = State,
+    sys:handle_system_msg(Msg, From, OwnerPid, ?MODULE, Debug, State);
+decode_msg(Msg, State, [] = Debug) ->
+    handle_msg(Msg, State, Debug);
+decode_msg(Msg, State, Debug0) ->
+    Debug = sys:handle_debug(Debug0, fun print_msg/3, State, Msg),
+    handle_msg(Msg, State, Debug).
+
+%% Socket controlling process is parent, so we don't need to handle socket data here.
+handle_msg(#send_batch{} = Request, State, Debug) ->
+    #send_batch{
+       topic = Topic,
+       messages = Messages,
+       sequence_id = SequenceId,
+       producer_id = ProducerId,
+       producer_name = ProducerName,
+       opts = Opts
+    } = Request,
+    #{sock := Sock} = State,
+    Res = send_batch_message_packet(Sock, Topic, Messages, SequenceId, ProducerId, ProducerName, Opts),
+    loop_or_die(Res, State, Debug);
+handle_msg(#ping{}, State, Debug) ->
+    #{sock := Sock, opts := Opts} = State,
+    Res = ping(Sock, Opts),
+    loop_or_die(Res, State, Debug);
+handle_msg(#pong{}, State, Debug) ->
+    #{sock := Sock, opts := Opts} = State,
+    Res = pong(Sock, Opts),
+    loop_or_die(Res, State, Debug);
+handle_msg(#stop{}, State, _Debug) ->
+    #{sock := Sock, opts := Opts} = State,
+    _ = close(Sock, Opts),
+    ok;
+handle_msg(Msg, State, Debug) ->
+    log_warning("unknow message: ~0p", [Msg], State),
+    ?MODULE:loop(State, Debug).
+
+loop_or_die(ok, State, Debug) ->
+    ?MODULE:loop(State, Debug);
+loop_or_die({error, _} = Error, _State, _Debug) ->
+    exit(Error).
+
+print_msg(Device, #send_batch{} = Request, State) ->
+  do_print_msg(Device, "send: ~p", [Request], State);
+print_msg(Device, #stop{}, State) ->
+  do_print_msg(Device, "stop", [], State);
+print_msg(Device, Msg, State) ->
+  do_print_msg(Device, "unknown msg: ~p", [Msg], State).
+
+do_print_msg(Device, Fmt, Args, _State) ->
+  io:format(Device, "[~s] ~p " ++ Fmt ++ "~n",
+            [ts(), self()] ++ Args).
+
+ts() ->
+  Now = os:timestamp(),
+  {_, _, MicroSec} = Now,
+  {{Y, M, D}, {HH, MM, SS}} = calendar:now_to_local_time(Now),
+  lists:flatten(io_lib:format("~.4.0w-~.2.0w-~.2.0w ~.2.0w:~.2.0w:~.2.0w.~w",
+                              [Y, M, D, HH, MM, SS, MicroSec])).
+
+system_continue(_Parent, Debug, State) ->
+  ?MODULE:loop(State, Debug).
+
+-spec system_terminate(any(), _, _, _) -> no_return().
+system_terminate(Reason, _Parent, Debug, _Misc) ->
+  sys:print_log(Debug),
+  exit(Reason).
+
+system_code_change(State, _Module, _Vsn, _Extra) ->
+  {ok, State}.
+
+format_status(Opt, Status) ->
+  {Opt, Status}.
+
+%%=======================================================================================
 %% Helpers
-%% =======================================================================================
+%%=======================================================================================
+
+log_warning(Format, Args, State) ->
+    do_log(warning, Format, Args, State).
+
+do_log(Level, Format, Args, State) ->
+    #{owner := OwnerPid} = State,
+    logger:log(Level, "[pulsar-socket][owner:~p] " ++ Format,
+               [OwnerPid | Args],
+               #{domain => [pulsar, socket]}).
 
 pulsar_scheme(Opts) ->
     case opt(enable_ssl, Opts, false) of

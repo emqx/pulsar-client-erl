@@ -1,4 +1,4 @@
-# 2.0.2
+# 2.1.0
 
 - Added `drop_if_high_mem` config for producer.  With this enabled, when buffer is memory
   only and system memory is under high load, buffered data will be more aggressively

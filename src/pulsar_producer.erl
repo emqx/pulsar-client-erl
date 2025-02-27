@@ -935,6 +935,10 @@ do_collect_send_requests(Acc, Count, Limit) ->
 try_close_socket(#{sock := undefined}) ->
     ok;
 try_close_socket(#{sock := Sock, sock_pid := SockPid, opts := Opts}) ->
+    %% N.B.: it's important to first close the socket and then terminate the writer
+    %% process.  The writer may be blocked in a `send' call, and closing the socket first
+    %% will make the call return `einval' immediately, allowing us to terminate it (it
+    %% also terminates itself on such `send' errors, but we make sure here).
     _ = pulsar_socket:close(Sock, Opts),
     ok = pulsar_socket_writer:stop(SockPid),
     ok.

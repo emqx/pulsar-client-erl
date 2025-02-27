@@ -62,12 +62,18 @@ start_link(PartitionTopic, Host, Port, Opts) ->
             Error
     end.
 
-stop(SockPid) ->
-    try
-        gen_server:stop(SockPid)
-    catch
-        exit:noproc ->
+stop(SockPid) when is_pid(SockPid) ->
+    link(SockPid),
+    exit(SockPid, normal),
+    receive
+        {'EXIT', SockPid, _} ->
             ok
+    after 5_000 ->
+            exit(SockPid, kill),
+            receive
+                {'EXIT', SockPid, _} ->
+                    ok
+            end
     end.
 
 send_batch_async(SockPid, Topic, Messages, SequenceId, ProducerId, ProducerName, Opts) ->

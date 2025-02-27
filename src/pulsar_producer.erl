@@ -326,7 +326,7 @@ idle(info, {'DOWN', Ref, process, _Pid, Reason}, State0 = #{lookup_topic_request
     State = State0#{lookup_topic_request_ref := undefined},
     try_close_socket(State),
     ?NEXT_STATE_IDLE_RECONNECT(State);
-idle(info, #maybe_send_to_pulsar{}, _State) ->
+idle(internal, #maybe_send_to_pulsar{}, _State) ->
     %% Stale nudge
     keep_state_and_data;
 idle(_EventType, _Event, _State) ->
@@ -369,7 +369,7 @@ connecting(info, {E, Sock, Reason}, State) when E =:= tcp_error; E =:= ssl_error
     handle_socket_close(connecting, Sock, Reason, State);
 connecting(info, ?SOCK_ERR(Sock, Reason), State) ->
     handle_socket_close(connecting, Sock, Reason, State);
-connecting(info, #maybe_send_to_pulsar{}, _State) ->
+connecting(internal, #maybe_send_to_pulsar{}, _State) ->
     %% Stale nudge
     keep_state_and_data;
 connecting(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
@@ -435,7 +435,7 @@ connected(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
 connected(_EventType, ping, State = #{sock_pid := SockPid}) ->
     ok = pulsar_socket_writer:ping_async(SockPid),
     {keep_state, State};
-connected(info, #maybe_send_to_pulsar{}, State0) ->
+connected(internal, #maybe_send_to_pulsar{}, State0) ->
     State = maybe_send_to_pulsar(State0),
     {keep_state, State};
 connected({call, From}, get_state, _State) ->
@@ -608,10 +608,11 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}}, State) ->
               FromsToMessages),
             InflightCalls = InflightCalls0 - BatchSize,
             pulsar_metrics:inflight_set(State, InflightCalls),
-            self() ! #maybe_send_to_pulsar{},
-            {keep_state, State#{ requests := maps:remove(SequenceId, Reqs)
-                               , inflight_calls := InflightCalls
-                               }}
+            Actions = [{next_event, internal, #maybe_send_to_pulsar{}}],
+            NewState = State#{ requests := maps:remove(SequenceId, Reqs)
+                             , inflight_calls := InflightCalls
+                             },
+            {keep_state, NewState, Actions}
     end;
 handle_response({error, #{error := Error, message := Msg}}, State) ->
     log_error("Response error:~p, msg:~p~n", [Error, Msg], State),

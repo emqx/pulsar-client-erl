@@ -832,11 +832,11 @@ put_overflow_log_state(#{ last_log_inst := _LastInst
 
 maybe_send_to_pulsar(State) ->
     #{ replayq := Q
-     , inflight_calls := InflightCalls
+     , requests := Requests
      , max_inflight := MaxInflight
      } = State,
     HasQueued = replayq:count(Q) /= 0,
-    HasAvailableInflight = InflightCalls < MaxInflight,
+    HasAvailableInflight = map_size(Requests) < MaxInflight,
     case HasQueued andalso HasAvailableInflight of
         true ->
             do_send_to_pulsar(State);
@@ -847,15 +847,13 @@ maybe_send_to_pulsar(State) ->
 do_send_to_pulsar(State0) ->
     #{ batch_size := BatchSize
      , inflight_calls := InflightCalls0
-     , max_inflight := MaxInflight
      , sequence_id := SequenceId
      , requests := Requests0
      , replayq := Q
      , opts := ProducerOpts
      } = State0,
-    NumToPop = min(BatchSize, MaxInflight - InflightCalls0),
     MaxBatchBytes = maps:get(max_batch_bytes, ProducerOpts, ?DEFAULT_MAX_BATCH_BYTES),
-    {NewQ, QAckRef, Items} = replayq:pop(Q, #{ count_limit => NumToPop
+    {NewQ, QAckRef, Items} = replayq:pop(Q, #{ count_limit => BatchSize
                                              , bytes_limit => MaxBatchBytes
                                              }),
     State1 = State0#{replayq := NewQ},

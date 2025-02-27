@@ -223,6 +223,7 @@ get_state(Pid) ->
           gen_statem:init_result(statem(), state()).
 init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
     process_flag(trap_exit, true),
+    pulsar_utils:set_label({?MODULE, PartitionTopic}),
     {Transport, BrokerServer} = pulsar_utils:parse_url(Server),
     ProducerID = maps:get(producer_id, ProducerOpts0),
     Offload = maps:get(replayq_offload_mode, ProducerOpts0, false),
@@ -432,7 +433,7 @@ connected(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
     Cmd = pulsar_protocol_frame:parse(Bin),
     ?MODULE:handle_response(Cmd, State);
 connected(_EventType, ping, State = #{sock_pid := SockPid}) ->
-    ok = pulsar_socket:ping_async(SockPid),
+    ok = pulsar_socket_writer:ping_async(SockPid),
     {keep_state, State};
 connected(info, #maybe_send_to_pulsar{}, State0) ->
     State = maybe_send_to_pulsar(State0),
@@ -488,9 +489,10 @@ refresh_urls_and_connect(State0) ->
 do_connect(State) ->
     #{ broker_server := {Host, Port}
      , opts := Opts
+     , partitiontopic := PartitionTopic
      , proxy_to_broker_url := ProxyToBrokerUrl
      } = State,
-    try pulsar_socket:spawn_link_connect(Host, Port, Opts) of
+    try pulsar_socket_writer:start_link(PartitionTopic, Host, Port, Opts) of
         {ok, {SockPid, Sock}} ->
             Opts1 = pulsar_utils:maybe_add_proxy_to_broker_url_opts(Opts, ProxyToBrokerUrl),
             ?POORMAN(Sock, pulsar_socket:send_connect_packet(Sock, Opts1)),
@@ -570,7 +572,7 @@ handle_response({pong, #{}}, _State) ->
     start_keepalive(),
     keep_state_and_data;
 handle_response({ping, #{}}, #{sock_pid := SockPid}) ->
-    ok = pulsar_socket:pong_async(SockPid),
+    ok = pulsar_socket_writer:pong_async(SockPid),
     keep_state_and_data;
 handle_response({close_producer, #{}}, State = #{ partitiontopic := Topic
                                                 }) ->
@@ -627,8 +629,8 @@ send_batch_payload(Messages, SequenceId, #{
             sock_pid := SockPid,
             opts := Opts
         }) ->
-    pulsar_socket:send_batch_message_packet_async(SockPid, Topic, Messages, SequenceId,
-                                                  ProducerId, ProducerName, Opts).
+    pulsar_socket_writer:send_batch_async(SockPid, Topic, Messages, SequenceId,
+                                          ProducerId, ProducerName, Opts).
 
 start_keepalive() ->
     erlang:send_after(30_000, self(), ping).
@@ -934,7 +936,7 @@ try_close_socket(#{sock := undefined}) ->
     ok;
 try_close_socket(#{sock := Sock, sock_pid := SockPid, opts := Opts}) ->
     _ = pulsar_socket:close(Sock, Opts),
-    ok = pulsar_socket:stop(SockPid),
+    ok = pulsar_socket_writer:stop(SockPid),
     ok.
 
 resend_sent_requests(State) ->

@@ -21,6 +21,7 @@
         , maybe_add_proxy_to_broker_url_opts/2
         , escape_uri/1
         , foldl_while/3
+        , set_label/1
         ]).
 
 -export([collect_send_calls/1]).
@@ -136,3 +137,9 @@ hex_digit(N) when N >= 0, N =< 9 ->
     N + $0;
 hex_digit(N) when N > 9, N =< 15 ->
     N + $a - 10.
+
+-if(OTP_RELEASE >= 27).
+set_label(Label) -> proc_lib:set_label(Label).
+-else.
+set_label(_Label) -> ok.
+-endif.

@@ -33,8 +33,6 @@
 -define(PONG, 'PONG').
 -define(CLOSE_PRODUCER, 'CLOSE_PRODUCER').
 -define(CLOSE_CONSUMER, 'CLOSE_CONSUMER').
--define(SIMPLE_SIZE, 4).
--define(PAYLOAD_SIZE, 10).
 -define(MAGIC_NUMBER, 3585).
 
 %% Use protocol version 10 to work with pulsar proxy
@@ -125,10 +123,10 @@ default_connect_fields() ->
      , protocol_version => ?PROTO_VSN
      }.
 
-parse(<<TotalSize:32, CmdBin:TotalSize/binary, Rest/binary>>) ->
+parse(CmdBin) ->
     <<CommandSize:32, Command:CommandSize/binary, CmdRest/binary>> = CmdBin,
     BaseCommand = try_decode(CommandSize, Command),
-    Resp = case maps:get(type, BaseCommand, unknown) of
+    case maps:get(type, BaseCommand, unknown) of
         ?MESSAGE ->
             <<MetadataSize:32, Metadata:MetadataSize/binary, Payload0/binary>> = CmdRest,
             MetadataCmd = pulsar_api:decode_msg(<<MetadataSize:32, Metadata/binary>>, 'MessageMetadata'),
@@ -159,25 +157,21 @@ parse(<<TotalSize:32, CmdBin:TotalSize/binary, Rest/binary>>) ->
         _Type ->
             logger:error("parse unknown type:~p~n", [BaseCommand]),
             unknown
-    end,
-    {Resp, Rest};
-parse(Bin) ->
-    {incomplete, Bin}.
+    end.
 
 serialized_simple_command(BaseCommand) ->
     BaseCommandBin = pulsar_api:encode_msg(BaseCommand, 'BaseCommand'),
     Size = size(BaseCommandBin),
-    TotalSize = Size + ?SIMPLE_SIZE,
-    <<TotalSize:32, Size:32, BaseCommandBin/binary>>.
+    [<<Size:32>>, BaseCommandBin].
 
 serialized_payload_command(BaseCommand, Metadata, BatchPayload) ->
     BaseCommandBin = pulsar_api:encode_msg(BaseCommand, 'BaseCommand'),
     BaseCommandSize = size(BaseCommandBin),
     MetadataSize = size(Metadata),
+    %% Ensure Payload is binary so crc32cer do not need to copy again
     Payload = <<MetadataSize:32, Metadata/binary, BatchPayload/binary>>,
     Checksum = crc32cer:nif(Payload),
-    TotalSize = BaseCommandSize + size(Payload) + ?PAYLOAD_SIZE,
-    <<TotalSize:32, BaseCommandSize:32, BaseCommandBin/binary, ?MAGIC_NUMBER:16, Checksum:32, Payload/binary>>.
+    [<<BaseCommandSize:32>>, BaseCommandBin, <<?MAGIC_NUMBER:16, Checksum:32>>, Payload].
 
 parse_batch_message(Payloads, Size) ->
     parse_batch_message(Payloads, Size, []).

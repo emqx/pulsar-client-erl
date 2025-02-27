@@ -22,7 +22,7 @@ jobs:
         env:
           PULSAR_TAG: ${{ matrix.pulsar_tag }}
         run: |
-          docker-compose -f ./docker-compose.yml up -d
+          docker compose -f ./docker-compose.yml up -d
           sleep 15
           docker exec -i erlang sh -c "make xref"
           docker exec -i erlang sh -c "make dialyzer"

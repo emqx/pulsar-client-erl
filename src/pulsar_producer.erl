@@ -46,6 +46,8 @@
         , queue_item_marshaller/1
         ]).
 
+-export([handle_response/2]).
+
 %% for testing only
 -ifdef(TEST).
 -export([make_queue_item/2]).
@@ -113,7 +115,6 @@
                    callback := undefined | mfa() | fun((map()) -> ok),
                    clientid := atom(),
                    inflight_calls := non_neg_integer(),
-                   last_bin := binary(),
                    lookup_topic_request_ref := reference() | undefined,
                    opts := map(),
                    parent_pid := undefined | pid(),
@@ -249,7 +250,6 @@ init({PartitionTopic, Server, ProxyToBrokerUrl, ProducerOpts0}) ->
         callback => maps:get(callback, ProducerOpts, undefined),
         clientid => maps:get(clientid, ProducerOpts),
         inflight_calls => 0,
-        last_bin => <<>>,
         lookup_topic_request_ref => undefined,
         opts => pulsar_utils:maybe_enable_ssl_opts(Transport, ProducerOpts),
         parent_pid => ParentPid,
@@ -345,8 +345,8 @@ connecting(info, {E, Sock, Reason}, State) when E =:= tcp_error; E =:= ssl_error
 connecting(info, ?SOCK_ERR(Sock, Reason), State) ->
     handle_socket_close(connecting, Sock, Reason, State);
 connecting(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
-    {Cmd, _} = pulsar_protocol_frame:parse(Bin),
-    handle_response(Cmd, State);
+    Cmd = pulsar_protocol_frame:parse(Bin),
+    ?MODULE:handle_response(Cmd, State);
 connecting(info, Msg, State) ->
     log_info("[connecting] unknown message received ~p~n  ~p", [Msg, State], State),
     keep_state_and_data;
@@ -399,9 +399,9 @@ connected(_EventType, {E, Sock, Reason}, State) when E =:= tcp_error; E =:= ssl_
     handle_socket_close(connected, Sock, Reason, State);
 connected(_EventType, ?SOCK_ERR(Sock, Reason), State) ->
     handle_socket_close(connected, Sock, Reason, State);
-connected(_EventType, {Inet, _, Bin}, State = #{last_bin := LastBin})
-        when Inet == tcp; Inet == ssl ->
-    parse(pulsar_protocol_frame:parse(<<LastBin/binary, Bin/binary>>), State);
+connected(_EventType, {Inet, _, Bin}, State) when Inet == tcp; Inet == ssl ->
+    Cmd = pulsar_protocol_frame:parse(Bin),
+    ?MODULE:handle_response(Cmd, State);
 connected(_EventType, ping, State = #{sock := Sock, opts := Opts}) ->
     ?POORMAN(Sock, pulsar_socket:ping(Sock, Opts)),
     {keep_state, State};
@@ -412,7 +412,7 @@ connected({call, From}, _EventContent, _State) ->
 connected(cast, _EventContent, _State) ->
     keep_state_and_data;
 connected(_EventType, EventContent, State) ->
-    handle_response(EventContent, State).
+    ?MODULE:handle_response(EventContent, State).
 
 handle_socket_close(StateName, Sock, Reason, #{sock := Sock} = State) ->
     ?tp("pulsar_socket_close", #{sock => Sock, reason => Reason}),
@@ -516,19 +516,6 @@ is_replayq_durable(#{replayq_offload_mode := true}, _Q) ->
     false;
 is_replayq_durable(_, Q) ->
     not replayq:is_mem_only(Q).
-
-parse({incomplete, Bin}, State) ->
-    {keep_state, State#{last_bin := Bin}};
-parse({Cmd, <<>>}, State) ->
-    handle_response(Cmd, State#{last_bin := <<>>});
-parse({Cmd, LastBin}, State) ->
-    State2 = case handle_response(Cmd, State) of
-        keep_state_and_data -> State;
-        {_, State1 = #{}} -> State1;
-        {_, _NextState, State1 = #{}} -> State1;
-        {_, _NextState, State1 = #{}, _Actions} -> State1
-    end,
-    parse(pulsar_protocol_frame:parse(LastBin), State2).
 
 -spec handle_response(_EventContent, state()) ->
           handler_result().

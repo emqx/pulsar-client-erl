@@ -42,10 +42,12 @@
 
 -define(INTERNAL_TCP_OPTS,
     [ binary
-    , {packet, raw}
+    , {packet, 4}
     , {reuseaddr, true}
     , {active, true}
     , {reuseaddr, true}
+    , {sndbuf, 1_000_000}
+    , {recbuf, 1_000_000}
     ]).
 
 -define(DEF_TCP_OPTS,

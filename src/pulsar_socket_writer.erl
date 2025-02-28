@@ -63,17 +63,24 @@ start_link(PartitionTopic, Host, Port, Opts) ->
     end.
 
 stop(SockPid) when is_pid(SockPid) ->
-    link(SockPid),
+    MRef = monitor(process, SockPid),
     exit(SockPid, normal),
     receive
-        {'EXIT', SockPid, _} ->
+        {'DOWN', MRef, process, SockPid, _} ->
             ok
     after 5_000 ->
             exit(SockPid, kill),
             receive
-                {'EXIT', SockPid, _} ->
+                {'DOWN', MRef, process, SockPid, _} ->
                     ok
             end
+    end,
+    %% clean exit signal, if linked to it
+    receive
+        {'EXIT', SockPid, _} ->
+            ok
+    after 1 ->
+            ok
     end.
 
 send_batch_async(SockPid, Topic, Messages, SequenceId, ProducerId, ProducerName, Opts) ->

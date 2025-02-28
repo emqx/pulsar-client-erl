@@ -26,6 +26,7 @@
         , send_subscribe_packet/7
         , send_set_flow_packet/4
         , send_ack_packet/5
+        , encode_send_batch_message_packet/5
         , send_batch_message_packet/7
         , send_create_producer_packet/5
         , ping/2
@@ -37,13 +38,15 @@
 %% exposed ONLY for mocking
 -export([internal_getopts/3]).
 
+%% Internal export, only for `pulsar_socket_writer'
+-export([tcp_module/1]).
+
 -define(SEND_TIMEOUT, 60000).
 -define(CONN_TIMEOUT, 30000).
 
 -define(INTERNAL_TCP_OPTS,
     [ binary
     , {packet, 4}
-    , {reuseaddr, true}
     , {active, true}
     , {reuseaddr, true}
     ]).
@@ -53,6 +56,7 @@
     , {sndbuf, 1_000_000}
     , {recbuf, 1_000_000}
     , {send_timeout, ?SEND_TIMEOUT}
+    , {send_timeout_close, true}
     ]).
 
 send_connect_packet(Sock, Opts) ->
@@ -99,13 +103,19 @@ send_ack_packet(Sock, ConsumerId, AckType, MsgIds, Opts) ->
     Mod:send(Sock, pulsar_protocol_frame:ack(Ack)).
 
 send_batch_message_packet(Sock, Topic, Messages, SequenceId, ProducerId, ProducerName, Opts) ->
+    {NumMessages, EncodedMsg} =
+        encode_send_batch_message_packet(Messages, SequenceId, ProducerId,
+                                         ProducerName, Opts),
     Mod = tcp_module(Opts),
+    pulsar_metrics:send(Topic, NumMessages),
+    Mod:send(Sock, EncodedMsg).
+
+encode_send_batch_message_packet(Messages, SequenceId, ProducerId, ProducerName, Opts) ->
     Len = length(Messages),
     SendCmd = message_snd_cmd(Len, ProducerId, SequenceId),
     BatchMsg = batch_message_cmd(Messages, Opts),
     MsgMetadata = batch_message_cmd_metadata(ProducerName, SequenceId, Len),
-    pulsar_metrics:send(Topic, length(Messages)),
-    Mod:send(Sock, pulsar_protocol_frame:send(SendCmd, MsgMetadata, BatchMsg)).
+    {Len, pulsar_protocol_frame:send(SendCmd, MsgMetadata, BatchMsg)}.
 
 send_create_producer_packet(Sock, Topic, RequestId, ProducerId, Opts) ->
     Mod = tcp_module(Opts),
@@ -239,9 +249,9 @@ maybe_compression(Bin, 'ZLIB') ->
 maybe_compression(Bin, _) ->
     Bin.
 
-%% =======================================================================================
+%%=======================================================================================
 %% Helpers
-%% =======================================================================================
+%%=======================================================================================
 
 pulsar_scheme(Opts) ->
     case opt(enable_ssl, Opts, false) of

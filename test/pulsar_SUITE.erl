@@ -842,6 +842,7 @@ t_pulsar_replayq_producer_restart(Config) ->
         batch_size => ?BATCH_SIZE,
         strategy => random,
         callback => {?MODULE, producer_callback, []},
+        max_inflight => 10_000,
         replayq_dir => ReplayqDir,
         replayq_seg_bytes => 20 * 1024 * 1024,
         replayq_offload_mode => false,

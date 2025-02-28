@@ -1,3 +1,10 @@
+# 2.1.0
+
+- Added `drop_if_high_mem` config for producer.  With this enabled, when buffer is memory
+  only and system memory is under high load, buffered data will be more aggressively
+  dropped to try and avoid OOM kill.
+- Added `max_inflight` configuration for producer.
+
 # 2.0.1
 
 - Change packet framing from 'packet-raw' to 'packet-4'.

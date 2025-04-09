@@ -1,7 +1,7 @@
 services:
   erlang:
     container_name: erlang
-    image: erlang:26.2.5.2
+    image: erlang:27.2
     volumes:
       - ./:/pulsar_client_erl
     working_dir: /pulsar_client_erl

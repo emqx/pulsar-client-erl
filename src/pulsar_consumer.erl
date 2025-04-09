@@ -27,8 +27,11 @@
         , terminate/3
         , code_change/4
         , format_status/1
-        , format_status/2
         ]).
+
+-if(OTP_RELEASE < 27).
+-export([format_status/2]).
+-endif.
 
 -type statem() :: idle | connecting | connected.
 
@@ -150,10 +153,12 @@ format_status(Status) ->
       end,
       Status).
 
+-if(OTP_RELEASE < 27).
 %% `format_status/2' is deprecated as of OTP 25.0
 format_status(_Opt, [_PDict, State0]) ->
     State = censor_secrets(State0),
     [{data, [{"State", State}]}].
+-endif.
 
 censor_secrets(State0 = #state{opts = Opts0 = #{conn_opts := ConnOpts0 = #{auth_data := _}}}) ->
     State0#state{opts = Opts0#{conn_opts := ConnOpts0#{auth_data := "******"}}};

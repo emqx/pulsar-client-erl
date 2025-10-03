@@ -37,9 +37,13 @@
 -export([ callback_mode/0
         , init/1
         , terminate/3
-        , format_status/1
-        , format_status/2
         ]).
+
+-if(?OTP_RELEASE >= 25).
+-export([format_status/1]).
+-else.
+-export([format_status/2]).
+-endif.
 
 %% replayq API
 -export([ queue_item_sizer/1
@@ -508,6 +512,7 @@ do_connect(State) ->
             ?NEXT_STATE_IDLE_RECONNECT(State)
     end.
 
+-if(?OTP_RELEASE >= 25).
 format_status(Status) ->
     maps:map(
       fun(data, Data0) ->
@@ -516,11 +521,12 @@ format_status(Status) ->
               Value
       end,
       Status).
-
+-else.
 %% `format_status/2' is deprecated as of OTP 25.0
 format_status(_Opt, [_PDict, _State0, Data0]) ->
     Data = censor_secrets(Data0),
     [{data, [{"State", Data}]}].
+-endif.
 
 censor_secrets(Data0 = #{opts := Opts0 = #{conn_opts := ConnOpts0 = #{auth_data := _}}}) ->
     Data0#{opts := Opts0#{conn_opts := ConnOpts0#{auth_data := "******"}}};

@@ -1,3 +1,7 @@
+# 2.1.1
+
+- Fix compile warning about `format_status/2` deprecation.
+
 # 2.1.0
 
 - Added `drop_if_high_mem` config for producer.  With this enabled, when buffer is memory

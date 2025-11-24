@@ -130,7 +130,17 @@ parse(CmdBin) ->
         ?MESSAGE ->
             <<MetadataSize:32, Metadata:MetadataSize/binary, Payload0/binary>> = CmdRest,
             MetadataCmd = pulsar_api:decode_msg(<<MetadataSize:32, Metadata/binary>>, 'MessageMetadata'),
-            Payloads = parse_batch_message(Payload0, maps:get(num_messages_in_batch, MetadataCmd, 1)),
+            %% If num_messages_in_batch is missing, it's a true single message (non-batch format)
+            %% If present (even if = 1), it's batch format with SingleMessageMetadata headers
+            Payloads = case maps:is_key(num_messages_in_batch, MetadataCmd) of
+                false ->
+                    %% num_messages_in_batch is missing - true single message format, no SingleMessageMetadata
+                    [Payload0];
+                true ->
+                    %% num_messages_in_batch is present - batch format, parse accordingly
+                    NumMessagesInBatch = maps:get(num_messages_in_batch, MetadataCmd),
+                    parse_batch_message(Payload0, NumMessagesInBatch)
+            end,
             {message, maps:get(message, BaseCommand), Payloads};
         ?CONNECTED ->
             {connected, maps:get(connected, BaseCommand)};

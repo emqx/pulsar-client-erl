@@ -22,6 +22,7 @@
     stop/1,
 
     send_batch_async/7,
+    send_single_async/7,
     ping_async/1,
     pong_async/1
 ]).
@@ -40,6 +41,7 @@
 
 %% Calls/Casts/Infos
 -record(send_batch, {topic, encoded_packet, num_messages}).
+-record(send_single, {topic, encoded_packet}).
 -record(ping, {}).
 -record(pong, {}).
 
@@ -91,6 +93,14 @@ send_batch_async(SockPid, Topic, Messages, SequenceId, ProducerId, ProducerName,
     Req = #send_batch{topic = Topic, encoded_packet = EncodedPacket, num_messages = NumMessages},
     safe_cast(SockPid, Req).
 
+send_single_async(SockPid, Topic, Message, SequenceId, ProducerId, ProducerName, Opts) ->
+    {_NumMessages, EncodedPacket0} =
+        pulsar_socket:encode_send_single_message_packet(Message, SequenceId,
+                                                         ProducerId, ProducerName, Opts),
+    EncodedPacket = iolist_to_binary(EncodedPacket0),
+    Req = #send_single{topic = Topic, encoded_packet = EncodedPacket},
+    safe_cast(SockPid, Req).
+
 ping_async(SockPid) ->
     safe_cast(SockPid, #ping{}).
 
@@ -125,6 +135,14 @@ handle_cast(#send_batch{} = Req, State) ->
                , encoded_packet = EncodedPacket} = Req,
     Mod = pulsar_socket:tcp_module(Opts),
     pulsar_metrics:send(Topic, NumMessages),
+    Res = Mod:send(Sock, EncodedPacket),
+    ok_or_die(Res, State);
+handle_cast(#send_single{} = Req, State) ->
+    #{sock := Sock, opts := Opts} = State,
+    #send_single{ topic = Topic
+                , encoded_packet = EncodedPacket} = Req,
+    Mod = pulsar_socket:tcp_module(Opts),
+    pulsar_metrics:send(Topic, 1),
     Res = Mod:send(Sock, EncodedPacket),
     ok_or_die(Res, State);
 handle_cast(_Cast, State) ->

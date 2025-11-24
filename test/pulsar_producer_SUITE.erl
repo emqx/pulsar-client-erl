@@ -32,6 +32,8 @@
 all() ->
     [ t_queue_item_marshaller
     , t_port_exit
+    , t_single_message_encoding
+    , t_single_message_send_batch_size_1
     ].
 
 init_per_suite(Config) ->
@@ -75,6 +77,11 @@ init_per_testcase(TestCase, Config) when
     , {producers, Producers}
     , {async_counter, Counter}
     | Config];
+init_per_testcase(TestCase, Config) when
+    TestCase =:= t_single_message_send_batch_size_1
+->
+    PulsarHost = os:getenv("PULSAR_HOST", ?DEFAULT_PULSAR_HOST),
+    [ {pulsar_host, PulsarHost} | Config ];
 init_per_testcase(_TestCase, Config) ->
     Config.
 
@@ -84,6 +91,9 @@ end_per_testcase(TestCase, Config) when
     Producers = ?config(producers, Config),
     pulsar:stop_and_delete_supervised_producers(Producers),
     pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT),
+    ok;
+end_per_testcase(_TestCase = t_single_message_send_batch_size_1, _Config) ->
+    %% Cleanup is done in the test itself
     ok;
 end_per_testcase(_TestCase, _Config) ->
     ok.
@@ -160,4 +170,131 @@ t_port_exit(Config) ->
            ok
        end
       ),
+    ok.
+
+%% Test that single message encoding doesn't include batch headers
+t_single_message_encoding(_Config) ->
+    Message = #{key => <<"test-key">>, value => <<"test-value">>},
+    SequenceId = 1,
+    ProducerId = 123,
+    ProducerName = <<"test-producer">>,
+    Opts = #{},
+
+    {NumMessages, EncodedPacket} = pulsar_socket:encode_send_single_message_packet(
+        Message, SequenceId, ProducerId, ProducerName, Opts
+    ),
+
+    %% Verify the encoded packet is an iolist (can be binary or list)
+    ?assertEqual(1, NumMessages),
+
+    %% Verify the packet structure by checking it's a valid iolist/binary
+    PacketBinary = iolist_to_binary(EncodedPacket),
+    ?assert(is_binary(PacketBinary)),
+    ?assert(size(PacketBinary) > 0),
+
+    %% Compare with batch encoding - single message should be smaller (no SingleMessageMetadata headers)
+    BatchMessage = [Message],
+    {_BatchNumMessages, BatchEncodedPacket} = pulsar_socket:encode_send_batch_message_packet(
+        BatchMessage, SequenceId, ProducerId, ProducerName, Opts
+    ),
+    BatchPacketBinary = iolist_to_binary(BatchEncodedPacket),
+
+    %% Single message packet should be smaller than batch packet (no SingleMessageMetadata overhead)
+    %% For a single message, batch format includes SingleMessageMetadata header, single format doesn't
+    SingleSize = size(PacketBinary),
+    BatchSize = size(BatchPacketBinary),
+    case SingleSize < BatchSize of
+        true -> ok;
+        false -> ct:fail("Single message packet (~p bytes) should be smaller than batch packet (~p bytes)",
+                         [SingleSize, BatchSize])
+    end,
+
+    ok.
+
+%% Test that when batch_size is 1, messages are sent individually
+t_single_message_send_batch_size_1(Config) ->
+    PulsarHost = ?config(pulsar_host, Config),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+
+    TestPID = self(),
+    ReceivedMessages = ets:new(received_messages, [ordered_set, public]),
+
+    Callback =
+        fun(Response) ->
+          ets:insert(ReceivedMessages, {erlang:monotonic_time(), Response}),
+          erlang:send(TestPID, {callback, Response}),
+          ok
+        end,
+
+    %% Create producer with batch_size = 1
+    ProducerOpts = #{ batch_size => 1
+                    , strategy => random
+                    , callback => Callback
+                    , replayq_dir => "/tmp/replayq_single_test"
+                    , replayq_seg_bytes => 20 * 1024 * 1024
+                    , replayq_offload_mode => false
+                    , replayq_max_total_bytes => 1_000_000_000
+                    },
+    {ok, Producers} = pulsar:ensure_supervised_producers( ?TEST_SUIT_CLIENT
+                                                         , <<"single-message-topic">>
+                                                         , ProducerOpts
+                                                         ),
+
+    %% Wait for producer to connect
+    {_, ProducerPid} = pulsar_producers:pick_producer(Producers, [#{key => <<"k">>, value => <<"v">>}]),
+    pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
+
+    %% Send multiple messages
+    Messages = [
+        #{key => <<"key1">>, value => <<"value1">>},
+        #{key => <<"key2">>, value => <<"value2">>},
+        #{key => <<"key3">>, value => <<"value3">>}
+    ],
+
+    %% Send messages synchronously to verify they're sent individually
+    Results = lists:map(
+        fun(Msg) ->
+            {ok, Result} = pulsar:send_sync(Producers, [Msg], 10_000),
+            Result
+        end,
+        Messages
+    ),
+
+    %% Verify each message got its own sequence_id
+    SequenceIds = [maps:get(sequence_id, R) || R <- Results],
+    ?assertEqual(3, length(SequenceIds)),
+    %% Verify sequence IDs are sequential (each message sent individually)
+    ?assertEqual(SequenceIds, lists:usort(SequenceIds)),
+
+    %% Now send messages asynchronously to verify callbacks are called
+    lists:foreach(
+        fun(Msg) ->
+            {ok, _} = pulsar:send(Producers, [Msg])
+        end,
+        Messages
+    ),
+
+    %% Verify callbacks were called for each async message
+    %% Wait for callbacks to arrive (they're async)
+    WaitForCallbacks = fun
+        Wait(0) ->
+            CallbackCount = ets:info(ReceivedMessages, size),
+            case CallbackCount >= 3 of
+                true -> ok;
+                false -> ct:fail("Expected at least 3 callbacks, got ~p", [CallbackCount])
+            end;
+        Wait(Retries) ->
+            timer:sleep(100),
+            CallbackCount = ets:info(ReceivedMessages, size),
+            case CallbackCount >= 3 of
+                true -> ok;
+                false -> Wait(Retries - 1)
+            end
+    end,
+    WaitForCallbacks(50),  %% Wait up to 5 seconds
+
+    %% Cleanup
+    ets:delete(ReceivedMessages),
+    pulsar:stop_and_delete_supervised_producers(Producers),
+    pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT),
     ok.

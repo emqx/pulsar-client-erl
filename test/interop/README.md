@@ -21,7 +21,7 @@ This test verifies interoperability between:
 
 ## Files
 
-- `interop_single_message_producer.erl` - Erlang script that produces messages with configurable `batch_size` (defaults to 1)
+- `interop_single_message_producer.escript` - Erlang script that produces messages with configurable `batch_size` (defaults to 1)
 - `interop_key_shared_consumer.py` - Python script that consumes with Key_Shared strategy (multiple consumers)
 - `run_interop_test.sh` - Test runner script that orchestrates producer + multiple consumers
 
@@ -146,13 +146,13 @@ You can test different batch sizes by passing the `batch_size` parameter to the 
 
 ```bash
 # Test with single message format (batch_size=1) - Recommended
-escript interop_single_message_producer.erl pulsar://localhost:6650 persistent://public/default/interop-test 50
+escript interop_single_message_producer.escript pulsar://localhost:6650 persistent://public/default/interop-test 50
 
 # Test with batch format (batch_size=2) - ⚠️ Expected to fail
-escript interop_single_message_producer.erl pulsar://localhost:6650 persistent://public/default/interop-test 50 2
+escript interop_single_message_producer.escript pulsar://localhost:6650 persistent://public/default/interop-test 50 2
 
 # Test with larger batches (batch_size=5) - ⚠️ Expected to fail
-escript interop_single_message_producer.erl pulsar://localhost:6650 persistent://public/default/interop-test 50 5
+escript interop_single_message_producer.escript pulsar://localhost:6650 persistent://public/default/interop-test 50 5
 ```
 
 **⚠️ Important**: The default `batch_size` is 1 (single message format). Tests with `BATCH_SIZE > 1` are expected to fail because batch messages may not distribute correctly across Key_Shared consumers, causing all messages to be consumed by a single consumer.

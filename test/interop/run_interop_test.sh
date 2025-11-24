@@ -56,7 +56,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Check if Erlang script exists
-ERL_SCRIPT="$SCRIPT_DIR/interop_single_message_producer.erl"
+ERL_SCRIPT="$SCRIPT_DIR/interop_single_message_producer.escript"
 if [ ! -f "$ERL_SCRIPT" ]; then
     echo -e "${RED}Error: Erlang script not found: $ERL_SCRIPT${NC}"
     exit 1

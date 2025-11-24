@@ -248,7 +248,8 @@ t_single_message_send_batch_size_1(Config) ->
     Messages = [
         #{key => <<"key1">>, value => <<"value1">>},
         #{key => <<"key2">>, value => <<"value2">>},
-        #{key => <<"key3">>, value => <<"value3">>}
+        #{key => <<"key3">>, value => <<"value3">>},
+        #{key => undefined, value => <<"value4">>}
     ],
 
     %% Send messages synchronously to verify they're sent individually
@@ -262,7 +263,7 @@ t_single_message_send_batch_size_1(Config) ->
 
     %% Verify each message got its own sequence_id
     SequenceIds = [maps:get(sequence_id, R) || R <- Results],
-    ?assertEqual(3, length(SequenceIds)),
+    ?assertEqual(4, length(SequenceIds)),
     %% Verify sequence IDs are sequential (each message sent individually)
     ?assertEqual(SequenceIds, lists:usort(SequenceIds)),
 
@@ -279,14 +280,14 @@ t_single_message_send_batch_size_1(Config) ->
     WaitForCallbacks = fun
         Wait(0) ->
             CallbackCount = ets:info(ReceivedMessages, size),
-            case CallbackCount >= 3 of
+            case CallbackCount >= 4 of
                 true -> ok;
-                false -> ct:fail("Expected at least 3 callbacks, got ~p", [CallbackCount])
+                false -> ct:fail("Expected at least 4 callbacks, got ~p", [CallbackCount])
             end;
         Wait(Retries) ->
             timer:sleep(100),
             CallbackCount = ets:info(ReceivedMessages, size),
-            case CallbackCount >= 3 of
+            case CallbackCount >= 4 of
                 true -> ok;
                 false -> Wait(Retries - 1)
             end

@@ -55,6 +55,16 @@ ensure_present(ClientId, Hosts, Opts) ->
 
 %% ensure client stopped and deleted under supervisor
 ensure_absence(ClientId) ->
+    %% Spanw to ensure terminate_child and delete_child are always called
+    %% atomically. The supervisor shutdown is 5s, so this receive will
+    %% not block forever.
+    {_, Mref} = spawn_monitor(fun() -> do_ensure_absence(ClientId) end),
+    receive
+        {'DOWN', Mref, process, _, _} ->
+            ok
+    end.
+
+do_ensure_absence(ClientId) ->
     case supervisor:terminate_child(?SUPERVISOR, child_id(ClientId)) of
         ok -> ok = supervisor:delete_child(?SUPERVISOR, child_id(ClientId));
         {error, not_found} -> ok
@@ -68,6 +78,7 @@ child_spec(ClientId, Servers, Opts) ->
       start => {pulsar_client_manager, start_link, [ClientId, Servers, Opts]},
       restart => permanent,
       type => worker,
+      modules => [pulsar_client_manager],
       shutdown => 5_000
     }.
 

@@ -46,6 +46,13 @@ ensure_present(ClientId, Topic, ProducerOpts) ->
 
 %% ensure client stopped and deleted under supervisor
 ensure_absence(ClientId, Name) ->
+    {_, Mref} = erlang:spawn_monitor(fun() -> do_ensure_absence(ClientId, Name) end),
+    receive
+        {'DOWN', Mref, process, _, _} ->
+            ok
+    end.
+
+do_ensure_absence(ClientId, Name) ->
     Id = ?WORKER_ID(ClientId, Name),
     case supervisor:terminate_child(?SUPERVISOR, Id) of
         ok ->
@@ -61,7 +68,8 @@ child_spec(ClientId, Topic, ProducerOpts) ->
       start => {pulsar_producers, start_link, [ClientId, Topic, ProducerOpts]},
       restart => transient,
       type => worker,
-      modules => [pulsar_producers]
+      modules => [pulsar_producers],
+      shutdown => 5_000
     }.
 
 get_name(ProducerOpts) ->

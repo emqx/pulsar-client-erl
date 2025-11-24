@@ -29,6 +29,14 @@ jobs:
           docker exec -i erlang sh -c "make eunit"
           docker exec -i erlang sh -c "make ct"
           docker exec -i erlang sh -c "make cover"
+      - name: run interop test
+        env:
+          PULSAR_TAG: ${{ matrix.pulsar_tag }}
+        run: |
+          docker exec -i erlang sh -c "apt-get update && apt-get install -y python3 python3-pip python3-venv"
+          docker exec -i erlang sh -c "python3 -m venv /tmp/venv && /tmp/venv/bin/pip install pulsar-client"
+          docker exec -i erlang sh -c "make compile"
+          docker exec -i erlang sh -c "cd test/interop && export PATH=/tmp/venv/bin:\$PATH && PULSAR_HOST=pulsar://pulsar:6650 ./run_interop_test.sh"
       - name: get container logs on failure
         if: failure()
         run: |

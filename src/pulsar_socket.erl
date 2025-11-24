@@ -27,6 +27,7 @@
         , send_set_flow_packet/4
         , send_ack_packet/5
         , encode_send_batch_message_packet/5
+        , encode_send_single_message_packet/5
         , send_batch_message_packet/7
         , send_create_producer_packet/5
         , ping/2
@@ -116,6 +117,14 @@ encode_send_batch_message_packet(Messages, SequenceId, ProducerId, ProducerName,
     BatchMsg = batch_message_cmd(Messages, Opts),
     MsgMetadata = batch_message_cmd_metadata(ProducerName, SequenceId, Len),
     {Len, pulsar_protocol_frame:send(SendCmd, MsgMetadata, BatchMsg)}.
+
+encode_send_single_message_packet(Message, SequenceId, ProducerId, ProducerName, Opts) ->
+    SendCmd = message_snd_cmd(1, ProducerId, SequenceId),
+    Compression = compression_type(opt(compression, Opts, no_compression)),
+    #{key := Key, value := Msg} = Message,
+    Msg1 = maybe_compression(Msg, Compression),
+    MsgMetadata = single_message_cmd_metadata(ProducerName, SequenceId, Key, erlang:iolist_size(Msg), Compression),
+    {1, pulsar_protocol_frame:send(SendCmd, MsgMetadata, Msg1)}.
 
 send_create_producer_packet(Sock, Topic, RequestId, ProducerId, Opts) ->
     Mod = tcp_module(Opts),
@@ -235,6 +244,22 @@ batch_message_cmd_metadata(ProducerName, SequenceId, Len) ->
         publish_time => erlang:system_time(millisecond),
         compression => 'NONE',
         num_messages_in_batch => Len
+    }.
+
+single_message_cmd_metadata(ProducerName, SequenceId, undefined, Size, Compression) ->
+    BaseMetadata = #{
+        producer_name => ProducerName,
+        sequence_id => SequenceId,
+        publish_time => erlang:system_time(millisecond),
+        compression => Compression
+    },
+    case Compression of
+        'NONE' -> BaseMetadata;
+        _ -> BaseMetadata#{uncompressed_size => Size}
+    end;
+single_message_cmd_metadata(ProducerName, SequenceId, Key, Size, Compression) ->
+    (single_message_cmd_metadata(ProducerName, SequenceId, undefined, Size, Compression))#{
+        partition_key => Key
     }.
 
 compression_type(snappy) ->'SNAPPY';

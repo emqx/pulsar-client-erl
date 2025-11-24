@@ -252,7 +252,7 @@ handle_cast(_Req, State) ->
     {noreply, State, hibernate}.
 
 handle_info({'EXIT', Parent, Reason}, State = #state{parent = Parent}) ->
-    {stop, {shutdown, Reason}, State};
+    {stop, Reason, State};
 handle_info({Transport, Sock, Bin}, State = #state{sock = Sock}) when Transport == tcp; Transport == ssl ->
     {noreply, ?MODULE:handle_response(pulsar_protocol_frame:parse(Bin), State)};
 handle_info({Error, Sock, Reason}, State = #state{sock = Sock})

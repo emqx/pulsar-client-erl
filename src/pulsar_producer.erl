@@ -141,7 +141,7 @@
     request_id := integer(),
     requests := #{sequence_id() =>
                       ?INFLIGHT_REQ(
-                         replayq:ack_ref(),
+                         replayq:ack_ref() | undefined,
                          [{gen_statem:from() | undefined,
                            {timestamp(), [pulsar:message()]}}],
                          _BatchSize :: non_neg_integer()
@@ -597,7 +597,7 @@ handle_response({send_receipt, Resp = #{sequence_id := SequenceId}}, State) ->
             _ = invoke_callback(Callback, {ok, Resp}),
             {keep_state, State};
         ?INFLIGHT_REQ(QAckRef, FromsToMessages, BatchSize) ->
-            ok = replayq:ack(Q, QAckRef),
+            ok = replayq_ack(Q, QAckRef),
             lists:foreach(
               fun({undefined, {_TS, Messages}}) ->
                    BatchLen = length(Messages),
@@ -638,6 +638,17 @@ send_batch_payload(Messages, SequenceId, #{
         }) ->
     pulsar_socket_writer:send_batch_async(SockPid, Topic, Messages, SequenceId,
                                           ProducerId, ProducerName, Opts).
+
+-spec send_single_payload(pulsar:message(), sequence_id(), state()) -> ok.
+send_single_payload(Message, SequenceId, #{
+            partitiontopic := Topic,
+            producer_id := ProducerId,
+            producer_name := ProducerName,
+            sock_pid := SockPid,
+            opts := Opts
+        }) ->
+    pulsar_socket_writer:send_single_async(SockPid, Topic, Message, SequenceId,
+                                           ProducerId, ProducerName, Opts).
 
 start_keepalive() ->
     erlang:send_after(30_000, self(), ping).
@@ -758,7 +769,7 @@ handle_overflow(State0 = #{replayq := Q, callback := Callback}, IsHighMemOverflo
     end,
     {NewQ, QAckRef, Items0} =
         replayq:pop(Q, #{bytes_limit => {BytesMode, Overflow}, count_limit => 999999999}),
-    ok = replayq:ack(NewQ, QAckRef),
+    ok = replayq_ack(NewQ, QAckRef),
     maybe_log_discard(State0, length(Items0)),
     Items = [{From, Msgs} || ?Q_ITEM(From, _Now, Msgs) <- Items0],
     reply_with_error(Items, Callback, {error, overflow}),
@@ -884,12 +895,19 @@ do_send_to_pulsar(State0) ->
     case FromsToMessages of
         [] ->
             %% all expired, immediately ack replayq batch and continue
-            ok = replayq:ack(Q, QAckRef),
+            ok = replayq_ack(Q, QAckRef),
             maybe_send_to_pulsar(State1);
+        [{From, {Timestamp, Msgs}}] when BatchSize =:= 1 ->
+            State2 = send_single_messages(From, Timestamp, QAckRef, State1, Msgs),
+            InflightCalls = InflightCalls0 + length(Msgs),
+            pulsar_metrics:inflight_set(State2, InflightCalls),
+            State = State2#{inflight_calls := InflightCalls},
+            maybe_send_to_pulsar(State);
         [_ | _] ->
+            %% Batch multiple messages together
             FinalBatch = [Msg || {_From, {_Timestamp, Msgs}} <-
-                                     FromsToMessages,
-                                 Msg <- Msgs],
+                                        FromsToMessages,
+                                    Msg <- Msgs],
             FinalBatchSize = length(FinalBatch),
             send_batch_payload(FinalBatch, SequenceId, State0),
             Requests = Requests0#{SequenceId => ?INFLIGHT_REQ(QAckRef, FromsToMessages, FinalBatchSize)},
@@ -898,6 +916,29 @@ do_send_to_pulsar(State0) ->
             State2 = State1#{requests := Requests, inflight_calls := InflightCalls},
             State = next_sequence_id(State2),
             maybe_send_to_pulsar(State)
+    end.
+
+-spec send_single_messages(gen_statem:from() | per_request_callback_int() | undefined,
+                           timestamp(), replayq:ack_ref(), state(), [pulsar:message()]) -> state().
+send_single_messages(From, Timestamp, QAckRef, State0, [Msg | Msgs]) ->
+    #{sequence_id := SequenceId,
+      requests := Requests0
+     } = State0,
+    %% This is the last message in the caller's batch
+    send_single_payload(Msg, SequenceId, State0),
+    case Msgs =:= [] of
+        true ->
+            %% Associate replayq's ack reference to this request
+            %% So when the receipt is received, queue can be acked.
+            Requests = Requests0#{SequenceId => ?INFLIGHT_REQ(QAckRef, [{From, {Timestamp, [Msg]}}], 1)},
+            next_sequence_id(State0#{requests => Requests});
+        false ->
+            %% Associate no replayq or caller references to the preceding requests
+            NoQAck = undefined,
+            NoCaller = undefined,
+            Requests = Requests0#{SequenceId => ?INFLIGHT_REQ(NoQAck, [{NoCaller, {Timestamp, [Msg]}}], 1)},
+            State = next_sequence_id(State0#{requests => Requests}),
+            send_single_messages(From, Timestamp, QAckRef, State, Msgs)
     end.
 
 -spec reply_expired_messages([{gen_statem:from() | per_request_callback_int() | undefined,
@@ -954,6 +995,7 @@ resend_sent_requests(State) ->
      , requests := Requests0
      , replayq := Q
      , opts := ProducerOpts
+     , batch_size := BatchSize
      } = State,
     Now = now_ts(),
     RetentionPeriod = maps:get(retention_period, ProducerOpts, infinity),
@@ -976,13 +1018,20 @@ resend_sent_requests(State) ->
                Acc = case Messages of
                    [] ->
                        ?tp(pulsar_producer_resend_all_expired, #{}),
-                       ok = replayq:ack(Q, QAckRef),
+                       ok = replayq_ack(Q, QAckRef),
                        AccIn;
                    [_ | _] ->
-                       send_batch_payload([Msg || {_From, {_Ts, Msgs}} <- Messages,
+                       AllMessages = [Msg || {_From, {_Ts, Msgs}} <- Messages,
                                                   Msg <- Msgs],
-                                          SequenceId, State),
-                       AccIn#{SequenceId => ?INFLIGHT_REQ(QAckRef, Messages, length(Messages))}
+                       case {BatchSize, AllMessages} of
+                           {1, [Msg1]} ->
+                               %% Resend as single message (batch_size was 1)
+                               send_single_payload(Msg1, SequenceId, State);
+                           _ ->
+                               %% Resend as batch
+                               send_batch_payload(AllMessages, SequenceId, State)
+                       end,
+                       AccIn#{SequenceId => ?INFLIGHT_REQ(QAckRef, Messages, length(AllMessages))}
                end,
                {Acc, DroppedAcc + Dropped}
           end,
@@ -1085,6 +1134,9 @@ notify_state_change(undefined, _ProducerState) ->
 notify_state_change({Fun, Args}, ProducerState) ->
     _ = apply(Fun, [ProducerState | Args]),
     ok.
+
+replayq_ack(_Q, undefined) -> ok;
+replayq_ack(Q, QAckRef) -> ok = replayq:ack(Q, QAckRef).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

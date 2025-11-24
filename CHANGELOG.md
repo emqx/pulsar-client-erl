@@ -1,3 +1,10 @@
+# 2.1.2
+
+- When `batch_size` is configured to 1, messages are now sent as single message produce
+  requests without batch headers, reducing protocol overhead. This uses the Pulsar protocol's
+  native single message format where `partition_key` is included directly in MessageMetadata
+  instead of SingleMessageMetadata headers.
+
 # 2.1.1
 
 - Fix compile warning about `format_status/2` deprecation.

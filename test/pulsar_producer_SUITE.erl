@@ -34,6 +34,7 @@ all() ->
     , t_port_exit
     , t_single_message_encoding
     , t_single_message_send_batch_size_1
+    , t_batch_size_1_multiple_messages_in_one_call
     ].
 
 init_per_suite(Config) ->
@@ -78,7 +79,8 @@ init_per_testcase(TestCase, Config) when
     , {async_counter, Counter}
     | Config];
 init_per_testcase(TestCase, Config) when
-    TestCase =:= t_single_message_send_batch_size_1
+    TestCase =:= t_single_message_send_batch_size_1;
+    TestCase =:= t_batch_size_1_multiple_messages_in_one_call
 ->
     PulsarHost = os:getenv("PULSAR_HOST", ?DEFAULT_PULSAR_HOST),
     [ {pulsar_host, PulsarHost} | Config ];
@@ -93,6 +95,9 @@ end_per_testcase(TestCase, Config) when
     pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT),
     ok;
 end_per_testcase(_TestCase = t_single_message_send_batch_size_1, _Config) ->
+    %% Cleanup is done in the test itself
+    ok;
+end_per_testcase(_TestCase = t_batch_size_1_multiple_messages_in_one_call, _Config) ->
     %% Cleanup is done in the test itself
     ok;
 end_per_testcase(_TestCase, _Config) ->
@@ -276,6 +281,85 @@ t_single_message_send_batch_size_1(Config) ->
     ),
 
     %% Verify callbacks were called for each async message
+    %% Wait for callbacks to arrive (they're async)
+    WaitForCallbacks = fun
+        Wait(0) ->
+            CallbackCount = ets:info(ReceivedMessages, size),
+            case CallbackCount >= 4 of
+                true -> ok;
+                false -> ct:fail("Expected at least 4 callbacks, got ~p", [CallbackCount])
+            end;
+        Wait(Retries) ->
+            timer:sleep(100),
+            CallbackCount = ets:info(ReceivedMessages, size),
+            case CallbackCount >= 4 of
+                true -> ok;
+                false -> Wait(Retries - 1)
+            end
+    end,
+    WaitForCallbacks(50),  %% Wait up to 5 seconds
+
+    %% Cleanup
+    ets:delete(ReceivedMessages),
+    pulsar:stop_and_delete_supervised_producers(Producers),
+    pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT),
+    ok.
+
+%% Test that when batch_size is 1, multiple messages in a single call are sent individually
+t_batch_size_1_multiple_messages_in_one_call(Config) ->
+    PulsarHost = ?config(pulsar_host, Config),
+    {ok, _ClientPid} = pulsar:ensure_supervised_client(?TEST_SUIT_CLIENT, [PulsarHost], #{}),
+
+    TestPID = self(),
+    ReceivedMessages = ets:new(received_messages, [ordered_set, public]),
+
+    Callback =
+        fun(Response) ->
+          ets:insert(ReceivedMessages, {erlang:monotonic_time(), Response}),
+          erlang:send(TestPID, {callback, Response}),
+          ok
+        end,
+
+    %% Create producer with batch_size = 1
+    ProducerOpts = #{ batch_size => 1
+                    , strategy => random
+                    , callback => Callback
+                    , replayq_dir => "/tmp/replayq_batch1_multi_test"
+                    , replayq_seg_bytes => 20 * 1024 * 1024
+                    , replayq_offload_mode => false
+                    , replayq_max_total_bytes => 1_000_000_000
+                    },
+    {ok, Producers} = pulsar:ensure_supervised_producers( ?TEST_SUIT_CLIENT
+                                                         , <<"batch1-multi-topic">>
+                                                         , ProducerOpts
+                                                         ),
+
+    %% Wait for producer to connect
+    {_, ProducerPid} = pulsar_producers:pick_producer(Producers, [#{key => <<"k">>, value => <<"v">>}]),
+    pulsar_test_utils:wait_for_state(ProducerPid, connected, _Retries = 5, _Sleep = 5_000),
+
+    %% Send multiple messages in a single call - this tests the case where
+    %% batch_size=1 but caller supplies multiple messages
+    Messages = [
+        #{key => <<"key1">>, value => <<"value1">>},
+        #{key => <<"key2">>, value => <<"value2">>},
+        #{key => <<"key3">>, value => <<"value3">>},
+        #{key => undefined, value => <<"value4">>}
+    ],
+
+    %% Send all messages in a single call - they should be sent individually
+    {ok, Result} = pulsar:send_sync(Producers, Messages, 10_000),
+
+    %% When batch_size=1, even though we sent multiple messages in one call,
+    %% they should be sent individually, so we should get a single result
+    %% (the last message's receipt)
+    ?assert(is_map(Result)),
+    ?assert(maps:is_key(sequence_id, Result)),
+
+    %% Now send messages asynchronously in a single call
+    {ok, _} = pulsar:send(Producers, Messages),
+
+    %% Verify callbacks were called for each message
     %% Wait for callbacks to arrive (they're async)
     WaitForCallbacks = fun
         Wait(0) ->

@@ -995,6 +995,7 @@ resend_sent_requests(State) ->
      , requests := Requests0
      , replayq := Q
      , opts := ProducerOpts
+     , batch_size := BatchSize
      } = State,
     Now = now_ts(),
     RetentionPeriod = maps:get(retention_period, ProducerOpts, infinity),
@@ -1022,10 +1023,10 @@ resend_sent_requests(State) ->
                    [_ | _] ->
                        AllMessages = [Msg || {_From, {_Ts, Msgs}} <- Messages,
                                                   Msg <- Msgs],
-                       case {_BatchSize, AllMessages} of
-                           {1, [Msg]} ->
+                       case {BatchSize, AllMessages} of
+                           {1, [Msg1]} ->
                                %% Resend as single message (batch_size was 1)
-                               send_single_payload(Msg, SequenceId, State);
+                               send_single_payload(Msg1, SequenceId, State);
                            _ ->
                                %% Resend as batch
                                send_batch_payload(AllMessages, SequenceId, State)

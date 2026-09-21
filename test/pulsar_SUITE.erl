@@ -190,6 +190,7 @@ t_pulsar_client(Config) ->
         pulsar_client_manager:lookup_topic(?TEST_SUIT_CLIENT, <<"test-partition-0">>, 1_000)),
 
     ?assertEqual(true, pulsar_client_manager:get_status(?TEST_SUIT_CLIENT, 1_000)),
+    ?assertEqual(ok, pulsar_client_manager:get_status_details(?TEST_SUIT_CLIENT, 1_000)),
 
     ?assertEqual(ok, pulsar:stop_and_delete_supervised_client(?TEST_SUIT_CLIENT)),
 

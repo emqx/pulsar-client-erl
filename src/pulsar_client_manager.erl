@@ -34,6 +34,7 @@
         ]).
 
 -export([ get_status/2
+        , get_status_details/2
         , get_alive_pulsar_url/2
         ]).
 
@@ -69,6 +70,7 @@
 -record(lookup_topic, {deadline :: infinity | integer(), partition_topic :: partition_topic()}).
 -record(lookup_topic_async, {from, partition_topic :: partition_topic()}).
 -record(get_status, {}).
+-record(get_status_details, {}).
 -record(get_alive_pulsar_url, {}).
 -record(get_workers, {}).
 
@@ -115,6 +117,16 @@ get_status(ClientId, Timeout) ->
             false
     end.
 
+get_status_details(ClientId, Timeout) ->
+    try
+        gen_server:call(ClientId, #get_status_details{}, Timeout)
+    catch
+        exit:{noproc, _} ->
+            {error, client_manager_down};
+        exit:{timeout, _} ->
+            {error, client_manager_call_timeout}
+    end.
+
 get_alive_pulsar_url(ClientId, Timeout) ->
     gen_server:call(ClientId, #get_alive_pulsar_url{}, Timeout).
 
@@ -151,6 +163,9 @@ handle_call(#get_workers{}, _From, State) ->
     {reply, Workers, State};
 handle_call(#get_status{}, _From, State0) ->
     {Reply, State} = handle_get_status(State0),
+    {reply, Reply, State};
+handle_call(#get_status_details{}, _From, State0) ->
+    {Reply, State} = handle_get_status_details(State0),
     {reply, Reply, State};
 handle_call(#get_alive_pulsar_url{}, _From, State0) ->
     {Reply, State} = handle_get_alive_pulsar_url(State0),
@@ -195,17 +210,25 @@ terminate(_Reason, #{?workers := Workers}) ->
 %%--------------------------------------------------------------------
 
 handle_get_status(State0) ->
+    case handle_get_status_details(State0) of
+        {ok, State} ->
+            {true, State};
+        {{error, _}, State} ->
+            {false, State}
+    end.
+
+handle_get_status_details(State0) ->
     case alive_workers(State0) of
         [] ->
             case spawn_any_and_wait_connected(State0) of
                 {{ok, _}, State} ->
-                    {true, State};
-                {{error, _}, State} ->
-                    {false, State}
+                    {ok, State};
+                {{error, Reason}, State} ->
+                    {{error, Reason}, State}
             end;
         [_ | _] ->
             %% Clients shut themselves down if no pong received after a timeout.
-            {true, State0}
+            {ok, State0}
     end.
 
 handle_get_alive_pulsar_url(State0) ->
